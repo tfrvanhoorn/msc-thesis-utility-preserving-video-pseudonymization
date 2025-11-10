@@ -1,0 +1,1 @@
+This folder contains working agreements, meeting notes, and planning artifacts.
