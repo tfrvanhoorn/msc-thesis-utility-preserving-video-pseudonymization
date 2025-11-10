@@ -32,11 +32,11 @@ Structured milestone and meeting timelines for the MSc thesis trajectory.
 | 16 Jan 2026   | David Tax        | Niek Brouwer                |                                  |
 | 29 Jan 2026   | Bernd Dudzik     | Sara Costa                  |                                  |
 | 12 Feb 2026   | Hayley Hung      | Zonghuan Li                 |                                  |
-| 26 Feb 2026   | Thomas Abeel     | Hesam Araghi                |                                  |
+| 26 Feb 2026   | Thomas Abeel     | Hesam Araghi                | **My 1st Presentation**          |
 | 12 March 2026 | Jing Sun         | Zih-Yi Lin                  |                                  |
 | 26 March 2026 | Chirag Raman     | Alex de los Santos Subirats |                                  |
 | 9 April 2026  | Jan van Gemert   | Lilian Li                   |                                  |
-| 23 April 2026 | Jasmijn Baaijens | Kiri Bhain                  |                                  |
+| 23 April 2026 | Jasmijn Baaijens | Kiri Bhain                  | **My 2nd Presentation**          |
 | 7 May 2026    | Jesse Krijthe    | Thomas Manhorst             |                                  |
 | 21 May 2026   | Xucong Zhang     | Gabriel Vogel               |                                  |
 | 4 June 2026   | Nergis Tomen     | Arvi Singh                  | **Adjusted time: 10.30 - 12.30** |
