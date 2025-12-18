@@ -1,0 +1,79 @@
+{
+  "experiment": "exp01_quantization",
+  "timestamp": "2025-12-17T14:41:04.176087",
+  "runs": [
+    {
+      "name": "default",
+      "config": {
+        "data": {
+          "dataset_path": "data/celeba",
+          "cache_dir": ".cache/exp01",
+          "dataset_type": "celeba",
+          "options": {
+            "images_subdir": "img_align_celeba",
+            "identity_file": "identity_CelebA.txt",
+            "max_per_identity": null,
+            "max_samples": null
+          }
+        },
+        "detector": {
+          "release_name": "buffalo_l",
+          "name": "buffalo_l",
+          "score_threshold": 0.6,
+          "det_size": [
+            640,
+            640
+          ],
+          "max_faces": 5,
+          "ctx_id": 0,
+          "providers": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "allowed_modules": [
+            "detection",
+            "landmark_2d_106",
+            "landmark_3d_68"
+          ]
+        },
+        "embedding": {
+          "release_name": "antelopev2",
+          "model_name": "glintr100",
+          "embedding_size": 512,
+          "ctx_id": 0,
+          "providers": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ]
+        },
+        "quantization": {
+          "type": "topk_sign_hash",
+          "topk_sign_hash": {
+            "projection_dim": 2048,
+            "top_k": 16,
+            "projection_seed": 17,
+            "projection_path": null,
+            "hash_bits": 32,
+            "hash_name": "sha256"
+          }
+        },
+        "seed": {
+          "secret_key": "REPLACE_WITH_SECURE_KEY",
+          "digest": "sha256"
+        }
+      },
+      "metrics": {
+        "consistency_rate": 0.0,
+        "collision_rate": 0.0,
+        "num_identities": 500,
+        "total_samples": 2521,
+        "intra_tracklet_variance": 0.16866233694553376,
+        "chunk_flip_rate": 0.6836973478939158,
+        "confidence_margin": 0.0,
+        "cluster_entropy": 2.5964338710132187,
+        "cluster_perplexity": 13.415810117884595,
+        "unique_clusters": 602
+      }
+    }
+  ]
+}
