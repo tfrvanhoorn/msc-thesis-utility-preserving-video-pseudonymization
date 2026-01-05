@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -45,7 +46,7 @@ class IdentitySeedPipeline:
         self.quantizer = quantizer
         self.seed_generator = seed_generator
 
-    def process_image(self, image: np.ndarray) -> PipelineResult:
+    def process_image(self, image: np.ndarray, source_path: Path | None = None) -> PipelineResult:
         detections = self.detector.detect(image)
         if not detections:
             logger.debug("No detections returned; skipping downstream pipeline stages")
@@ -53,7 +54,8 @@ class IdentitySeedPipeline:
             return PipelineResult(detections, [], empty, empty, [])
 
         aligned = [self.aligner.align(image, det) for det in detections]
-        embeddings = self.embedder.embed(aligned)
+        source_paths = [source_path] * len(aligned) if source_path is not None else None
+        embeddings = self.embedder.embed(aligned, source_paths=source_paths)
         quantized = self.quantizer.quantize(embeddings)
         seeds = [self.seed_generator.generate(vec) for vec in quantized]
 

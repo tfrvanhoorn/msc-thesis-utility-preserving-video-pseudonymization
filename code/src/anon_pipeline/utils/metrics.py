@@ -127,38 +127,28 @@ def compute_confidence_margin(
     embeddings_by_identity: Dict[str, Sequence[np.ndarray]],
     quantizer: object | None,
 ) -> float:
-    from ..components.quantizer import ProductSphericalKMeansQuantizer
-
     if quantizer is None:
         return 0.0
-
-    if isinstance(quantizer, ProductSphericalKMeansQuantizer):
-        if not quantizer._prototypes:
-            return 0.0
-        prototypes = quantizer._prototypes
-        num_subspaces = quantizer.num_subspaces
-        chunk_dim = prototypes[0].shape[1]
-
-        margins: list[float] = []
-        for arrs in embeddings_by_identity.values():
-            for emb in arrs:
-                if emb.ndim != 2 or emb.shape[1] != num_subspaces * chunk_dim:
-                    continue
-                for chunk_idx in range(num_subspaces):
-                    chunk = emb[:, chunk_idx * chunk_dim : (chunk_idx + 1) * chunk_dim]
-                    normed = chunk / np.clip(np.linalg.norm(chunk, axis=1, keepdims=True), 1e-12, None)
-                    proto = prototypes[chunk_idx]
-                    sims = normed @ proto.T
-                    if sims.shape[1] < 2:
-                        continue
-                    top2 = np.partition(sims, -2, axis=1)[:, -2:]
-                    d1 = top2[:, 1]
-                    d2 = top2[:, 0]
-                    margin = 1.0 - (d1 / np.clip(d2, 1e-12, None))
-                    margins.extend(margin.tolist())
-        return float(np.mean(margins)) if margins else 0.0
-
-    return 0.0
+    centroids = getattr(quantizer, "_centroids", None)
+    if centroids is None:
+        return 0.0
+    margins: list[float] = []
+    for arrs in embeddings_by_identity.values():
+        for emb in arrs:
+            if emb.ndim == 1:
+                emb = emb.reshape(1, -1)
+            if emb.ndim != 2 or emb.shape[1] != centroids.shape[1]:
+                continue
+            normed = emb / np.clip(np.linalg.norm(emb, axis=1, keepdims=True), 1e-12, None)
+            sims = normed @ centroids.T
+            if sims.shape[1] < 2:
+                continue
+            top2 = np.partition(sims, -2, axis=1)[:, -2:]
+            d1 = top2[:, 1]
+            d2 = top2[:, 0]
+            margin = 1.0 - (d1 / np.clip(d2, 1e-12, None))
+            margins.extend(margin.tolist())
+    return float(np.mean(margins)) if margins else 0.0
 
 
 def summarize_metrics(

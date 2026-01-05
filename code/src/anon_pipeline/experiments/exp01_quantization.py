@@ -105,7 +105,7 @@ def _run_sequential(
     for batch in _batched(samples, batch_size):
         for sample in batch:
             image = load_image(sample.path)
-            result = pipeline.process_image(image)
+            result = pipeline.process_image(image, source_path=sample.path)
             _log_pipeline_debug(sample, result)
             summary = _summarize_sample(sample, result)
             state.record(summary)
@@ -127,7 +127,7 @@ def _run_parallel(
             summaries: List[SampleSummary] = []
             for sample in batch:
                 image = load_image(sample.path)
-                result = pipeline.process_image(image)
+                result = pipeline.process_image(image, source_path=sample.path)
                 _log_pipeline_debug(sample, result)
                 summaries.append(_summarize_sample(sample, result))
             return summaries
@@ -252,14 +252,10 @@ def _maybe_train_quantizer(
     )
     embeddings = _collect_embeddings_for_training(train_samples, pipeline, max_train)
     quantizer.fit(embeddings)
-    if hasattr(quantizer, "_prototypes"):
-        prot = getattr(quantizer, "_prototypes", None)
-        if prot is not None:
-            if isinstance(prot, list):
-                shapes = [p.shape for p in prot if hasattr(p, "shape")]
-                logger.info("Quantizer prototypes ready: subspaces=%s shapes=%s", len(prot), shapes)
-            elif hasattr(prot, "shape"):
-                logger.info("Quantizer prototypes ready: shape=%s", prot.shape)
+    if hasattr(quantizer, "_centroids"):
+        centroids = getattr(quantizer, "_centroids", None)
+        if centroids is not None and hasattr(centroids, "shape"):
+            logger.info("Quantizer centroids ready: shape=%s", centroids.shape)
     shared_state = None
     if hasattr(quantizer, "export_state"):
         shared_state = quantizer.export_state()
@@ -319,7 +315,8 @@ def _collect_embeddings_for_training(
         if not detections:
             continue
         aligned = [pipeline.aligner.align(image, det) for det in detections]
-        embeddings = pipeline.embedder.embed(aligned)
+        source_paths = [sample.path] * len(aligned)
+        embeddings = pipeline.embedder.embed(aligned, source_paths=source_paths)
         if embeddings.size == 0:
             continue
         collected.append(embeddings)

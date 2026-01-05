@@ -26,7 +26,13 @@ class DetectorConfig:
 
 
 @dataclass
+class FeatureSelectorConfig:
+    keep: Sequence[str] = field(default_factory=list)
+
+
+@dataclass
 class EmbeddingConfig:
+    method: str = "arcface"
     name: str = "arcface_r100_v1"
     release_name: Optional[str] = None
     model_name: Optional[str] = None
@@ -34,17 +40,19 @@ class EmbeddingConfig:
     ctx_id: int = -1
     providers: Sequence[str] = field(default_factory=lambda: ["CPUExecutionProvider"])
     root: Optional[Path] = None
+    feature_selector: FeatureSelectorConfig = field(default_factory=FeatureSelectorConfig)
 
 @dataclass
 class QuantizationConfig:
-    num_subspaces: int = 32
+    method: str = "auto"
     num_prototypes: int = 64
     max_iters: int = 20
     tol: float = 1e-4
     random_seed: Optional[int] = 123
-    output_mode: str = "majority"
     train_split: float = 0.0
     max_train_samples: Optional[int] = None
+    output_dim: int = 2048
+    input_dim: Optional[int] = None
 
 
 @dataclass
@@ -80,14 +88,25 @@ class ExperimentConfig:
 
         max_train_raw = quantization_cfg.get("max_train_samples")
         quantization_dict = {
-            "num_subspaces": quantization_cfg.get("num_subspaces", 32),
+            "method": quantization_cfg.get("method", "auto"),
             "num_prototypes": quantization_cfg.get("num_prototypes", 64),
             "max_iters": quantization_cfg.get("max_iters", 20),
             "tol": quantization_cfg.get("tol", 1e-4),
             "random_seed": quantization_cfg.get("random_seed", 123),
-            "output_mode": quantization_cfg.get("output_mode", "majority"),
             "train_split": float(quantization_cfg.get("train_split", 0.0) or 0.0),
             "max_train_samples": int(max_train_raw) if max_train_raw not in (None, "") else None,
+            "output_dim": int(quantization_cfg.get("output_dim", 2048)),
+            "input_dim": int(quantization_cfg["input_dim"]) if "input_dim" in quantization_cfg else None,
+        }
+
+        feature_selector_cfg = FeatureSelectorConfig(**embedding_cfg.get("feature_selector", {}))
+        embedding_kwargs = {
+            **embedding_cfg,
+            "method": embedding_cfg.get("method") or embedding_cfg.get("type") or "arcface",
+            "root": _path_or_none(embedding_cfg.get("root")),
+            "release_name": embedding_cfg.get("release_name"),
+            "model_name": embedding_cfg.get("model_name") or embedding_cfg.get("name"),
+            "feature_selector": feature_selector_cfg,
         }
 
         return cls(
@@ -104,14 +123,7 @@ class ExperimentConfig:
                     "release_name": detector_cfg.get("release_name"),
                 }
             ),
-            embedding=EmbeddingConfig(
-                **{
-                    **embedding_cfg,
-                    "root": _path_or_none(embedding_cfg.get("root")),
-                    "release_name": embedding_cfg.get("release_name"),
-                    "model_name": embedding_cfg.get("model_name") or embedding_cfg.get("name"),
-                }
-            ),
+            embedding=EmbeddingConfig(**embedding_kwargs),
             quantization=QuantizationConfig(**quantization_dict),
             seed=SeedConfig(**seed_cfg),
         )

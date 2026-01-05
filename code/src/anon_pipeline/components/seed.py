@@ -21,6 +21,6 @@ class HmacSeedGenerator(SeedGenerator):
         self.digest = digest
 
     def generate(self, quantized: np.ndarray) -> str:
-        payload = quantized.astype("float32").tobytes()
+        payload = quantized.astype("int32").tobytes()
         digest = hmac.new(self.secret_key, payload, self.digest)
         return digest.hexdigest()

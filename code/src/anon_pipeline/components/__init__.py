@@ -1,10 +1,8 @@
 from .detector import FaceDetector, RetinaFaceDetector, Detection
-from .embedding import EmbeddingModel, ArcFaceEmbedder
-from .quantizer import (
-    Quantizer,
-    ProductSphericalKMeansQuantizer,
-)
+from .embedding import EmbeddingModel, ArcFaceEmbedder, SemanticAttributeEmbedder
+from .quantizer import Quantizer, GlobalSphericalKMeansQuantizer, IdentityQuantizer, BioHashingQuantizer
 from .seed import SeedGenerator, HmacSeedGenerator
+from .gender import GenderClassifier
 
 __all__ = [
     "FaceDetector",
@@ -12,8 +10,12 @@ __all__ = [
     "Detection",
     "EmbeddingModel",
     "ArcFaceEmbedder",
+    "SemanticAttributeEmbedder",
     "Quantizer",
-    "ProductSphericalKMeansQuantizer",
+    "GlobalSphericalKMeansQuantizer",
+    "IdentityQuantizer",
+    "BioHashingQuantizer",
     "SeedGenerator",
     "HmacSeedGenerator",
+    "GenderClassifier",
 ]

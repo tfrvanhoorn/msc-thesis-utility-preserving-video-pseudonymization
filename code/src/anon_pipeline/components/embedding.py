@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 from insightface import model_zoo
 from insightface.utils.storage import ensure_available
 
 
+logger = logging.getLogger(__name__)
+
+
 class EmbeddingModel:
-    def embed(self, aligned_faces: Sequence[np.ndarray]) -> np.ndarray:
+    def embed(self, aligned_faces: Sequence[np.ndarray], source_paths: Sequence[Path] | None = None) -> np.ndarray:
         raise NotImplementedError
 
 
@@ -108,7 +112,7 @@ class ArcFaceEmbedder(EmbeddingModel):
         candidates = sorted(folder.glob("*.onnx"))
         return candidates[-1] if candidates else None
 
-    def embed(self, aligned_faces: Sequence[np.ndarray]) -> np.ndarray:
+    def embed(self, aligned_faces: Sequence[np.ndarray], source_paths: Sequence[Path] | None = None) -> np.ndarray:
         if not aligned_faces:
             size = self.embedding_size or 512
             return np.empty((0, size), dtype=np.float32)
@@ -134,3 +138,61 @@ class ArcFaceEmbedder(EmbeddingModel):
                 feat = self._model.get_feat(bgr)[0]
                 return feat
             raise
+
+
+class SemanticAttributeEmbedder(EmbeddingModel):
+
+    def __init__(
+        self,
+        feature_selector: Mapping[str, Sequence[str]] | Sequence[str] | None = None,
+        feature_classifiers: Mapping[str, object] | None = None,
+        default_value: int = 0,
+    ) -> None:
+        self.default_value = int(default_value != 0)
+        keep: list[str] = []
+        if feature_selector:
+            if isinstance(feature_selector, Mapping):
+                keep = list(feature_selector.get("keep", []))
+            elif hasattr(feature_selector, "keep"):
+                keep = list(getattr(feature_selector, "keep"))
+            else:
+                keep = list(feature_selector)
+        self._keep_names: list[str] = [self._normalize_attr_name(k) for k in keep]
+        self.embedding_size = len(self._keep_names)
+        self._classifiers = {self._normalize_attr_name(k): v for k, v in (feature_classifiers or {}).items()}
+
+    def embed(self, aligned_faces: Sequence[np.ndarray], source_paths: Sequence[Path] | None = None) -> np.ndarray:
+        num_faces = len(aligned_faces)
+        if num_faces == 0:
+            return np.empty((0, self.embedding_size), dtype=np.int64)
+        if self.embedding_size == 0:
+            logger.warning("SemanticAttributeEmbedder has no selected attributes; returning empty embeddings")
+            return np.empty((num_faces, 0), dtype=np.int64)
+
+        paths = list(source_paths) if source_paths else []
+        vectors: list[np.ndarray] = []
+        for idx in range(num_faces):
+            face = aligned_faces[idx]
+            path = paths[idx] if idx < len(paths) else (paths[-1] if paths else None)
+            vectors.append(self._vector_for_face(face, path))
+        return np.vstack(vectors).astype(np.int64, copy=False) if vectors else np.empty((0, self.embedding_size), dtype=np.int64)
+
+    def _vector_for_face(self, face: np.ndarray, path: Path | None) -> np.ndarray:
+        if self.embedding_size == 0:
+            return np.empty((0,), dtype=np.int64)
+        bits = []
+        for name in self._keep_names:
+            cls = self._classifiers.get(name)
+            if cls is None:
+                bits.append(self.default_value)
+            else:
+                try:
+                    bits.append(1 if bool(cls(face, path)) else 0)
+                except Exception:
+                    logger.exception("Classifier for feature '%s' failed; defaulting to %s", name, self.default_value)
+                    bits.append(self.default_value)
+        return np.asarray(bits, dtype=np.int64)
+
+    @staticmethod
+    def _normalize_attr_name(name: str) -> str:
+        return name.replace("-", "_").replace(" ", "_").lower()
