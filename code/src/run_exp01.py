@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 
 from anon_pipeline.experiments.exp01_quantization import run_quantization_sweep
-from anon_pipeline.pipeline import IdentitySeedPipeline, build_identity_seed_pipeline
+from anon_pipeline.quantization_pipeline import IdentitySeedPipeline, build_identity_seed_pipeline
 from anon_pipeline.utils.config_loader import build_config, load_config_payload
 from anon_pipeline.utils.overrides import deep_merge
 

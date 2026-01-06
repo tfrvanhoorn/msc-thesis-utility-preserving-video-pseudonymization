@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import List, Sequence
+from pathlib import Path
 
 import numpy as np
 from insightface.app import FaceAnalysis
-from pathlib import Path
 
 
 logger = logging.getLogger(__name__)

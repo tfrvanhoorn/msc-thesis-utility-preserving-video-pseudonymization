@@ -3,15 +3,15 @@ from __future__ import annotations
 from ..components import (
     ArcFaceEmbedder,
     BioHashingQuantizer,
-    IdentityQuantizer,
-    HmacSeedGenerator,
-    RetinaFaceDetector,
-    GlobalSphericalKMeansQuantizer,
-    SemanticAttributeEmbedder,
     GenderClassifier,
+    GlobalSphericalKMeansQuantizer,
+    HmacSeedGenerator,
+    IdentityQuantizer,
+    RetinaFaceDetector,
+    SemanticAttributeEmbedder,
 )
 from ..config import ExperimentConfig
-from ..utils.alignment import FivePointAffineAligner
+from ..components.alignment import FivePointAffineAligner
 from .identity_seed_pipeline import IdentitySeedPipeline
 
 

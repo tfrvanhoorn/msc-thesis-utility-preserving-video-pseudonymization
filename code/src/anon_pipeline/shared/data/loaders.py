@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, MutableMapping, Sequence
 
-from ..config import DataConfig
+from ...config import DataConfig
 
 DEFAULT_IMAGE_PATTERNS: List[str] = ["*.jpg", "*.jpeg", "*.png"]
 
@@ -43,8 +43,6 @@ class ImageFolderDataset(Iterable[ImageSample]):
                 count += 1
                 if self.max_per_identity and count >= self.max_per_identity:
                     break
-                if not self.images_dir.exists():
-                    raise FileNotFoundError(f"Missing CelebA images directory: {self.images_dir}")
 
     def _discover_identities(self) -> List[str]:
         return sorted([p.name for p in self.root.iterdir() if p.is_dir()])
