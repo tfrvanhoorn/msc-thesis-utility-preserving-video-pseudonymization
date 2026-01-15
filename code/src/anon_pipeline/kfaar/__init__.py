@@ -1,14 +1,30 @@
 from .pipeline import KfaarPipeline, KfaarResult, build_kfaar_pipeline
 from .components import (
     FaceAligner,
-    FivePointAffineAligner,
+    MTCNNAligner,
     FaceDetector,
-    RetinaFaceDetector,
+    MTCNNDetector,
     Detection,
     EmbeddingModel,
-    ArcFaceEmbedder,
+    FacenetEmbedder,
     SemanticAttributeEmbedder,
-    GenderClassifier,
+    ProjectorMLP,
+)
+from .losses import (
+    anonymity_loss,
+    synchronism_loss,
+    diversity_loss,
+    differentiation_loss,
+    total_hpvg_loss,
+    cosine_loss,
+)
+from .config import (
+    DataConfig,
+    DetectorConfig,
+    EmbeddingConfig,
+    ExperimentConfig,
+    FeatureSelectorConfig,
+    SeedConfig,
 )
 
 __all__ = [
@@ -16,12 +32,24 @@ __all__ = [
     "KfaarResult",
     "build_kfaar_pipeline",
     "FaceAligner",
-    "FivePointAffineAligner",
+    "MTCNNAligner",
     "FaceDetector",
-    "RetinaFaceDetector",
+    "MTCNNDetector",
     "Detection",
     "EmbeddingModel",
-    "ArcFaceEmbedder",
+    "FacenetEmbedder",
     "SemanticAttributeEmbedder",
-    "GenderClassifier",
+    "ProjectorMLP",
+    "cosine_loss",
+    "anonymity_loss",
+    "synchronism_loss",
+    "diversity_loss",
+    "differentiation_loss",
+    "total_hpvg_loss",
+    "DataConfig",
+    "DetectorConfig",
+    "EmbeddingConfig",
+    "ExperimentConfig",
+    "FeatureSelectorConfig",
+    "SeedConfig",
 ]

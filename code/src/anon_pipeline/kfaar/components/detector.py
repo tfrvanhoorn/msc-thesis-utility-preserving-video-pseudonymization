@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Sequence
-from pathlib import Path
+from typing import Sequence
 
 import numpy as np
-from insightface.app import FaceAnalysis
+import torch
+from PIL import Image
+from facenet_pytorch import MTCNN
 
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ class Detection:
     bbox: np.ndarray
     landmarks: np.ndarray
     score: float
+    aligned: torch.Tensor | None = None
 
 
 class FaceDetector:
@@ -24,100 +26,72 @@ class FaceDetector:
         raise NotImplementedError
 
 
-class RetinaFaceDetector(FaceDetector):
+class MTCNNDetector(FaceDetector):
     def __init__(
         self,
-        model_name: str = "buffalo_l",
-        score_threshold: float = 0.95,
-        det_size: tuple[int, int] = (640, 640),
+        image_size: int = 160,
+        margin: int = 0,
+        score_threshold: float = 0.8,
+        min_face_size: int | None = 20,
+        keep_all: bool = True,
+        post_process: bool = False,
+        device: str | torch.device | None = None,
         max_faces: int | None = None,
-        ctx_id: int = -1,
-        providers: Sequence[str] | None = None,
-        root: str | None = None,
     ) -> None:
-        self.model_name = model_name
+        self.image_size = image_size
+        self.margin = margin
         self.score_threshold = score_threshold
-        self.det_size = det_size
+        self.min_face_size = min_face_size
+        self.keep_all = keep_all
+        self.post_process = post_process
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
         self.max_faces = max_faces
-        self.ctx_id = ctx_id
-        self.providers = list(providers) if providers else ["CPUExecutionProvider"]
-        self.root = root
-        self._app: FaceAnalysis | None = None
-
-    def _ensure_model(self) -> None:
-        if self._app is not None:
-            return
-        init_kwargs = {
-            "name": self.model_name,
-            "providers": self.providers,
-        }
-        if self.root is not None:
-            init_kwargs["root"] = self.root
-        self._app = FaceAnalysis(**init_kwargs)
-
-        self._app.prepare(ctx_id=self.ctx_id, det_size=self.det_size)
-        if "detection" not in getattr(self._app, "models", {}):
-            root_dir = Path(self.root) if self.root is not None else Path.home() / ".insightface"
-            cache_path = root_dir / "models" / self.model_name
-            raise RuntimeError(
-                f"InsightFace model '{self.model_name}' is missing detection module. "
-                f"Cached path: {cache_path}. Delete that directory to force re-download, then rerun."
-            )
+        self._mtcnn = MTCNN(
+            image_size=image_size,
+            margin=margin,
+            keep_all=keep_all,
+            thresholds=(0.6, 0.7, 0.7),
+            min_face_size=min_face_size,
+            post_process=post_process,
+            device=self.device,
+        )
 
     def detect(self, image: np.ndarray) -> Sequence[Detection]:
-        self._ensure_model()
-        assert self._app is not None
-        logger.debug(
-            "Detector input shape=%s dtype=%s range=(%s-%s)",
-            image.shape,
-            image.dtype,
-            image.min(),
-            image.max(),
-        )
-        bgr = image[:, :, ::-1].copy()
-        faces = self._app.get(bgr)
-        logger.debug(
-            "Raw detector faces=%s scores=%s",
-            len(faces),
-            [float(face.det_score) for face in faces][:5],
-        )
-        detections: List[Detection] = []
-        for face in faces:
-            if face.det_score < self.score_threshold:
+        if image is None:
+            return []
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"Expected HWC RGB image, got shape {image.shape}")
+        pil_image = Image.fromarray(image.astype(np.uint8), mode="RGB")
+
+        with torch.no_grad():
+            boxes, probs, landmarks = self._mtcnn.detect(pil_image, landmarks=True)
+            aligned = None
+            if boxes is not None and len(boxes) > 0:
+                aligned = self._mtcnn.extract(pil_image, boxes, save_path=None)
+
+        if boxes is None or probs is None:
+            return []
+
+        detections: list[Detection] = []
+        for idx, (box, score) in enumerate(zip(boxes, probs)):
+            if score is None or score < self.score_threshold:
                 continue
-            if getattr(face, "bbox", None) is None:
-                logger.warning("Detector returned face without bbox; skipping")
+            lm = landmarks[idx] if landmarks is not None else None
+            if lm is None:
                 continue
-            bbox = face.bbox.astype(np.float32)
-            landmarks = _extract_landmarks(face)
-            if landmarks is None:
-                logger.warning("Detector missing landmarks; skipping face")
-                continue
+            aligned_face = None
+            if aligned is not None and idx < len(aligned):
+                aligned_face = aligned[idx]
             detections.append(
                 Detection(
-                    bbox=bbox,
-                    landmarks=landmarks,
-                    score=float(face.det_score),
+                    bbox=np.asarray(box, dtype=np.float32),
+                    landmarks=np.asarray(lm, dtype=np.float32),
+                    score=float(score),
+                    aligned=aligned_face,
                 )
             )
+
         detections.sort(key=lambda d: d.score, reverse=True)
         if self.max_faces is not None:
             detections = detections[: self.max_faces]
-        logger.debug(
-            "Filtered detections=%s threshold=%s",
-            len(detections),
-            self.score_threshold,
-        )
         return detections
-
-
-def _extract_landmarks(face) -> np.ndarray | None:
-    for attr in ("landmark", "kps", "landmark_2d_106", "landmark_3d_68"):
-        pts = getattr(face, attr, None)
-        if pts is None:
-            continue
-        arr = np.asarray(pts, dtype=np.float32)
-        arr = arr.reshape(-1, 2)
-        if arr.shape[0] >= 5:
-            return arr[:5]
-    return None

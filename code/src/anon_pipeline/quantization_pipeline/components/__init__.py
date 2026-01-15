@@ -1,18 +1,18 @@
-from .alignment import FaceAligner, FivePointAffineAligner
-from .detector import FaceDetector, RetinaFaceDetector, Detection
-from .embedding import EmbeddingModel, ArcFaceEmbedder, SemanticAttributeEmbedder
+from .alignment import FaceAligner, MTCNNAligner
+from .detector import FaceDetector, MTCNNDetector, Detection
+from .embedding import EmbeddingModel, FacenetEmbedder, SemanticAttributeEmbedder
 from .gender import GenderClassifier
 from .quantizer import Quantizer, GlobalSphericalKMeansQuantizer, IdentityQuantizer, BioHashingQuantizer
 from .seed import SeedGenerator, HmacSeedGenerator
 
 __all__ = [
     "FaceAligner",
-    "FivePointAffineAligner",
+    "MTCNNAligner",
     "FaceDetector",
-    "RetinaFaceDetector",
+    "MTCNNDetector",
     "Detection",
     "EmbeddingModel",
-    "ArcFaceEmbedder",
+    "FacenetEmbedder",
     "SemanticAttributeEmbedder",
     "GenderClassifier",
     "Quantizer",

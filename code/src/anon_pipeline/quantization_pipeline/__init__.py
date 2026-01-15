@@ -1,12 +1,12 @@
 from .pipeline import IdentitySeedPipeline, PipelineResult, build_identity_seed_pipeline
 from .components import (
     FaceAligner,
-    FivePointAffineAligner,
+    MTCNNAligner,
     FaceDetector,
-    RetinaFaceDetector,
+    MTCNNDetector,
     Detection,
     EmbeddingModel,
-    ArcFaceEmbedder,
+    FacenetEmbedder,
     SemanticAttributeEmbedder,
     GenderClassifier,
     Quantizer,
@@ -16,18 +16,27 @@ from .components import (
     SeedGenerator,
     HmacSeedGenerator,
 )
+from .config import (
+    DataConfig,
+    DetectorConfig,
+    EmbeddingConfig,
+    FeatureSelectorConfig,
+    QuantizationConfig,
+    QuantizationExperimentConfig,
+    SeedConfig,
+)
 
 __all__ = [
     "IdentitySeedPipeline",
     "PipelineResult",
     "build_identity_seed_pipeline",
     "FaceAligner",
-    "FivePointAffineAligner",
+    "MTCNNAligner",
     "FaceDetector",
-    "RetinaFaceDetector",
+    "MTCNNDetector",
     "Detection",
     "EmbeddingModel",
-    "ArcFaceEmbedder",
+    "FacenetEmbedder",
     "SemanticAttributeEmbedder",
     "GenderClassifier",
     "Quantizer",
@@ -36,4 +45,11 @@ __all__ = [
     "BioHashingQuantizer",
     "SeedGenerator",
     "HmacSeedGenerator",
+    "DataConfig",
+    "DetectorConfig",
+    "EmbeddingConfig",
+    "FeatureSelectorConfig",
+    "QuantizationConfig",
+    "QuantizationExperimentConfig",
+    "SeedConfig",
 ]

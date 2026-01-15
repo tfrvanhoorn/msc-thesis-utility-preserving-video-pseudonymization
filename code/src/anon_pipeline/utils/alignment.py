@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from typing import Protocol
+try:
+    from typing import Protocol
+except ImportError:  # Python < 3.8
+    try:
+        from typing_extensions import Protocol  # type: ignore
+    except ImportError:
+        class Protocol:  # type: ignore
+            pass
 
 import numpy as np
 from insightface.utils.face_align import norm_crop

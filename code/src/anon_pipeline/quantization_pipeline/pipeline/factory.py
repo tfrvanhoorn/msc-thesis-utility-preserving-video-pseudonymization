@@ -1,33 +1,32 @@
 from __future__ import annotations
 
 from ..components import (
-    ArcFaceEmbedder,
     BioHashingQuantizer,
+    FacenetEmbedder,
     GenderClassifier,
     GlobalSphericalKMeansQuantizer,
     HmacSeedGenerator,
     IdentityQuantizer,
-    RetinaFaceDetector,
+    MTCNNDetector,
     SemanticAttributeEmbedder,
 )
-from ..config import ExperimentConfig
-from ..components.alignment import FivePointAffineAligner
+from ..config import QuantizationExperimentConfig
+from ..components.alignment import MTCNNAligner
 from .identity_seed_pipeline import IdentitySeedPipeline
 
 
-def build_identity_seed_pipeline(config: ExperimentConfig) -> IdentitySeedPipeline:
-    detector_kwargs = dict(
-        model_name=config.detector.release_name or config.detector.name,
+def build_identity_seed_pipeline(config: QuantizationExperimentConfig) -> IdentitySeedPipeline:
+    detector = MTCNNDetector(
+        image_size=config.detector.image_size,
+        margin=config.detector.margin,
         score_threshold=config.detector.score_threshold,
-        det_size=tuple(config.detector.det_size),
+        min_face_size=config.detector.min_face_size,
         max_faces=config.detector.max_faces,
-        ctx_id=config.detector.ctx_id,
-        providers=config.detector.providers,
+        keep_all=True,
+        post_process=False,
+        device=config.detector.device,
     )
-    if config.detector.root:
-        detector_kwargs["root"] = str(config.detector.root)
-    detector = RetinaFaceDetector(**detector_kwargs)
-    aligner = FivePointAffineAligner(output_size=112)
+    aligner = MTCNNAligner(output_size=config.detector.image_size)
     embedder = _build_embedder(config)
     quantizer = _build_quantizer(config)
     seed_generator = HmacSeedGenerator(
@@ -43,35 +42,30 @@ def build_identity_seed_pipeline(config: ExperimentConfig) -> IdentitySeedPipeli
     )
 
 
-def _build_embedder(config: ExperimentConfig):
-    method = (config.embedding.method or "arcface").lower()
+def _build_embedder(config: QuantizationExperimentConfig):
+    method = (config.embedding.method or "facenet").lower()
     if method.startswith("semantic"):
         return SemanticAttributeEmbedder(
             feature_selector=config.embedding.feature_selector,
             feature_classifiers=_build_feature_classifiers(config),
         )
 
-    embedder_kwargs = dict(
-        model_name=config.embedding.model_name or config.embedding.name,
-        release_name=config.embedding.release_name,
-        ctx_id=config.embedding.ctx_id,
-        providers=config.embedding.providers,
+    return FacenetEmbedder(
+        pretrained=config.embedding.pretrained,
+        device=config.embedding.device,
     )
-    if config.embedding.root:
-        embedder_kwargs["root"] = str(config.embedding.root)
-    return ArcFaceEmbedder(**embedder_kwargs)
 
 
-def _build_feature_classifiers(config: ExperimentConfig):
+def _build_feature_classifiers(config: QuantizationExperimentConfig):
     keep = getattr(config.embedding.feature_selector, "keep", []) or []
     normalized = [k.replace("-", "_").replace(" ", "_").lower() for k in keep]
 
     gender_model = None
     if "male" in normalized:
         gender_model = GenderClassifier(
-            providers=config.embedding.providers,
-            ctx_id=config.embedding.ctx_id,
-            root=config.embedding.root,
+            providers=None,
+            ctx_id=0,
+            root=None,
             default_value=False,
         )
 
@@ -81,7 +75,7 @@ def _build_feature_classifiers(config: ExperimentConfig):
     return classifiers
 
 
-def _build_quantizer(config: ExperimentConfig):
+def _build_quantizer(config: QuantizationExperimentConfig):
     embed_method = (config.embedding.method or "arcface").lower()
     quant_method = (config.quantization.method or "auto").lower()
     if quant_method == "auto":

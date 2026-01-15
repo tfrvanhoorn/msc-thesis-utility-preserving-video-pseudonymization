@@ -1,65 +1,42 @@
 from __future__ import annotations
 
-from ..components import ArcFaceEmbedder, GenderClassifier, RetinaFaceDetector, SemanticAttributeEmbedder
-from ..components.alignment import FivePointAffineAligner
+from ..components import FacenetEmbedder, MTCNNDetector, SemanticAttributeEmbedder
+from ..components.alignment import MTCNNAligner
 from ..config import ExperimentConfig
 from .kfaar_pipeline import KfaarPipeline
+from ..models import StyleGAN2Generator
 
 
-def build_kfaar_pipeline(config: ExperimentConfig) -> KfaarPipeline:
-    detector_kwargs = dict(
-        model_name=config.detector.release_name or config.detector.name,
+def build_kfaar_pipeline(config: ExperimentConfig, stylegan: StyleGAN2Generator | None = None) -> KfaarPipeline:
+    detector = MTCNNDetector(
+        image_size=config.detector.image_size,
+        margin=config.detector.margin,
         score_threshold=config.detector.score_threshold,
-        det_size=tuple(config.detector.det_size),
+        min_face_size=config.detector.min_face_size,
         max_faces=config.detector.max_faces,
-        ctx_id=config.detector.ctx_id,
-        providers=config.detector.providers,
+        keep_all=True,
+        post_process=False,
+        device=config.detector.device,
     )
-    if config.detector.root:
-        detector_kwargs["root"] = str(config.detector.root)
-    detector = RetinaFaceDetector(**detector_kwargs)
-    aligner = FivePointAffineAligner(output_size=112)
+    aligner = MTCNNAligner(output_size=config.detector.image_size)
     embedder = _build_embedder(config)
     return KfaarPipeline(
         detector=detector,
         aligner=aligner,
         embedder=embedder,
+        stylegan=stylegan,
     )
 
 
 def _build_embedder(config: ExperimentConfig):
-    method = (config.embedding.method or "arcface").lower()
+    method = (config.embedding.method or "facenet").lower()
     if method.startswith("semantic"):
         return SemanticAttributeEmbedder(
             feature_selector=config.embedding.feature_selector,
-            feature_classifiers=_build_feature_classifiers(config),
+            feature_classifiers={},
         )
 
-    embedder_kwargs = dict(
-        model_name=config.embedding.model_name or config.embedding.name,
-        release_name=config.embedding.release_name,
-        ctx_id=config.embedding.ctx_id,
-        providers=config.embedding.providers,
+    return FacenetEmbedder(
+        pretrained=config.embedding.pretrained,
+        device=config.embedding.device,
     )
-    if config.embedding.root:
-        embedder_kwargs["root"] = str(config.embedding.root)
-    return ArcFaceEmbedder(**embedder_kwargs)
-
-
-def _build_feature_classifiers(config: ExperimentConfig):
-    keep = getattr(config.embedding.feature_selector, "keep", []) or []
-    normalized = [k.replace("-", "_").replace(" ", "_").lower() for k in keep]
-
-    gender_model = None
-    if "male" in normalized:
-        gender_model = GenderClassifier(
-            providers=config.embedding.providers,
-            ctx_id=config.embedding.ctx_id,
-            root=config.embedding.root,
-            default_value=False,
-        )
-
-    classifiers = {}
-    if gender_model is not None:
-        classifiers["male"] = gender_model
-    return classifiers

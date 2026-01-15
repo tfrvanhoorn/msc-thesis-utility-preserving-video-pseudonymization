@@ -3,9 +3,18 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, MutableMapping, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence
 
-from ...config import DataConfig
+try:  # Python 3.7 compatibility
+    from typing import Protocol as _Protocol
+except ImportError:  # pragma: no cover
+    from typing_extensions import Protocol as _Protocol
+
+
+class SupportsDataConfig(_Protocol):
+    dataset_path: Path
+    dataset_type: str
+    options: Optional[Dict[str, Any]]
 
 DEFAULT_IMAGE_PATTERNS: List[str] = ["*.jpg", "*.jpeg", "*.png"]
 
@@ -105,7 +114,7 @@ class CelebADataset(Iterable[ImageSample]):
         return entries
 
 
-def build_dataset(config: DataConfig) -> Iterable[ImageSample]:
+def build_dataset(config: SupportsDataConfig) -> Iterable[ImageSample]:
     dataset_type = config.dataset_type.lower()
     builder = _DATASET_BUILDERS.get(dataset_type)
     if builder is None:
@@ -117,12 +126,12 @@ def build_dataset(config: DataConfig) -> Iterable[ImageSample]:
     return builder(config)
 
 
-def iter_samples(config: DataConfig) -> Iterator[ImageSample]:
+def iter_samples(config: SupportsDataConfig) -> Iterator[ImageSample]:
     dataset = build_dataset(config)
     yield from dataset
 
 
-def _build_image_folder_dataset(config: DataConfig) -> ImageFolderDataset:
+def _build_image_folder_dataset(config: SupportsDataConfig) -> ImageFolderDataset:
     options = config.options or {}
     return ImageFolderDataset(
         root=config.dataset_path,
@@ -133,7 +142,7 @@ def _build_image_folder_dataset(config: DataConfig) -> ImageFolderDataset:
     )
 
 
-def _build_celeba_dataset(config: DataConfig) -> CelebADataset:
+def _build_celeba_dataset(config: SupportsDataConfig) -> CelebADataset:
     options = config.options or {}
     return CelebADataset(
         root=config.dataset_path,
@@ -161,7 +170,7 @@ def _as_optional_int(value: Any) -> int | None:
     return int(value)
 
 
-_DATASET_BUILDERS: Dict[str, Callable[[DataConfig], Iterable[ImageSample]]] = {
+_DATASET_BUILDERS: Dict[str, Callable[[SupportsDataConfig], Iterable[ImageSample]]] = {
     "image_folder": _build_image_folder_dataset,
     "celeba": _build_celeba_dataset,
 }

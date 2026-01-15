@@ -8,12 +8,12 @@ from typing import Sequence
 import numpy as np
 
 from ..components import (
-    ArcFaceEmbedder,
     EmbeddingModel,
     FaceDetector,
     HmacSeedGenerator,
     Quantizer,
     SeedGenerator,
+    FacenetEmbedder,
 )
 from ..components.detector import Detection
 from ..components.alignment import FaceAligner

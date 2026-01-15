@@ -5,7 +5,7 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
-from ..config import ExperimentConfig
+from ..quantization_pipeline.config import QuantizationExperimentConfig
 
 
 def _resolve_path(value: Optional[Path], base_dir: Optional[Path]) -> Optional[Path]:
@@ -24,11 +24,11 @@ def load_config_payload(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(handle)
 
 
-def build_config(payload: Mapping[str, Any]) -> ExperimentConfig:
-    return ExperimentConfig.from_dict(payload)
+def build_config(payload: Mapping[str, Any]) -> QuantizationExperimentConfig:
+    return QuantizationExperimentConfig.from_dict(payload)
 
 
-def load_config(path: str | Path) -> ExperimentConfig:
+def load_config(path: str | Path) -> QuantizationExperimentConfig:
     config_path = Path(path).resolve()
     config = build_config(load_config_payload(config_path))
     config_dir = config_path.parent
