@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -11,8 +12,14 @@ from facenet_pytorch import InceptionResnetV1, prewhiten
 logger = logging.getLogger(__name__)
 
 
+
 class EmbeddingModel:
-    def embed(self, aligned_faces: Sequence[object], source_paths: Sequence[Path] | None = None) -> np.ndarray:
+    def embed(
+        self,
+        aligned_faces: Sequence[object],
+        source_paths: Sequence[Path] | None = None,
+        with_grad: bool = False,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -22,9 +29,14 @@ class FacenetEmbedder(EmbeddingModel):
         self.model = InceptionResnetV1(pretrained=pretrained).eval().to(self.device)
         self.embedding_size: int = 512
 
-    def embed(self, aligned_faces: Sequence[object], source_paths: Sequence[Path] | None = None) -> np.ndarray:
+    def embed(
+        self,
+        aligned_faces: Sequence[object],
+        source_paths: Sequence[Path] | None = None,
+        with_grad: bool = False,
+    ) -> torch.Tensor:
         if not aligned_faces:
-            return np.empty((0, self.embedding_size), dtype=np.float32)
+            return torch.empty((0, self.embedding_size), device=self.device, dtype=torch.float32)
 
         batch: list[torch.Tensor] = []
         for face in aligned_faces:
@@ -33,10 +45,11 @@ class FacenetEmbedder(EmbeddingModel):
             batch.append(tensor)
 
         faces_tensor = torch.stack(batch, dim=0).to(self.device)
-        with torch.no_grad():
+        grad_ctx = nullcontext() if with_grad else torch.no_grad()
+        with grad_ctx:
             embeddings = self.model(faces_tensor)
         embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-        return embeddings.cpu().numpy().astype(np.float32)
+        return embeddings if with_grad else embeddings.detach()
 
     def _to_tensor(self, face: object) -> torch.Tensor:
         if isinstance(face, torch.Tensor):
@@ -78,13 +91,18 @@ class SemanticAttributeEmbedder(EmbeddingModel):
         self.embedding_size = len(self._keep_names)
         self._classifiers = {self._normalize_attr_name(k): v for k, v in (feature_classifiers or {}).items()}
 
-    def embed(self, aligned_faces: Sequence[object], source_paths: Sequence[Path] | None = None) -> np.ndarray:
+    def embed(
+        self,
+        aligned_faces: Sequence[object],
+        source_paths: Sequence[Path] | None = None,
+        with_grad: bool = False,
+    ) -> torch.Tensor:
         num_faces = len(aligned_faces)
         if num_faces == 0:
-            return np.empty((0, self.embedding_size), dtype=np.int64)
+            return torch.empty((0, self.embedding_size), dtype=torch.int64)
         if self.embedding_size == 0:
             logger.warning("SemanticAttributeEmbedder has no selected attributes; returning empty embeddings")
-            return np.empty((num_faces, 0), dtype=np.int64)
+            return torch.empty((num_faces, 0), dtype=torch.int64)
 
         paths = list(source_paths) if source_paths else []
         vectors: list[np.ndarray] = []
@@ -92,7 +110,10 @@ class SemanticAttributeEmbedder(EmbeddingModel):
             face = aligned_faces[idx]
             path = paths[idx] if idx < len(paths) else (paths[-1] if paths else None)
             vectors.append(self._vector_for_face(face, path))
-        return np.vstack(vectors).astype(np.int64, copy=False) if vectors else np.empty((0, self.embedding_size), dtype=np.int64)
+        if not vectors:
+            return torch.empty((0, self.embedding_size), dtype=torch.int64)
+        vec_np = np.vstack(vectors).astype(np.int64, copy=False)
+        return torch.from_numpy(vec_np)
 
     def _vector_for_face(self, face: object, path: Path | None) -> np.ndarray:
         if self.embedding_size == 0:

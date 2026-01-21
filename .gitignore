@@ -4,3 +4,4 @@
 __pycache__/
 
 ffhq.pkl
+stylegan2-celebahq-256x256.pkl

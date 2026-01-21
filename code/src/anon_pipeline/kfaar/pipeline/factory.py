@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from ..components import FacenetEmbedder, MTCNNDetector, SemanticAttributeEmbedder
+import torch
+
+from ..components import FacenetEmbedder, MTCNNDetector, SemanticAttributeEmbedder, ProjectorMLP
 from ..components.alignment import MTCNNAligner
-from ..config import ExperimentConfig
+from ..config import PipelineConfig
 from .kfaar_pipeline import KfaarPipeline
-from ..models import StyleGAN2Generator
+from ..components import StyleGAN2Generator
 
 
-def build_kfaar_pipeline(config: ExperimentConfig, stylegan: StyleGAN2Generator | None = None) -> KfaarPipeline:
+def build_kfaar_pipeline(
+    config: PipelineConfig,
+    stylegan: StyleGAN2Generator | None = None,
+    device: str | torch.device | None = None,
+) -> KfaarPipeline:
+    target_device = _resolve_device(config, device)
+
     detector = MTCNNDetector(
         image_size=config.detector.image_size,
         margin=config.detector.margin,
@@ -16,19 +24,36 @@ def build_kfaar_pipeline(config: ExperimentConfig, stylegan: StyleGAN2Generator 
         max_faces=config.detector.max_faces,
         keep_all=True,
         post_process=False,
-        device=config.detector.device,
+        device=str(target_device),
     )
     aligner = MTCNNAligner(output_size=config.detector.image_size)
-    embedder = _build_embedder(config)
+    embedder = _build_embedder(config, target_device)
+    projector = ProjectorMLP(
+        key_dim=config.projector.key_dim,
+        output_dim=embedder.embedding_size,
+        hidden_dims=config.projector.hidden_dims,
+        dropout=config.projector.dropout,
+    ).to(target_device)
+
+    if stylegan is not None:
+        stylegan = stylegan.to(target_device)
+        # Ensure float32 on CPU to avoid half-precision ops unsupported on CPU
+        if torch.device(target_device).type == "cpu" and hasattr(stylegan, "_G"):
+            stylegan._G = stylegan._G.float()
+            stylegan.mapping = stylegan._G.mapping
+            stylegan.synthesis = stylegan._G.synthesis
+
     return KfaarPipeline(
         detector=detector,
         aligner=aligner,
         embedder=embedder,
+        projector=projector,
         stylegan=stylegan,
+        device=target_device,
     )
 
 
-def _build_embedder(config: ExperimentConfig):
+def _build_embedder(config: PipelineConfig, device: torch.device):
     method = (config.embedding.method or "facenet").lower()
     if method.startswith("semantic"):
         return SemanticAttributeEmbedder(
@@ -38,5 +63,15 @@ def _build_embedder(config: ExperimentConfig):
 
     return FacenetEmbedder(
         pretrained=config.embedding.pretrained,
-        device=config.embedding.device,
+        device=str(device),
     )
+
+
+def _resolve_device(config: PipelineConfig, override: str | torch.device | None) -> torch.device:
+    if override is not None:
+        return torch.device(override)
+    if config.embedding.device:
+        return torch.device(config.embedding.device)
+    if config.detector.device:
+        return torch.device(config.detector.device)
+    return torch.device("cpu")

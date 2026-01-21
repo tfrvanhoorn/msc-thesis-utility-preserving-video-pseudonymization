@@ -22,10 +22,11 @@ from .config import (
     DataConfig,
     DetectorConfig,
     EmbeddingConfig,
-    ExperimentConfig,
+    PipelineConfig,
     FeatureSelectorConfig,
     SeedConfig,
 )
+from .trainer import KfaarTrainer
 
 __all__ = [
     "KfaarPipeline",
@@ -49,7 +50,8 @@ __all__ = [
     "DataConfig",
     "DetectorConfig",
     "EmbeddingConfig",
-    "ExperimentConfig",
+    "PipelineConfig",
     "FeatureSelectorConfig",
     "SeedConfig",
+    "KfaarTrainer",
 ]

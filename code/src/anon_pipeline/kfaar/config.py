@@ -15,7 +15,7 @@ class DataConfig:
 
 @dataclass
 class DetectorConfig:
-    score_threshold: float = 0.6
+    score_threshold: float = 0.4
     image_size: int = 160
     margin: int = 0
     min_face_size: Optional[int] = 20
@@ -44,11 +44,19 @@ class SeedConfig:
 
 
 @dataclass
-class ExperimentConfig:
+class ProjectorConfig:
+    key_dim: int = 128
+    hidden_dims: Tuple[int, ...] = (1024, 512)
+    dropout: float = 0.0
+
+
+@dataclass
+class PipelineConfig:
     data: DataConfig
     detector: DetectorConfig
     embedding: EmbeddingConfig
     seed: SeedConfig
+    projector: ProjectorConfig = field(default_factory=ProjectorConfig)
 
     @staticmethod
     def _require(mapping: Mapping[str, Any], key: str) -> Any:
@@ -57,11 +65,12 @@ class ExperimentConfig:
         return mapping[key]
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "ExperimentConfig":
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PipelineConfig":
         data_cfg = payload.get("data", {})
         detector_cfg = cls._require(payload, "detector")
         embedding_cfg = cls._require(payload, "embedding")
         seed_cfg = cls._require(payload, "seed")
+        projector_cfg = payload.get("projector", {})
 
         def _path_or_none(value: Optional[str]) -> Optional[Path]:
             return Path(value) if value else None
@@ -74,6 +83,12 @@ class ExperimentConfig:
             "device": embedding_cfg.get("device"),
             "feature_selector": feature_selector_cfg,
         }
+
+        projector = ProjectorConfig(
+            key_dim=int(projector_cfg.get("key_dim", 128)),
+            hidden_dims=tuple(projector_cfg.get("hidden_dims", (1024, 512))),
+            dropout=float(projector_cfg.get("dropout", 0.0)),
+        )
 
         return cls(
             data=DataConfig(
@@ -90,4 +105,9 @@ class ExperimentConfig:
             ),
             embedding=EmbeddingConfig(**embedding_kwargs),
             seed=SeedConfig(**seed_cfg),
+            projector=projector,
         )
+
+
+# Backward compatibility alias
+ExperimentConfig = PipelineConfig

@@ -46,10 +46,10 @@ from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline
 from anon_pipeline.kfaar.config import DataConfig, ExperimentConfig, DetectorConfig, EmbeddingConfig, SeedConfig
 from anon_pipeline.shared.data.io import load_image
 from anon_pipeline.shared.data.loaders import ImageSample, iter_samples
-from anon_pipeline.kfaar.models import load_stylegan2
+from anon_pipeline.kfaar.components import load_stylegan2
 
 logger = logging.getLogger(__name__)
-STYLEGAN_DEFAULT = Path(__file__).parent / "models" / "ffhq.pkl"
+STYLEGAN_DEFAULT = Path(__file__).parent / "models" / "stylegan2-celebahq-256x256.pkl"
 
 
 @dataclass
@@ -345,7 +345,7 @@ def compute_losses(
 def train_projector(exp_config: ExperimentConfig, train_cfg: TrainingConfig) -> None:
     device = torch.device(train_cfg.device)
 
-    logger.info("Loading StyleGAN2 checkpoint=%s", train_cfg.stylegan_ckpt or "<default ffhq.pkl>")
+    logger.info("Loading StyleGAN2 checkpoint=%s", train_cfg.stylegan_ckpt or "<default stylegan2-celebahq-256x256.pkl>")
     stylegan = load_stylegan2(ckpt_path=train_cfg.stylegan_ckpt, device=device)
     logger.info(
         "Loaded StyleGAN2 | z_dim=%d w_dim=%d device=%s",

@@ -3,7 +3,7 @@ StyleGAN2-ADA (PyTorch) loader utilities for FFHQ generator checkpoints.
 
 Exposes a thin wrapper around the generator to access mapping and synthesis
 modules and to produce images in one call. Defaults to loading the bundled
-``ffhq.pkl`` next to this file. The checkpoint must come from the official
+``stylegan2-celebahq-256x256.pkl`` next to this file. The checkpoint must come from the official
 StyleGAN2-ADA PyTorch implementation and include either ``G_ema`` or ``G``.
 """
 from __future__ import annotations
@@ -41,6 +41,19 @@ class StyleGAN2Generator:
         self.mapping = generator.mapping
         self.synthesis = generator.synthesis
 
+    def to(self, device: str | torch.device) -> StyleGAN2Generator:
+        """Moves the internal generator to the device and ensures float32 on CPU."""
+        _device = torch.device(device)
+        self._G.to(_device)
+        
+        # StyleGAN2 must be in float32 for CPU compatibility
+        if _device.type == "cpu":
+            self._G.float() 
+            
+        self.mapping = self._G.mapping
+        self.synthesis = self._G.synthesis
+        return self
+
     @property
     def z_dim(self) -> int:
         return getattr(self._G, "z_dim", 512)
@@ -67,9 +80,10 @@ class StyleGAN2Generator:
         self,
         w: torch.Tensor,
         noise_mode: str = "const",
+        force_fp32: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        return self.synthesis(w, noise_mode=noise_mode, **kwargs)
+        return self.synthesis(w, noise_mode=noise_mode, force_fp32=force_fp32, **kwargs)
 
     def __call__(
         self,
@@ -98,7 +112,7 @@ def load_stylegan2(
     """Load StyleGAN2 generator from checkpoint.
 
     Args:
-        ckpt_path: Path to .pkl checkpoint; defaults to bundled ffhq.pkl.
+        ckpt_path: Path to .pkl checkpoint; defaults to bundled stylegan2-celebahq-256x256.pkl.
         device: Torch device for the model.
         use_ema: Prefer the EMA generator (G_ema) when present.
 
@@ -106,7 +120,7 @@ def load_stylegan2(
         StyleGAN2Generator wrapper ready for inference.
     """
 
-    ckpt = Path(ckpt_path) if ckpt_path is not None else Path(__file__).with_name("ffhq.pkl")
+    ckpt = Path(ckpt_path) if ckpt_path is not None else Path(__file__).with_name("stylegan2-celebahq-256x256.pkl")
     if not ckpt.exists():
         raise FileNotFoundError(f"StyleGAN2 checkpoint not found at {ckpt}")
 
