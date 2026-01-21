@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime
+import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -105,14 +107,18 @@ class KfaarTrainer:
 
             avg_loss = epoch_loss / max(1, step_count)
             logging.info("Epoch %s complete | avg loss=%.6f", epoch + 1, avg_loss)
-            self.save_checkpoint(epoch, avg_loss)
 
+            val_metrics: dict[str, float] | None = None
             if self.val_loader is not None:
-                val_loss = self.evaluate(epoch=epoch + 1)
-                logging.info("Validation avg loss=%.6f", val_loss)
+                val_metrics = self.evaluate(epoch=epoch + 1)
+                logging.info("Validation avg loss=%.6f", val_metrics["total"])
 
-    def save_checkpoint(self, epoch: int, loss: float) -> Path:
-        path = self.checkpoint_dir / f"kfaar_projector_epoch_{epoch + 1}.pt"
+            self.save_checkpoint(epoch, avg_loss, val_metrics)
+
+    def save_checkpoint(self, epoch: int, loss: float, val_metrics: dict[str, float] | None = None) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = f"{timestamp}_kfaar_projector_epoch_{epoch + 1}"
+        path = self.checkpoint_dir / f"{base}.pt"
         torch.save(
             {
                 "epoch": epoch,
@@ -123,11 +129,43 @@ class KfaarTrainer:
             path,
         )
         logging.info("Checkpoint saved to %s", path)
+
+        json_path = self.checkpoint_dir / f"{base}.json"
+        payload = {
+            "epoch": epoch + 1,
+            "timestamp": timestamp,
+            "train_loss_total": loss,
+            "val_loss_total": val_metrics["total"] if val_metrics else None,
+            "val_loss_components": val_metrics,
+            "config": {
+                "epochs": self.epochs,
+                "key_dim": self.key_dim,
+                "margin": self.margin,
+                "lambda_ano": self.lambda_ano,
+                "lambda_syn": self.lambda_syn,
+                "lambda_div": self.lambda_div,
+                "lambda_dif": self.lambda_dif,
+                "batch_identities": self.batch_identities,
+                "samples_per_identity": self.samples_per_identity,
+                "device": str(self.device),
+                "train_identities": self.train_identities,
+                "val_identities": self.val_identities,
+            },
+        }
+        with json_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        logging.info("Checkpoint metadata saved to %s", json_path)
         return path
 
-    def evaluate(self, epoch: int | None = None) -> float:
+    def evaluate(self, epoch: int | None = None) -> dict[str, float]:
         if self.val_loader is None:
-            return 0.0
+            return {
+                "total": 0.0,
+                "ano": 0.0,
+                "syn": 0.0,
+                "div": 0.0,
+                "dif": 0.0,
+            }
 
         self.pipeline.projector.eval()
         total_loss = 0.0
@@ -190,7 +228,13 @@ class KfaarTrainer:
             }
         )
 
-        return avg_total
+        return {
+            "total": avg_total,
+            "ano": avg_ano,
+            "syn": avg_syn,
+            "div": avg_div,
+            "dif": avg_dif,
+        }
 
     def _extract_batch(self, batch: Any) -> tuple[list[np.ndarray], torch.Tensor]:
         images: Any

@@ -5,3 +5,6 @@ __pycache__/
 
 ffhq.pkl
 stylegan2-celebahq-256x256.pkl
+
+code/src/anon_pipeline/kfaar/train_results/*
+!code/src/anon_pipeline/kfaar/train_results/.gitkeep
