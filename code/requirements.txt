@@ -8,3 +8,8 @@ onnxruntime-gpu==1.14.1
 pandas
 typing_extensions>=4.7.1
 facenet-pytorch==2.4.1
+ninja==1.11.1.4
+
+# torch==1.8.1
+# torchvision==0.9.1
+# torchaudio==0.8.1
