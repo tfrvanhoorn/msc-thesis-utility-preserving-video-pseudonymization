@@ -5,12 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Sequence, Tuple
 
-import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader
 
-from .loaders import ImageSample, SupportsDataConfig, build_dataset
+from .loaders import SupportsDataConfig, build_dataset, unified_video_collate_fn
 
 
 @dataclass(frozen=True)
@@ -39,6 +37,12 @@ def list_identities(config: SupportsDataConfig) -> List[str]:
                 identities.add(str(identity))
         return sorted(identities)
 
+    if dataset_type == "voxceleb_video":
+        base = Path(config.dataset_path) / "dev" / "mp4"
+        if not base.exists():
+            return []
+        return sorted([p.name for p in base.iterdir() if p.is_dir()])
+
     raise ValueError(f"Unsupported dataset type '{config.dataset_type}' for identity listing")
 
 
@@ -63,9 +67,11 @@ def split_identities(
     return IdentitySplit(train=train_ids, test=test_ids)
 
 
-def _config_with_identities(config: SupportsDataConfig, identities: Sequence[str]):
+def _config_with_identities(config: SupportsDataConfig, identities: Sequence[str], *, shuffle: bool = False):
     options = dict(config.options or {})
     options["identities"] = list(identities)
+    # Propagate shuffle preference through options so IterableDatasets can randomize internally
+    options["shuffle"] = shuffle or bool(getattr(config, "options", {}).get("shuffle", False))
 
     class _ConfigProxy:
         def __init__(self, base: SupportsDataConfig, opts):
@@ -84,32 +90,15 @@ def build_dataloader_for_identities(
     shuffle: bool = True,
     num_workers: int = 0,
     collate_fn=None,
-    load_images: bool = True,
 ) -> DataLoader:
-    cfg = _config_with_identities(config, identities)
-    dataset = _LoadedDictDataset(build_dataset(cfg)) if load_images else build_dataset(cfg)
+    cfg = _config_with_identities(config, identities, shuffle=shuffle)
+    dataset = build_dataset(cfg)
 
-    if collate_fn is None:
-        # Default collate: stack dicts into lists/tensors where possible
-        def _default_collate(batch):
-            images: list[np.ndarray] = []
-            labels: list[int] = []
-            for item in batch:
-                if not isinstance(item, dict):
-                    continue
-                img = item.get("image")
-                lbl = item.get("label")
-                if img is None or lbl is None:
-                    continue
-                images.append(img)
-                labels.append(int(lbl))
-            if not images:
-                return {"image": [], "label": torch.tensor([], dtype=torch.long)}
-            return {"image": images, "label": torch.tensor(labels, dtype=torch.long)}
+    # IterableDataset does not support DataLoader-level shuffling; randomization can be handled inside the dataset
+    identity_to_index = {ident: idx for idx, ident in enumerate(identities)}
+    effective_collate = collate_fn or (lambda batch: unified_video_collate_fn(batch, identity_to_index=identity_to_index))
 
-        collate_fn = _default_collate
-
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=collate_fn)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=effective_collate)
 
 
 def build_train_test_loaders(
@@ -142,36 +131,4 @@ def build_train_test_loaders(
         collate_fn=collate_fn,
     )
     return split, train_loader, test_loader
-
-
-class _LoadedDictDataset:
-    def __init__(self, iterable: Iterable[ImageSample]):
-        self.iterable = iterable
-        self._cache: list[dict[str, object]] | None = None
-
-    def __iter__(self) -> Iterator[dict[str, object]]:
-        if self._cache is not None:
-            yield from self._cache
-            return
-
-        self._cache = []
-        for sample in self.iterable:
-            try:
-                arr = np.asarray(Image.open(sample.path).convert("RGB"))
-            except Exception:
-                continue
-            item = {"image": arr, "label": int(sample.identity)}
-            self._cache.append(item)
-            yield item
-
-    def __len__(self) -> int:
-        if self._cache is None:
-            # Materialize once to populate cache and length
-            list(iter(self))
-        return len(self._cache)
-
-    def __getitem__(self, idx: int) -> dict[str, object]:
-        if self._cache is None:
-            list(iter(self))
-        return self._cache[idx]
 

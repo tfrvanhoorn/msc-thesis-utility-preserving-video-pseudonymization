@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -51,7 +50,7 @@ class KfaarTrainer:
         self.lambda_dif = lambda_dif
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
-        self._pending_by_identity: dict[Any, list[np.ndarray]] = defaultdict(list)
+        self._pending_by_identity: dict[Any, list[torch.Tensor]] = defaultdict(list)
         self.train_identities = list(train_identities) if train_identities else None
         self.val_identities = list(val_identities) if val_identities else None
         self.eval_history: list[dict[str, float]] = []
@@ -236,20 +235,19 @@ class KfaarTrainer:
             "dif": avg_dif,
         }
 
-    def _extract_batch(self, batch: Any) -> tuple[list[np.ndarray], torch.Tensor]:
-        images: Any
+    def _extract_batch(self, batch: Any) -> tuple[list[torch.Tensor], torch.Tensor]:
+        frames: Any
         labels: torch.Tensor | None = None
 
         if isinstance(batch, dict):
-            images = batch.get("image")
-            if images is None:
-                images = batch.get("images")
-
+            frames = batch.get("frames")
             labels = batch.get("label")
             if labels is None:
                 labels = batch.get("labels")
+            seq_lens = batch.get("seq_lens")
         elif isinstance(batch, Sequence) and len(batch) >= 2:
-            images, labels = batch[0], batch[1]
+            frames, labels = batch[0], batch[1]
+            seq_lens = None
         else:
             raise TypeError("Unsupported batch format for KfaarTrainer")
 
@@ -257,10 +255,39 @@ class KfaarTrainer:
             raise ValueError("Batch is missing labels for training")
 
         labels = labels.to(self.device)
-        image_list = self._to_numpy_list(images)
-        return image_list, labels
 
-    def _iter_effective_batches(self, images: list[np.ndarray], labels: torch.Tensor) -> Sequence[tuple[list[np.ndarray], torch.Tensor]]:
+        if frames is None:
+            raise ValueError("Batch is missing frames/images for training")
+
+        if torch.is_tensor(frames):
+            frame_tensor = frames
+        else:
+            frame_tensor = torch.as_tensor(frames)
+
+        # Ensure shape (B, Seq, C, H, W)
+        if frame_tensor.dim() == 4:
+            frame_tensor = frame_tensor.unsqueeze(1)
+        if frame_tensor.dim() != 5:
+            raise ValueError(f"Expected frames with 5 dimensions (B,Seq,C,H,W), got {tuple(frame_tensor.shape)}")
+
+        lengths: list[int]
+        if seq_lens is not None:
+            lengths = [int(x) for x in torch.as_tensor(seq_lens).tolist()]
+        else:
+            lengths = [frame_tensor.shape[1]] * frame_tensor.shape[0]
+
+        images: list[torch.Tensor] = []
+        expanded_labels: list[int] = []
+        for idx, length in enumerate(lengths):
+            effective_len = min(length, frame_tensor.shape[1])
+            for t in range(effective_len):
+                images.append(frame_tensor[idx, t])
+                expanded_labels.append(int(labels[idx].item()))
+
+        labels_expanded = torch.tensor(expanded_labels, device=self.device)
+        return images, labels_expanded
+
+    def _iter_effective_batches(self, images: list[torch.Tensor], labels: torch.Tensor) -> Sequence[tuple[list[torch.Tensor], torch.Tensor]]:
         # If no identity-based batching is requested, pass through the incoming batch
         if not self.batch_identities or not self.samples_per_identity:
             return [(images, labels)]
@@ -272,14 +299,14 @@ class KfaarTrainer:
         for img, label_value in zip(images, labels.view(-1).tolist()):
             self._pending_by_identity[label_value].append(img)
 
-        ready_batches: list[tuple[list[np.ndarray], torch.Tensor]] = []
+        ready_batches: list[tuple[list[torch.Tensor], torch.Tensor]] = []
         while True:
             eligible = [ident for ident, imgs in self._pending_by_identity.items() if len(imgs) >= self.samples_per_identity]
             if len(eligible) < self.batch_identities:
                 break
 
             chosen = eligible[: self.batch_identities]
-            batch_images: list[np.ndarray] = []
+            batch_images: list[torch.Tensor] = []
             batch_labels: list[Any] = []
 
             for ident in chosen:
@@ -295,20 +322,4 @@ class KfaarTrainer:
 
         return ready_batches
 
-    def _to_numpy_list(self, images: Any) -> list[np.ndarray]:
-        if isinstance(images, np.ndarray):
-            return [images]
-        if torch.is_tensor(images):
-            if images.dim() == 4:
-                return [self._tensor_to_numpy(img) for img in images]
-            return [self._tensor_to_numpy(images)]
-        if isinstance(images, Sequence):
-            return [self._tensor_to_numpy(img) if torch.is_tensor(img) else np.array(img) for img in images]
-        return [np.array(images)]
 
-    @staticmethod
-    def _tensor_to_numpy(img: torch.Tensor) -> np.ndarray:
-        arr = img.detach().cpu()
-        if arr.dim() == 3 and arr.shape[0] in (1, 3):
-            arr = arr.permute(1, 2, 0)
-        return arr.numpy()

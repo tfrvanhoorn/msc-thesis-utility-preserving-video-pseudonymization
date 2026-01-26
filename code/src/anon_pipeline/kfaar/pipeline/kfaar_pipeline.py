@@ -156,7 +156,7 @@ class KfaarPipeline:
 
     def hpvg_train_step(
         self,
-        images: list[np.ndarray],      # Batch of images
+        images: list[np.ndarray | torch.Tensor],      # Batch of images
         labels: torch.Tensor,          # Identity labels for images
         key_1: torch.Tensor,           # First set of keys
         key_2: torch.Tensor,           # Second set of keys
@@ -188,7 +188,7 @@ class KfaarPipeline:
 
     def hpvg_loss(
         self,
-        images: list[np.ndarray],
+        images: list[np.ndarray | torch.Tensor],
         labels: torch.Tensor,
         key_1: torch.Tensor,
         key_2: torch.Tensor,
@@ -218,7 +218,7 @@ class KfaarPipeline:
 
     def hpvg_loss_components(
         self,
-        images: list[np.ndarray],
+        images: list[np.ndarray | torch.Tensor],
         labels: torch.Tensor,
         key_1: torch.Tensor,
         key_2: torch.Tensor,

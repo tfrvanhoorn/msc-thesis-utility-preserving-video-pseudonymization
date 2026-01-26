@@ -107,7 +107,3 @@ class PipelineConfig:
             seed=SeedConfig(**seed_cfg),
             projector=projector,
         )
-
-
-# Backward compatibility alias
-ExperimentConfig = PipelineConfig
