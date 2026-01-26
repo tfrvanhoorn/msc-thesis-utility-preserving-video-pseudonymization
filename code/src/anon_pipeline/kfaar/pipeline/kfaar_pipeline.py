@@ -79,6 +79,8 @@ class KfaarPipeline:
         image_t = self._to_tensor(image, device=device)
 
         detections = self.detector.detect(image_t)
+        if detections:
+            detections = [max(detections, key=lambda d: d.score)]  # keep highest-score face only
         if not detections:
             logger.debug("No detections returned; skipping embedding stage")
             empty = torch.empty(0, 0, device=device)
@@ -117,7 +119,8 @@ class KfaarPipeline:
                 dets = self.detector.detect(img)
                 if not dets:
                     continue
-                synth_aligned.extend([self.aligner.align(img, d).to(device) for d in dets])
+                top_det = max(dets, key=lambda d: d.score)
+                synth_aligned.append(self.aligner.align(img, top_det).to(device))
 
             if synth_aligned:
                 virtual_embeddings = self.embedder.embed(synth_aligned, with_grad=True).to(device)
