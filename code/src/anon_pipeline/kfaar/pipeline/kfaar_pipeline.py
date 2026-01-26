@@ -234,12 +234,14 @@ class KfaarPipeline:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
         # 1. Run forward passes for both keys
+        # Note: Ensure your self.forward logic now picks the 'best' single face
         outs_k1 = [self.forward(img, key_1) for img in images]
         outs_k2 = [self.forward(img, key_2) for img in images]
 
         # 2. Find indices where BOTH keys resulted in successful face detection
         valid_indices = []
         for i in range(len(images)):
+            # Check if embeddings exist and contain data
             k1_valid = outs_k1[i].virtual_embeddings is not None and outs_k1[i].virtual_embeddings.numel() > 0
             k2_valid = outs_k2[i].virtual_embeddings is not None and outs_k2[i].virtual_embeddings.numel() > 0
             if k1_valid and k2_valid:
@@ -252,15 +254,15 @@ class KfaarPipeline:
             return zero, zero, zero, zero, zero
 
         # 4. Extract tensors using only the valid indices
-        # We use .squeeze(1) if the embedder returns (1, dim), otherwise just stack
-        real_feats = torch.stack([outs_k1[i].real_embeddings for i in valid_indices]).squeeze()
-        virt_k1_feats = torch.stack([outs_k1[i].virtual_embeddings for i in valid_indices]).squeeze()
-        virt_k2_feats = torch.stack([outs_k2[i].virtual_embeddings for i in valid_indices]).squeeze()
+        # We use torch.cat to safely handle [1, 512] tensors into an [N, 512] batch
+        real_feats = torch.cat([outs_k1[i].real_embeddings for i in valid_indices], dim=0)
+        virt_k1_feats = torch.cat([outs_k1[i].virtual_embeddings for i in valid_indices], dim=0)
+        virt_k2_feats = torch.cat([outs_k2[i].virtual_embeddings for i in valid_indices], dim=0)
         
         # Filter labels to match the new batch size
         filtered_labels = labels[valid_indices]
 
-        # 5. Compute standard losses
+        # 5. Compute standard losses (these are usually averaged internally)
         ano = anonymity_loss(real_feat=real_feats, virtual_feat=virt_k1_feats, margin=margin)
         div = diversity_loss(virtual_feat_k1=virt_k1_feats, virtual_feat_k2=virt_k2_feats, margin=margin)
 
@@ -268,17 +270,31 @@ class KfaarPipeline:
         syn_loss_val = torch.tensor(0.0, device=self.device)
         dif_loss_val = torch.tensor(0.0, device=self.device)
         
+        syn_count = 0
+        dif_count = 0
+        
         num_valid = len(valid_indices)
         for i in range(num_valid):
             for j in range(i + 1, num_valid):
-                f_i = virt_k1_feats[i:i+1]
-                f_j = virt_k1_feats[j:j+1]
+                # Slice to keep dimensions [1, 512] for loss functions
+                f_i = virt_k1_feats[i : i + 1]
+                f_j = virt_k1_feats[j : j + 1]
                 
                 # Check labels using the filtered label tensor
                 if filtered_labels[i] == filtered_labels[j]:
-                    syn_loss_val += synchronism_loss(f_i, f_j, margin=margin)
+                    syn_loss_val = syn_loss_val + synchronism_loss(f_i, f_j, margin=margin)
+                    syn_count += 1
                 else:
-                    dif_loss_val += differentiation_loss(f_i, f_j, margin=margin)
+                    dif_loss_val = dif_loss_val + differentiation_loss(f_i, f_j, margin=margin)
+                    dif_count += 1
+
+        # --- NORMALIZATION STEP ---
+        # Normalize the pairwise sums by the number of pairs to get the mean
+        if syn_count > 0:
+            syn_loss_val = syn_loss_val / syn_count
+        
+        if dif_count > 0:
+            dif_loss_val = dif_loss_val / dif_count
 
         # 7. Total weighted loss
         total = total_hpvg_loss(
