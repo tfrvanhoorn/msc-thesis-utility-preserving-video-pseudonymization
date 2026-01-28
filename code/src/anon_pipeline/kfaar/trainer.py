@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, Sequence
+import sys
 
 import torch
 from torch.utils.data import DataLoader
@@ -36,6 +37,7 @@ class KfaarTrainer:
         device: str | torch.device = "cuda",
         train_identities: Sequence[Any] | None = None,
         val_identities: Sequence[Any] | None = None,
+        start_epoch: int = 0,
     ) -> None:
         self.pipeline = pipeline
         self.train_loader = train_loader
@@ -50,6 +52,7 @@ class KfaarTrainer:
         self.lambda_dif = lambda_dif
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
+        self.start_epoch = start_epoch
         self._pending_by_identity: dict[Any, list[torch.Tensor]] = defaultdict(list)
         self.train_identities = list(train_identities) if train_identities else None
         self.val_identities = list(val_identities) if val_identities else None
@@ -71,12 +74,12 @@ class KfaarTrainer:
     def train(self) -> None:
         logging.info("Starting KFAAR training for %s epochs", self.epochs)
 
-        for epoch in range(self.epochs):
+        for epoch in range(self.start_epoch, self.epochs):
             self.pipeline.projector.train()
             epoch_loss = 0.0
             step_count = 0
 
-            progress = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}")
+            progress = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}", file=sys.stdout)
             for batch in progress:
                 images, labels = self._extract_batch(batch)
 
@@ -106,6 +109,7 @@ class KfaarTrainer:
 
             avg_loss = epoch_loss / max(1, step_count)
             logging.info("Epoch %s complete | avg loss=%.6f", epoch + 1, avg_loss)
+            sys.stdout.flush()
 
             val_metrics: dict[str, float] | None = None
             if self.val_loader is not None:

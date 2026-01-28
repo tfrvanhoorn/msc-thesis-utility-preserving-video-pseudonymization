@@ -25,6 +25,7 @@ from anon_pipeline.kfaar.config import (
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline
 from anon_pipeline.kfaar.components import load_stylegan2
 from anon_pipeline.shared.data.splits import build_train_test_loaders
+from anon_pipeline.shared.utils.logging import configure_logging
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the KFAAR Projector for Face Pseudonymization")
@@ -54,6 +55,10 @@ def parse_args():
     parser.add_argument("--max_per_identity", type=int, default=None, help="Max samples per identity to use from dataset")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
+    # Resuming
+    parser.add_argument("--resume_ckpt", type=Path, default=None, help="Path to a checkpoint (.pt) to resume from")
+    parser.add_argument("--start_epoch", type=int, default=None, help="Epoch index to start from (overrides checkpoint epoch)")
+
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
 
@@ -61,7 +66,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    configure_logging()
     device = torch.device(args.device)
     
     # 1. Setup Configurations
@@ -99,6 +104,15 @@ def main():
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
     pipeline = build_kfaar_pipeline(cfg, stylegan=stylegan, device=device)
 
+    start_epoch = args.start_epoch if args.start_epoch is not None else 0
+    if args.resume_ckpt is not None:
+        ckpt = torch.load(args.resume_ckpt, map_location=device)
+        pipeline.projector.load_state_dict(ckpt["model_state_dict"])
+        pipeline.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if args.start_epoch is None:
+            start_epoch = int(ckpt.get("epoch", -1)) + 1
+        logging.info("Resumed from %s at epoch %s", args.resume_ckpt, start_epoch)
+
     # 4. Initialize and Run Trainer
     trainer = KfaarTrainer(
         pipeline=pipeline,
@@ -117,6 +131,7 @@ def main():
         device=device,
         train_identities=split.train,
         val_identities=split.test,
+        start_epoch=start_epoch,
     )
 
     logging.info("Starting training loop...")

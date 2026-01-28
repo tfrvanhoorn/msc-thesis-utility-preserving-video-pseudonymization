@@ -250,8 +250,17 @@ class KfaarPipeline:
         # 3. Guard against empty/too small batches
         if len(valid_indices) < 2:
             logger.warning(f"Batch discarded: only {len(valid_indices)} frames had valid faces for both keys.")
-            zero = torch.tensor(0.0, device=self.device, requires_grad=True)
-            return zero, zero, zero, zero, zero
+            
+            # Use a high baseline penalty
+            penalty_val = 10.0
+            
+            # We create a 'dummy' connection to the projector's parameters.
+            # This ensures that backward() actually propagates through the MLP.
+            # We multiply by 0.0 so the value is 10.0, but the gradient path exists.
+            param_link = sum(p.sum() for p in self.projector.parameters()) * 0.0
+            penalty = (penalty_val + param_link)
+            
+            return penalty, penalty, penalty, penalty, penalty
 
         # 4. Extract tensors using only the valid indices
         # We use torch.cat to safely handle [1, 512] tensors into an [N, 512] batch
