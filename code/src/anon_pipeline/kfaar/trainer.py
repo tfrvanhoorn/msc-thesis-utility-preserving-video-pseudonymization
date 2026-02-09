@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 import sys
 
+import psutil
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -31,6 +32,7 @@ class KfaarTrainer:
         lambda_syn: float = 1.0,
         lambda_div: float = 1.0,
         lambda_dif: float = 1.0,
+        lambda_temp: float = 0.0,
         batch_identities: int | None = None,
         samples_per_identity: int | None = None,
         checkpoint_dir: str | Path | None = None,
@@ -50,10 +52,15 @@ class KfaarTrainer:
         self.lambda_syn = lambda_syn
         self.lambda_div = lambda_div
         self.lambda_dif = lambda_dif
+        self.lambda_temp = lambda_temp
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
         self.start_epoch = start_epoch
-        self._pending_by_identity: dict[Any, list[torch.Tensor]] = defaultdict(list)
+        self._pending_by_identity: dict[Any, list[tuple[torch.Tensor, int]]] = defaultdict(list)
+        self._pending_cap_per_identity = (self.samples_per_identity or 1) * 2
+        self._memory_log_interval = 200
+        self._proc = psutil.Process()
+        self._interval_stats = {"discarded_batches": 0, "input_no_det": 0, "gen_no_det": 0}
         self.train_identities = list(train_identities) if train_identities else None
         self.val_identities = list(val_identities) if val_identities else None
         self.eval_history: list[dict[str, float]] = []
@@ -78,18 +85,20 @@ class KfaarTrainer:
             self.pipeline.projector.train()
             epoch_loss = 0.0
             step_count = 0
+            self._reset_interval_stats()
 
             progress = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}", file=sys.stdout)
             for batch in progress:
-                images, labels = self._extract_batch(batch)
+                frames, labels, seq_lens = self._extract_batch(batch)
 
-                for sub_images, sub_labels in self._iter_effective_batches(images, labels):
+                for sub_frames, sub_labels, sub_seq_lens in self._iter_effective_batches(frames, labels, seq_lens):
                     key_1 = torch.randn(self.key_dim, device=self.device)
                     key_2 = torch.randn(self.key_dim, device=self.device)
 
                     loss = self.pipeline.hpvg_train_step(
-                        sub_images,
+                        sub_frames,
                         sub_labels,
+                        sub_seq_lens,
                         key_1,
                         key_2,
                         margin=self.margin,
@@ -97,6 +106,7 @@ class KfaarTrainer:
                         lambda_syn=self.lambda_syn,
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
+                        lambda_temp=self.lambda_temp,
                     )
 
                     loss_value = float(loss.item())
@@ -104,16 +114,28 @@ class KfaarTrainer:
                     step_count += 1
                     progress.set_postfix({"loss": f"{loss_value:.4f}"})
 
+                    self._pull_interval_stats()
+
+                    if step_count % self._memory_log_interval == 0:
+                        self._log_interval_stats(epoch + 1, step_count)
+                        self._log_memory(f"train epoch {epoch + 1} step {step_count}")
+
             # Drop any partial batches that could not form a full identity-based batch
             self._pending_by_identity.clear()
 
             avg_loss = epoch_loss / max(1, step_count)
             logging.info("Epoch %s complete | avg loss=%.6f", epoch + 1, avg_loss)
+            self._log_memory(f"train epoch {epoch + 1} end")
             sys.stdout.flush()
+
+            if step_count % self._memory_log_interval:
+                self._log_interval_stats(epoch + 1, step_count)
 
             val_metrics: dict[str, float] | None = None
             if self.val_loader is not None:
+                self._pending_by_identity.clear()
                 val_metrics = self.evaluate(epoch=epoch + 1)
+                self._pending_by_identity.clear()
                 logging.info("Validation avg loss=%.6f", val_metrics["total"])
 
             self.save_checkpoint(epoch, avg_loss, val_metrics)
@@ -180,13 +202,14 @@ class KfaarTrainer:
 
         with torch.no_grad():
             for batch in self.val_loader:
-                images, labels = self._extract_batch(batch)
-                for sub_images, sub_labels in self._iter_effective_batches(images, labels):
+                frames, labels, seq_lens = self._extract_batch(batch)
+                for sub_frames, sub_labels, sub_seq_lens in self._iter_effective_batches(frames, labels, seq_lens):
                     key_1 = torch.randn(self.key_dim, device=self.device)
                     key_2 = torch.randn(self.key_dim, device=self.device)
                     ano, syn, div, dif, loss = self.pipeline.hpvg_loss_components(
-                        sub_images,
+                        sub_frames,
                         sub_labels,
+                        sub_seq_lens,
                         key_1,
                         key_2,
                         margin=self.margin,
@@ -194,6 +217,7 @@ class KfaarTrainer:
                         lambda_syn=self.lambda_syn,
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
+                        lambda_temp=self.lambda_temp,
                     )
                     total_ano += float(ano.item())
                     total_syn += float(syn.item())
@@ -239,91 +263,151 @@ class KfaarTrainer:
             "dif": avg_dif,
         }
 
-    def _extract_batch(self, batch: Any) -> tuple[list[torch.Tensor], torch.Tensor]:
+    def _extract_batch(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         frames: Any
         labels: torch.Tensor | None = None
+        seq_lens: Any = None
 
         if isinstance(batch, dict):
             frames = batch.get("frames")
-            labels = batch.get("label")
-            if labels is None:
-                labels = batch.get("labels")
+            labels = batch.get("label") or batch.get("labels")
             seq_lens = batch.get("seq_lens")
         elif isinstance(batch, Sequence) and len(batch) >= 2:
             frames, labels = batch[0], batch[1]
-            seq_lens = None
+            if len(batch) >= 3:
+                seq_lens = batch[2]
         else:
             raise TypeError("Unsupported batch format for KfaarTrainer")
 
         if labels is None:
             raise ValueError("Batch is missing labels for training")
-
-        labels = labels.to(self.device)
-
         if frames is None:
             raise ValueError("Batch is missing frames/images for training")
 
-        if torch.is_tensor(frames):
-            frame_tensor = frames
-        else:
-            frame_tensor = torch.as_tensor(frames)
+        labels_tensor = torch.as_tensor(labels, dtype=torch.long)
 
-        # Ensure shape (B, Seq, C, H, W)
+        frame_tensor = frames if torch.is_tensor(frames) else torch.as_tensor(frames)
         if frame_tensor.dim() == 4:
             frame_tensor = frame_tensor.unsqueeze(1)
         if frame_tensor.dim() != 5:
             raise ValueError(f"Expected frames with 5 dimensions (B,Seq,C,H,W), got {tuple(frame_tensor.shape)}")
 
-        lengths: list[int]
-        if seq_lens is not None:
-            lengths = [int(x) for x in torch.as_tensor(seq_lens).tolist()]
-        else:
-            lengths = [frame_tensor.shape[1]] * frame_tensor.shape[0]
+        seq_len_tensor = torch.as_tensor(seq_lens, dtype=torch.long) if seq_lens is not None else torch.full(
+            (frame_tensor.shape[0],), frame_tensor.shape[1], dtype=torch.long
+        )
 
-        images: list[torch.Tensor] = []
-        expanded_labels: list[int] = []
-        for idx, length in enumerate(lengths):
-            effective_len = min(length, frame_tensor.shape[1])
-            for t in range(effective_len):
-                images.append(frame_tensor[idx, t])
-                expanded_labels.append(int(labels[idx].item()))
+        return frame_tensor, labels_tensor, seq_len_tensor
 
-        labels_expanded = torch.tensor(expanded_labels, device=self.device)
-        return images, labels_expanded
-
-    def _iter_effective_batches(self, images: list[torch.Tensor], labels: torch.Tensor) -> Sequence[tuple[list[torch.Tensor], torch.Tensor]]:
-        # If no identity-based batching is requested, pass through the incoming batch
+    def _iter_effective_batches(
+        self, frames: torch.Tensor, labels: torch.Tensor, seq_lens: torch.Tensor
+    ) -> Sequence[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         if not self.batch_identities or not self.samples_per_identity:
-            return [(images, labels)]
+            return [(frames.to(self.device), labels.to(self.device), seq_lens.to(self.device))]
 
-        if len(images) != int(labels.numel()):
-            raise ValueError("Mismatch between number of images and labels for batching")
+        batch_size = frames.shape[0]
+        if batch_size != int(labels.numel()):
+            raise ValueError("Mismatch between number of sequences and labels for batching")
 
-        # Queue the samples by identity
-        for img, label_value in zip(images, labels.view(-1).tolist()):
-            self._pending_by_identity[label_value].append(img)
+        for idx in range(batch_size):
+            ident = int(labels[idx].item())
+            seq_len = int(seq_lens[idx].item())
+            seq_frames = frames[idx, :seq_len].detach().cpu()
+            pending = self._pending_by_identity[ident]
+            pending.append((seq_frames, seq_len))
+            if len(pending) > self._pending_cap_per_identity:
+                overflow = len(pending) - self._pending_cap_per_identity
+                del pending[0:overflow]
 
-        ready_batches: list[tuple[list[torch.Tensor], torch.Tensor]] = []
+        def _pad_sequence(seq: torch.Tensor, target_len: int) -> torch.Tensor:
+            if seq.shape[0] >= target_len:
+                return seq
+            pad_len = target_len - seq.shape[0]
+            pad_frame = seq[-1:].expand(pad_len, -1, -1, -1)
+            return torch.cat([seq, pad_frame], dim=0)
+
+        ready_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
         while True:
-            eligible = [ident for ident, imgs in self._pending_by_identity.items() if len(imgs) >= self.samples_per_identity]
+            eligible = [ident for ident, items in self._pending_by_identity.items() if len(items) >= self.samples_per_identity]
             if len(eligible) < self.batch_identities:
                 break
 
             chosen = eligible[: self.batch_identities]
-            batch_images: list[torch.Tensor] = []
+            batch_sequences: list[torch.Tensor] = []
             batch_labels: list[Any] = []
+            batch_seq_lens: list[int] = []
 
             for ident in chosen:
-                imgs = self._pending_by_identity[ident]
-                take = imgs[: self.samples_per_identity]
-                del imgs[: self.samples_per_identity]
-                batch_images.extend(take)
-                batch_labels.extend([ident] * self.samples_per_identity)
-                if not imgs:
+                items = self._pending_by_identity[ident]
+                take = items[: self.samples_per_identity]
+                del items[: self.samples_per_identity]
+                for seq_frames, seq_len in take:
+                    batch_sequences.append(seq_frames)
+                    batch_labels.append(ident)
+                    batch_seq_lens.append(seq_len)
+                if not items:
                     self._pending_by_identity.pop(ident, None)
 
-            ready_batches.append((batch_images, torch.tensor(batch_labels, device=self.device)))
+            if not batch_sequences:
+                continue
+
+            max_len = max(batch_seq_lens)
+            padded = [_pad_sequence(seq, max_len) for seq in batch_sequences]
+            stacked_frames = torch.stack(padded, dim=0)
+            ready_batches.append(
+                (
+                    stacked_frames.to(self.device),
+                    torch.tensor(batch_labels, device=self.device),
+                    torch.tensor(batch_seq_lens, device=self.device),
+                )
+            )
 
         return ready_batches
+
+    def _log_memory(self, tag: str) -> None:
+        rss_gb = self._proc.memory_info().rss / (1024 ** 3)
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 3)
+            logging.info("%s | CPU RSS=%.2f GB | CUDA alloc=%.2f GB reserved=%.2f GB", tag, rss_gb, alloc, reserved)
+        else:
+            logging.info("%s | CPU RSS=%.2f GB", tag, rss_gb)
+
+    def _pull_interval_stats(self) -> None:
+        self._interval_stats["discarded_batches"] += int(self.pipeline.stats.get("discarded_batches", 0))
+        self._interval_stats["input_no_det"] += int(self.pipeline.stats.get("input_no_det", 0))
+        self._interval_stats["gen_no_det"] += int(self.pipeline.stats.get("gen_no_det", 0))
+        self.pipeline.stats["discarded_batches"] = 0
+        self.pipeline.stats["input_no_det"] = 0
+        self.pipeline.stats["gen_no_det"] = 0
+
+    def _log_interval_stats(self, epoch: int, step_count: int) -> None:
+        if not any(self._interval_stats.values()):
+            return
+        rss_gb, alloc_gb, reserved_gb = self._current_memory()
+        logging.info(
+            "Interval summary | epoch=%s step=%s | discarded_batches=%d | input_no_det_frames=%d | gen_no_det_frames=%d | CPU RSS=%.2f GB | CUDA alloc=%.2f GB reserved=%.2f GB",
+            epoch,
+            step_count,
+            self._interval_stats["discarded_batches"],
+            self._interval_stats["input_no_det"],
+            self._interval_stats["gen_no_det"],
+            rss_gb,
+            alloc_gb,
+            reserved_gb,
+        )
+        self._reset_interval_stats()
+
+    def _reset_interval_stats(self) -> None:
+        self._interval_stats = {"discarded_batches": 0, "input_no_det": 0, "gen_no_det": 0}
+
+    def _current_memory(self) -> tuple[float, float, float]:
+        rss_gb = self._proc.memory_info().rss / (1024 ** 3)
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 3)
+        else:
+            alloc = 0.0
+            reserved = 0.0
+        return rss_gb, alloc, reserved
 
 

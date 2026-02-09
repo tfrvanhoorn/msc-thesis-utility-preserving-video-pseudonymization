@@ -31,7 +31,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train the KFAAR Projector for Face Pseudonymization")
 
     # Path Arguments
-    parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset")
+    parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
+    parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video"], help="Dataset type to use")
     parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
     parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "train_results", help="Directory to save checkpoints")
 
@@ -41,18 +42,30 @@ def parse_args():
     parser.add_argument("--batch_samples_per_identity", type=int, default=2, help="Images per identity in a batch")
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for the projector")
+
+    parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "lstm"], help="Projector architecture")
+    parser.add_argument("--lstm_hidden_dim", type=int, default=512, help="Hidden size for LSTM projector")
+    parser.add_argument("--lstm_num_layers", type=int, default=1, help="Number of layers for LSTM projector")
+    parser.add_argument("--lstm_bidirectional", action="store_true", default=True, help="Use bidirectional LSTM")
+    parser.add_argument("--no_lstm_bidirectional", dest="lstm_bidirectional", action="store_false", help="Disable bidirectional LSTM")
+    parser.add_argument("--lstm_dropout", type=float, default=0.0, help="Dropout for LSTM projector (applied when num_layers>1)")
     
     # Loss Weights (The KFAAR Lambda parameters)
     parser.add_argument("--lambda_ano", type=float, default=0.4, help="Weight for Anonymity loss")
     parser.add_argument("--lambda_syn", type=float, default=1.0, help="Weight for Synchronism loss")
     parser.add_argument("--lambda_div", type=float, default=1.0, help="Weight for Diversity loss")
     parser.add_argument("--lambda_dif", type=float, default=1.0, help="Weight for Differentiation loss")
+    parser.add_argument("--lambda_temp", type=float, default=0.0, help="Weight for temporal smoothness loss (LSTM + seq>1 only)")
     parser.add_argument("--margin", type=float, default=0.5, help="Margin for triplet/cosine losses")
 
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
     parser.add_argument("--max_per_identity", type=int, default=None, help="Max samples per identity to use from dataset")
+    parser.add_argument("--window_size", type=int, default=16, help="Window size for voxceleb_video sequences")
+    parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for voxceleb_video")
+    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for voxceleb_video (defaults to window_size*frame_stride)")
+    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows to sample per video for voxceleb_video")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
     # Resuming
@@ -70,14 +83,33 @@ def main():
     device = torch.device(args.device)
     
     # 1. Setup Configurations
+    data_options: dict[str, object] = {"max_per_identity": args.max_per_identity}
+    if args.dataset_type == "voxceleb_video":
+        data_options.update(
+            {
+                "window_size": args.window_size,
+                "frame_stride": args.frame_stride,
+                "window_step": args.window_step,
+                "max_windows_per_video": args.max_windows_per_video,
+            }
+        )
+
     data_cfg = DataConfig(
         dataset_path=args.data_path,
-        dataset_type="celeba",
-        options={"max_per_identity": args.max_per_identity}, # Adjust based on dataset availability
+        dataset_type=args.dataset_type,
+        options=data_options,
     )
     detector_cfg = DetectorConfig(image_size=256, device=str(device))
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(device))
-    projector_cfg = ProjectorConfig(key_dim=args.key_dim)
+    projector_cfg = ProjectorConfig(
+        type=args.projector_type,
+        key_dim=args.key_dim,
+        hidden_dims=(1024, 512),
+        dropout=args.lstm_dropout if args.projector_type == "lstm" else 0.0,
+        lstm_hidden_dim=args.lstm_hidden_dim,
+        lstm_num_layers=args.lstm_num_layers,
+        lstm_bidirectional=args.lstm_bidirectional,
+    )
     
     cfg = PipelineConfig(
         data=data_cfg, 
@@ -125,6 +157,7 @@ def main():
         lambda_syn=args.lambda_syn,
         lambda_div=args.lambda_div,
         lambda_dif=args.lambda_dif,
+        lambda_temp=args.lambda_temp,
         batch_identities=args.batch_identities,
         samples_per_identity=args.batch_samples_per_identity,
         checkpoint_dir=args.output_dir,
