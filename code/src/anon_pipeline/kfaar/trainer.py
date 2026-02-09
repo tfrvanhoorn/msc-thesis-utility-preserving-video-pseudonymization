@@ -270,7 +270,9 @@ class KfaarTrainer:
 
         if isinstance(batch, dict):
             frames = batch.get("frames")
-            labels = batch.get("label") or batch.get("labels")
+            labels = batch.get("label")
+            if labels is None:
+                labels = batch.get("labels")
             seq_lens = batch.get("seq_lens")
         elif isinstance(batch, Sequence) and len(batch) >= 2:
             frames, labels = batch[0], batch[1]
