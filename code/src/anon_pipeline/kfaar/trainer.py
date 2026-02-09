@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from datetime import datetime
 import json
 from pathlib import Path
@@ -56,8 +55,6 @@ class KfaarTrainer:
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
         self.start_epoch = start_epoch
-        self._pending_by_identity: dict[Any, list[tuple[torch.Tensor, int]]] = defaultdict(list)
-        self._pending_cap_per_identity = (self.samples_per_identity or 1) * 2
         self._memory_log_interval = 200
         self._proc = psutil.Process()
         self._interval_stats = {"discarded_batches": 0, "input_no_det": 0, "gen_no_det": 0}
@@ -120,9 +117,6 @@ class KfaarTrainer:
                         self._log_interval_stats(epoch + 1, step_count)
                         self._log_memory(f"train epoch {epoch + 1} step {step_count}")
 
-            # Drop any partial batches that could not form a full identity-based batch
-            self._pending_by_identity.clear()
-
             avg_loss = epoch_loss / max(1, step_count)
             logging.info("Epoch %s complete | avg loss=%.6f", epoch + 1, avg_loss)
             self._log_memory(f"train epoch {epoch + 1} end")
@@ -133,9 +127,7 @@ class KfaarTrainer:
 
             val_metrics: dict[str, float] | None = None
             if self.val_loader is not None:
-                self._pending_by_identity.clear()
                 val_metrics = self.evaluate(epoch=epoch + 1)
-                self._pending_by_identity.clear()
                 logging.info("Validation avg loss=%.6f", val_metrics["total"])
 
             self.save_checkpoint(epoch, avg_loss, val_metrics)
@@ -303,67 +295,9 @@ class KfaarTrainer:
     def _iter_effective_batches(
         self, frames: torch.Tensor, labels: torch.Tensor, seq_lens: torch.Tensor
     ) -> Sequence[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        if not self.batch_identities or not self.samples_per_identity:
-            return [(frames.to(self.device), labels.to(self.device), seq_lens.to(self.device))]
-
-        batch_size = frames.shape[0]
-        if batch_size != int(labels.numel()):
-            raise ValueError("Mismatch between number of sequences and labels for batching")
-
-        for idx in range(batch_size):
-            ident = int(labels[idx].item())
-            seq_len = int(seq_lens[idx].item())
-            seq_frames = frames[idx, :seq_len].detach().cpu()
-            pending = self._pending_by_identity[ident]
-            pending.append((seq_frames, seq_len))
-            if len(pending) > self._pending_cap_per_identity:
-                overflow = len(pending) - self._pending_cap_per_identity
-                del pending[0:overflow]
-
-        def _pad_sequence(seq: torch.Tensor, target_len: int) -> torch.Tensor:
-            if seq.shape[0] >= target_len:
-                return seq
-            pad_len = target_len - seq.shape[0]
-            pad_frame = seq[-1:].expand(pad_len, -1, -1, -1)
-            return torch.cat([seq, pad_frame], dim=0)
-
-        ready_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
-        while True:
-            eligible = [ident for ident, items in self._pending_by_identity.items() if len(items) >= self.samples_per_identity]
-            if len(eligible) < self.batch_identities:
-                break
-
-            chosen = eligible[: self.batch_identities]
-            batch_sequences: list[torch.Tensor] = []
-            batch_labels: list[Any] = []
-            batch_seq_lens: list[int] = []
-
-            for ident in chosen:
-                items = self._pending_by_identity[ident]
-                take = items[: self.samples_per_identity]
-                del items[: self.samples_per_identity]
-                for seq_frames, seq_len in take:
-                    batch_sequences.append(seq_frames)
-                    batch_labels.append(ident)
-                    batch_seq_lens.append(seq_len)
-                if not items:
-                    self._pending_by_identity.pop(ident, None)
-
-            if not batch_sequences:
-                continue
-
-            max_len = max(batch_seq_lens)
-            padded = [_pad_sequence(seq, max_len) for seq in batch_sequences]
-            stacked_frames = torch.stack(padded, dim=0)
-            ready_batches.append(
-                (
-                    stacked_frames.to(self.device),
-                    torch.tensor(batch_labels, device=self.device),
-                    torch.tensor(batch_seq_lens, device=self.device),
-                )
-            )
-
-        return ready_batches
+        # Batches are expected to arrive pre-grouped by the identity batching
+        # dataset. Simply move tensors to the target device.
+        return [(frames.to(self.device), labels.to(self.device), seq_lens.to(self.device))]
 
     def _log_memory(self, tag: str) -> None:
         rss_gb = self._proc.memory_info().rss / (1024 ** 3)

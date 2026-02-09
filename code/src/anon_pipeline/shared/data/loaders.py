@@ -11,7 +11,8 @@ import torch
 from PIL import Image
 from torch.utils.data import IterableDataset
 
-from .video_loaders import VoxCelebVideoDataset
+from .video_loaders import VoxCelebVideoDataset, DEFAULT_VIDEO_PATTERNS
+from .video_io import get_video_frame_count, load_video_window
 
 try:  # Python 3.7 compatibility
     from typing import Protocol as _Protocol
@@ -31,6 +32,19 @@ DEFAULT_IMAGE_PATTERNS: List[str] = ["*.jpg", "*.jpeg", "*.png"]
 class ImageSample:
     identity: str
     path: Path
+
+
+@dataclass(frozen=True)
+class SampleReference:
+    """Lightweight pointer to a sample without keeping frames in memory."""
+
+    identity: str
+    path: Path
+    kind: str  # "image" or "video_window"
+    start: int | None = None
+    window_size: int | None = None
+    frame_stride: int | None = None
+    context: str | None = None
 
 
 class ImageFolderDataset(IterableDataset):
@@ -230,6 +244,147 @@ _DATASET_BUILDERS: Dict[str, Callable[[SupportsDataConfig], Iterable]] = {
 }
 
 
+def _build_identity_sample_index(
+    config: SupportsDataConfig, identities: Sequence[str], *, min_samples_per_identity: int
+) -> dict[str, list[SampleReference]]:
+    dataset_type = config.dataset_type.lower()
+    options = config.options or {}
+    index: dict[str, list[SampleReference]] = {}
+
+    if dataset_type == "image_folder":
+        patterns = options.get("patterns") or DEFAULT_IMAGE_PATTERNS
+        recursive = bool(options.get("recursive", False))
+        max_per_identity = _as_optional_int(options.get("max_per_identity"))
+        for identity in identities:
+            paths = _collect_image_paths_for_identity(config.dataset_path, identity, patterns, recursive)
+            if max_per_identity:
+                paths = paths[:max_per_identity]
+            if len(paths) >= min_samples_per_identity:
+                index[identity] = [SampleReference(identity, path, "image", context="static") for path in paths]
+        return index
+
+    if dataset_type == "celeba":
+        images_subdir = options.get("images_subdir", "img_align_celeba")
+        identity_file = options.get("identity_file", "identity_CelebA.txt")
+        max_per_identity = _as_optional_int(options.get("max_per_identity"))
+        max_samples = _as_optional_int(options.get("max_samples"))
+        per_identity_cap = max_per_identity if max_per_identity is not None else max_samples
+        identity_map = _collect_celeba_paths(config.dataset_path, identity_file)
+        for identity in identities:
+            files = identity_map.get(str(identity), [])
+            if per_identity_cap:
+                files = files[:per_identity_cap]
+            if len(files) >= min_samples_per_identity:
+                refs = [SampleReference(identity, config.dataset_path / images_subdir / fname, "image", context="static") for fname in files]
+                index[str(identity)] = refs
+        return index
+
+    if dataset_type == "voxceleb_video":
+        base = config.dataset_path / "dev" / "mp4"
+        max_per_identity = _as_optional_int(options.get("max_per_identity"))
+        window_size = _as_optional_int(options.get("window_size")) or 16
+        frame_stride = _as_optional_int(options.get("frame_stride")) or 1
+        window_step = options.get("window_step")
+        if window_step is None:
+            window_step = window_size * frame_stride
+        window_step = int(window_step)
+        patterns = options.get("patterns") or DEFAULT_VIDEO_PATTERNS
+        max_windows_per_video = _as_optional_int(options.get("max_windows_per_video"))
+        for identity in identities:
+            refs = _collect_voxceleb_windows_for_identity(
+                base,
+                str(identity),
+                patterns,
+                window_size,
+                frame_stride,
+                window_step,
+                max_per_identity,
+                max_windows_per_video,
+            )
+            if len(refs) >= min_samples_per_identity:
+                index[str(identity)] = refs
+        return index
+
+    raise ValueError(f"Unsupported dataset type '{dataset_type}' for identity batching")
+
+
+def _collect_image_paths_for_identity(root: Path, identity: str, patterns: Sequence[str], recursive: bool) -> list[Path]:
+    identity_dir = root / identity
+    if not identity_dir.exists():
+        return []
+    candidates: list[Path] = []
+    for pattern in patterns:
+        globber = identity_dir.rglob(pattern) if recursive else identity_dir.glob(pattern)
+        for path in globber:
+            if path.is_file():
+                candidates.append(path)
+    candidates.sort()
+    return candidates
+
+
+def _collect_celeba_paths(root: Path, identity_file: str) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = defaultdict(list)
+    identity_path = root / identity_file
+    if not identity_path.exists():
+        return {}
+    with identity_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            filename, identity = stripped.split()
+            mapping[str(identity)].append(filename)
+    for files in mapping.values():
+        files.sort()
+    return mapping
+
+
+def _collect_voxceleb_windows_for_identity(
+    base_dir: Path,
+    identity: str,
+    patterns: Sequence[str],
+    window_size: int,
+    frame_stride: int,
+    window_step: int,
+    max_per_identity: int | None,
+    max_windows_per_video: int | None,
+) -> list[SampleReference]:
+    identity_dir = base_dir / identity
+    if not identity_dir.exists():
+        return []
+    refs: list[SampleReference] = []
+    for youtube_dir in sorted([p for p in identity_dir.iterdir() if p.is_dir()]):
+        for pattern in patterns:
+            for video_path in sorted(youtube_dir.glob(pattern)):
+                if not video_path.is_file():
+                    continue
+                total_frames = get_video_frame_count(video_path)
+                usable_start_limit = total_frames - (window_size - 1) * frame_stride
+                if usable_start_limit <= 0:
+                    continue
+                windows_from_video = 0
+                for start in range(0, max(0, usable_start_limit), window_step):
+                    refs.append(
+                        SampleReference(
+                            identity=identity,
+                            path=video_path,
+                            kind="video_window",
+                            start=start,
+                            window_size=window_size,
+                            frame_stride=frame_stride,
+                            context=youtube_dir.name,
+                        )
+                    )
+                    windows_from_video += 1
+                    if max_per_identity and len(refs) >= max_per_identity:
+                        return refs
+                    if max_windows_per_video and windows_from_video >= max_windows_per_video:
+                        break
+                if max_per_identity and len(refs) >= max_per_identity:
+                    return refs
+    return refs
+
+
 def _load_image_tensor(path: Path) -> torch.Tensor | None:
     try:
         image = Image.open(path).convert("RGB")
@@ -317,3 +472,135 @@ def unified_video_collate_fn(
         "label": labels,
         "seq_lens": torch.tensor(lengths, dtype=torch.long),
     }
+
+
+class IdentityBatchingDataset(IterableDataset):
+    """Emit identity-balanced batches with minimal in-memory buffering.
+
+    Identities are iterated in shuffled order per epoch. For each identity we
+    load at most ``samples_per_identity`` samples (keeping them if at least
+    ``min_samples_per_identity`` are available) and form batches with the first
+    ``batch_identities`` identities. Only lightweight references are cached; frames
+    are loaded just-in-time for each batch.
+    """
+
+    def __init__(
+        self,
+        sample_index: dict[str, list[SampleReference]],
+        identity_to_index: dict[str, int],
+        *,
+        batch_identities: int,
+        samples_per_identity: int,
+        min_samples_per_identity: int = 2,
+        shuffle_identities: bool = True,
+        seed: int | None = None,
+    ) -> None:
+        self.sample_index = sample_index
+        self.identity_to_index = identity_to_index
+        self.batch_identities = batch_identities
+        self.samples_per_identity = samples_per_identity
+        self.min_samples_per_identity = max(1, min_samples_per_identity)
+        self.shuffle_identities = shuffle_identities
+        self._rng = random.Random(seed)
+
+    def _pad_sequence(self, seq: torch.Tensor, target_len: int) -> torch.Tensor:
+        if seq.shape[0] >= target_len:
+            return seq
+        pad_len = target_len - seq.shape[0]
+        pad_frame = seq[-1:].expand(pad_len, -1, -1, -1)
+        return torch.cat([seq, pad_frame], dim=0)
+
+    def _iter_identity_order(self) -> list[str]:
+        identities = list(self.sample_index.keys())
+        if self.shuffle_identities:
+            self._rng.shuffle(identities)
+        else:
+            identities.sort()
+        return identities
+
+    def _iter_refs_for_identity(self, identity: str) -> list[SampleReference]:
+        refs = list(self.sample_index.get(identity, []))
+        if self.shuffle_identities:
+            self._rng.shuffle(refs)
+        return refs
+
+    def _load_reference(self, ref: SampleReference) -> tuple[torch.Tensor | None, str]:
+        if ref.kind == "image":
+            tensor = _load_image_tensor(ref.path)
+            if tensor is None:
+                return None, ref.context or ""
+            return tensor.unsqueeze(0), ref.context or "static"
+
+        if ref.kind == "video_window":
+            try:
+                window = load_video_window(
+                    ref.path,
+                    int(ref.start or 0),
+                    int(ref.window_size or 0),
+                    frame_stride=int(ref.frame_stride or 1),
+                )
+            except Exception:
+                return None, ref.context or ""
+            if window is None:
+                return None, ref.context or ""
+            frames = torch.from_numpy(window).permute(0, 3, 1, 2).float() / 255.0
+            return frames, ref.context or ""
+
+        return None, ref.context or ""
+
+    def _materialize_batch(self, batch_refs: list[tuple[str, list[SampleReference]]]) -> Optional[dict[str, Any]]:
+        batch_sequences: list[torch.Tensor] = []
+        batch_labels: list[int] = []
+        batch_seq_lens: list[int] = []
+        batch_identities: list[str] = []
+        batch_contexts: list[str] = []
+
+        for identity, refs in batch_refs:
+            loaded: list[tuple[torch.Tensor, str]] = []
+            for ref in refs:
+                frames, ctx = self._load_reference(ref)
+                if frames is None:
+                    continue
+                loaded.append((frames, ctx))
+            if len(loaded) < self.min_samples_per_identity:
+                continue
+            use = loaded[: self.samples_per_identity]
+            for frames, ctx in use:
+                batch_sequences.append(frames)
+                batch_labels.append(self.identity_to_index[identity])
+                batch_seq_lens.append(int(frames.shape[0]))
+                batch_identities.append(identity)
+                batch_contexts.append(ctx)
+
+        if len(batch_sequences) < self.batch_identities * self.min_samples_per_identity:
+            return None
+
+        max_len = max(batch_seq_lens)
+        padded = [self._pad_sequence(seq, max_len) for seq in batch_sequences]
+        return {
+            "frames": torch.stack(padded, dim=0),
+            "label": torch.tensor(batch_labels, dtype=torch.long),
+            "seq_lens": torch.tensor(batch_seq_lens, dtype=torch.long),
+            "identity": batch_identities,
+            "context": batch_contexts,
+        }
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        identity_order = self._iter_identity_order()
+        batch_refs: list[tuple[str, list[SampleReference]]] = []
+
+        for identity in identity_order:
+            refs = self._iter_refs_for_identity(identity)
+            if len(refs) < self.min_samples_per_identity:
+                continue
+            refs = refs[: self.samples_per_identity] if len(refs) >= self.samples_per_identity else refs
+            batch_refs.append((identity, refs))
+
+            if len(batch_refs) == self.batch_identities:
+                batch = self._materialize_batch(batch_refs)
+                if batch is not None:
+                    yield batch
+                batch_refs = []
+
+        # Drop any incomplete batch with fewer than batch_identities identities to
+        # match the expected projector training shape.

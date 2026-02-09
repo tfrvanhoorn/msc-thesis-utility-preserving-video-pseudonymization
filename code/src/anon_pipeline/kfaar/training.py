@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch_identities", type=int, default=4, help="Number of unique identities per batch")
     parser.add_argument("--batch_samples_per_identity", type=int, default=2, help="Images per identity in a batch")
+    parser.add_argument("--min_samples_per_identity", type=int, default=2, help="Minimum samples required to include an identity in a batch")
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for the projector")
 
@@ -127,6 +128,10 @@ def main():
         seed=args.seed,
         max_identities=args.max_identities,
         batch_size=args.batch_identities * args.batch_samples_per_identity,
+        identity_batching=True,
+        batch_identities=args.batch_identities,
+        samples_per_identity=args.batch_samples_per_identity,
+        min_samples_per_identity=args.min_samples_per_identity,
         shuffle_train=True,
         shuffle_test=False,
     )

@@ -8,7 +8,7 @@ from typing import Iterable, Iterator, List, Sequence, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from .loaders import SupportsDataConfig, build_dataset, unified_video_collate_fn
+from .loaders import SupportsDataConfig, IdentityBatchingDataset, build_dataset, unified_video_collate_fn
 
 
 @dataclass(frozen=True)
@@ -90,12 +90,31 @@ def build_dataloader_for_identities(
     shuffle: bool = True,
     num_workers: int = 0,
     collate_fn=None,
+    identity_batching: bool = False,
+    batch_identities: int | None = None,
+    samples_per_identity: int | None = None,
+    min_samples_per_identity: int = 2,
 ) -> DataLoader:
+    identity_to_index = {ident: idx for idx, ident in enumerate(identities)}
+
+    if identity_batching:
+        if not batch_identities or not samples_per_identity:
+            raise ValueError("identity_batching requires batch_identities and samples_per_identity")
+        sample_index = _build_identity_sample_index(config, identities, min_samples_per_identity=min_samples_per_identity)
+        batched_dataset = IdentityBatchingDataset(
+            sample_index,
+            identity_to_index,
+            batch_identities=batch_identities,
+            samples_per_identity=samples_per_identity,
+            min_samples_per_identity=min_samples_per_identity,
+            shuffle_identities=shuffle,
+        )
+        return DataLoader(batched_dataset, batch_size=None, shuffle=False, num_workers=num_workers)
+
     cfg = _config_with_identities(config, identities, shuffle=shuffle)
     dataset = build_dataset(cfg)
 
     # IterableDataset does not support DataLoader-level shuffling; randomization can be handled inside the dataset
-    identity_to_index = {ident: idx for idx, ident in enumerate(identities)}
     effective_collate = collate_fn or (lambda batch: unified_video_collate_fn(batch, identity_to_index=identity_to_index))
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=effective_collate)
@@ -108,6 +127,10 @@ def build_train_test_loaders(
     seed: int = 0,
     max_identities: int | None = None,
     batch_size: int = 4,
+    batch_identities: int | None = None,
+    samples_per_identity: int | None = None,
+    identity_batching: bool = False,
+    min_samples_per_identity: int = 2,
     shuffle_train: bool = True,
     shuffle_test: bool = False,
     num_workers: int = 0,
@@ -118,6 +141,10 @@ def build_train_test_loaders(
         config,
         split.train,
         batch_size=batch_size,
+        identity_batching=identity_batching,
+        batch_identities=batch_identities,
+        samples_per_identity=samples_per_identity,
+        min_samples_per_identity=min_samples_per_identity,
         shuffle=shuffle_train,
         num_workers=num_workers,
         collate_fn=collate_fn,
@@ -126,6 +153,10 @@ def build_train_test_loaders(
         config,
         split.test,
         batch_size=batch_size,
+        identity_batching=identity_batching,
+        batch_identities=batch_identities,
+        samples_per_identity=samples_per_identity,
+        min_samples_per_identity=min_samples_per_identity,
         shuffle=shuffle_test,
         num_workers=num_workers,
         collate_fn=collate_fn,
