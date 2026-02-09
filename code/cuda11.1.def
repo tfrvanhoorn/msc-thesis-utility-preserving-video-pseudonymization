@@ -7,8 +7,8 @@ From: nvidia/cuda:11.1.1-devel-ubuntu20.04
 %post
     export DEBIAN_FRONTEND=noninteractive
 
-    # 1. Install system dependencies for Python 3.8
-    apt-get update && apt-get install -y \
+    # 1. Install system dependencies for Python 3.8 (no recommends to avoid openssh-client pull-in)
+    apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
         git \
@@ -20,6 +20,9 @@ From: nvidia/cuda:11.1.1-devel-ubuntu20.04
         python3-distutils \
         libgl1-mesa-glx \
         libglib2.0-0
+
+    # Clean apt caches to reduce image size and avoid stale lists
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
     # 2. Set Python 3.8 as the default 'python'
     update-alternatives --install /usr/bin/python python /usr/bin/python3.8 1
