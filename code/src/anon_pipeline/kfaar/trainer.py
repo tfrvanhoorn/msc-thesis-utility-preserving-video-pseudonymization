@@ -395,6 +395,8 @@ class KfaarTrainer:
             alloc_gb,
             reserved_gb,
         )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         self._reset_interval_stats()
 
     def _reset_interval_stats(self) -> None:
