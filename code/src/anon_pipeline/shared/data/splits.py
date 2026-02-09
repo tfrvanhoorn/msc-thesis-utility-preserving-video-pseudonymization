@@ -8,7 +8,13 @@ from typing import Iterable, Iterator, List, Sequence, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from .loaders import SupportsDataConfig, IdentityBatchingDataset, build_dataset, unified_video_collate_fn
+from .loaders import (
+    SupportsDataConfig,
+    IdentityBatchingDataset,
+    _build_identity_sample_index,
+    build_dataset,
+    unified_video_collate_fn,
+)
 
 
 @dataclass(frozen=True)
