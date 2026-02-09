@@ -55,7 +55,7 @@ class KfaarTrainer:
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
         self.start_epoch = start_epoch
-        self._memory_log_interval = 200
+        self._memory_log_interval = 100
         self._proc = psutil.Process()
         self._interval_stats = {"discarded_batches": 0, "input_no_det": 0, "gen_no_det": 0}
         self.train_identities = list(train_identities) if train_identities else None

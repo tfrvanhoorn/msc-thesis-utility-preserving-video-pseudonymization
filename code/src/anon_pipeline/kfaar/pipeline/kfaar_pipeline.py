@@ -343,8 +343,11 @@ class KfaarPipeline:
         if not filtered_labels or sum(t.shape[0] for t in real_feats) < 2:
             self.stats["discarded_batches"] = self.stats.get("discarded_batches", 0) + 1
             penalty_val = 10.0
-            param_link = sum(p.sum() for p in self.projector.parameters()) * 0.0
-            penalty = penalty_val + param_link
+            param_anchor = next(iter(self.projector.parameters()), None)
+            if param_anchor is None:
+                penalty = torch.tensor(penalty_val, device=device, requires_grad=True)
+            else:
+                penalty = param_anchor.sum() * 0.0 + torch.tensor(penalty_val, device=device)
             return penalty, penalty, penalty, penalty, penalty
 
         real_concat = torch.cat(real_feats, dim=0)
