@@ -76,6 +76,12 @@ def parse_args():
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
 
+    # Generated face saving
+    parser.add_argument("--save_generated_faces", action="store_true", help="Store generated faces to disk during training")
+    parser.add_argument("--save_generated_mode", type=str, default="detected", choices=["detected", "undetected", "all"], help="Which generated frames to store")
+    parser.add_argument("--save_generated_dir", type=Path, default=None, help="Directory to store generated face images (defaults to output_dir/generated_faces)")
+    parser.add_argument("--save_generated_max_per_epoch", type=int, default=100, help="Maximum number of generated samples to store per epoch (set <=0 for no limit)")
+
     return parser.parse_args()
 
 def main():
@@ -150,6 +156,9 @@ def main():
             start_epoch = int(ckpt.get("epoch", -1)) + 1
         logging.info("Resumed from %s at epoch %s", args.resume_ckpt, start_epoch)
 
+    save_dir = args.save_generated_dir if args.save_generated_dir is not None else args.output_dir / "generated_faces"
+    save_max = None if args.save_generated_max_per_epoch is not None and args.save_generated_max_per_epoch <= 0 else args.save_generated_max_per_epoch
+
     # 4. Initialize and Run Trainer
     trainer = KfaarTrainer(
         pipeline=pipeline,
@@ -170,6 +179,10 @@ def main():
         train_identities=split.train,
         val_identities=split.test,
         start_epoch=start_epoch,
+        save_generated_faces=args.save_generated_faces,
+        save_generated_dir=save_dir,
+        save_generated_mode=args.save_generated_mode,
+        save_generated_max_per_epoch=save_max,
     )
 
     logging.info("Starting training loop...")

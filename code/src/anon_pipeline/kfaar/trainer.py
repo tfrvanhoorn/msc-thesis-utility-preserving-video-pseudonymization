@@ -39,6 +39,10 @@ class KfaarTrainer:
         train_identities: Sequence[Any] | None = None,
         val_identities: Sequence[Any] | None = None,
         start_epoch: int = 0,
+        save_generated_faces: bool = False,
+        save_generated_dir: str | Path | None = None,
+        save_generated_mode: str = "detected",
+        save_generated_max_per_epoch: int | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.train_loader = train_loader
@@ -61,6 +65,10 @@ class KfaarTrainer:
         self.train_identities = list(train_identities) if train_identities else None
         self.val_identities = list(val_identities) if val_identities else None
         self.eval_history: list[dict[str, float]] = []
+        self.save_generated_faces = save_generated_faces
+        self.save_generated_dir = Path(save_generated_dir) if save_generated_dir else None
+        self.save_generated_mode = save_generated_mode
+        self.save_generated_max_per_epoch = save_generated_max_per_epoch
 
         default_ckpt_dir = Path(__file__).resolve().parent / "checkpoints"
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else default_ckpt_dir
@@ -75,6 +83,14 @@ class KfaarTrainer:
             self.pipeline.stylegan.to(self.device)
         self.pipeline.device = self.device
 
+        if self.save_generated_faces and hasattr(self.pipeline, "configure_saving"):
+            target_dir = self.save_generated_dir if self.save_generated_dir is not None else (self.checkpoint_dir / "generated_faces")
+            self.pipeline.configure_saving(
+                target_dir,
+                mode=self.save_generated_mode,
+                max_per_epoch=self.save_generated_max_per_epoch,
+            )
+
     def train(self) -> None:
         logging.info("Starting KFAAR training for %s epochs", self.epochs)
 
@@ -83,6 +99,9 @@ class KfaarTrainer:
             epoch_loss = 0.0
             step_count = 0
             self._reset_interval_stats()
+
+            if self.save_generated_faces and hasattr(self.pipeline, "begin_epoch"):
+                self.pipeline.begin_epoch(epoch + 1)
 
             progress = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}", file=sys.stdout)
             for batch in progress:
@@ -184,6 +203,11 @@ class KfaarTrainer:
                 "dif": 0.0,
             }
 
+        saving_was_active = False
+        if self.save_generated_faces and hasattr(self.pipeline, "disable_saving"):
+            saving_was_active = bool(getattr(self.pipeline, "_saving_active", False))
+            self.pipeline.disable_saving()
+
         self.pipeline.projector.eval()
         total_loss = 0.0
         total_ano = 0.0
@@ -246,6 +270,9 @@ class KfaarTrainer:
                 "dif": avg_dif,
             }
         )
+
+        if self.save_generated_faces and saving_was_active and hasattr(self.pipeline, "enable_saving"):
+            self.pipeline.enable_saving()
 
         return {
             "total": avg_total,

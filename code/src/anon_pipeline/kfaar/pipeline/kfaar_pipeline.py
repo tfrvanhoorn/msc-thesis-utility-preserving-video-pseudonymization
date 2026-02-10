@@ -1,13 +1,11 @@
 from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
-
+from typing import Optional, Sequence, Dict
 import numpy as np
 import torch
-
+from torchvision import utils as vutils
 from ..components import EmbeddingModel, FaceDetector, ProjectorMLP, ProjectorLSTM
 from ..components.alignment import FaceAligner
 from ..components.detector import Detection
@@ -17,13 +15,10 @@ from ..losses import (
     synchronism_loss,
     diversity_loss,
     differentiation_loss,
-    temporal_smoothness_loss,
     total_hpvg_loss,
 )
 
-
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class KfaarResult:
@@ -31,11 +26,8 @@ class KfaarResult:
     aligned_faces: Sequence[torch.Tensor]
     real_embeddings: torch.Tensor
     projected_z: torch.Tensor
-    w_latents: Optional[torch.Tensor] = None
-    generated_images: Optional[torch.Tensor] = None
-    virtual_embeddings: Optional[torch.Tensor] = None
-    valid_mask: Optional[torch.Tensor] = None
-
+    virtual_embeddings: torch.Tensor
+    valid_mask: torch.Tensor # Mask where both input AND gen-output had faces
 
 class KfaarPipeline:
     def __init__(
@@ -46,6 +38,10 @@ class KfaarPipeline:
         projector: ProjectorMLP,
         stylegan: Optional[StyleGAN2Generator] = None,
         device: Optional[torch.device] = None,
+        *,
+        save_dir: Optional[Path] = None,
+        save_mode: str = "detected",
+        save_max_per_epoch: Optional[int] = None,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -54,355 +50,234 @@ class KfaarPipeline:
         self.stylegan = stylegan
         self.device = device or next(projector.parameters()).device
         self._projector_is_lstm = isinstance(projector, ProjectorLSTM)
-        self.optimizer = torch.optim.Adam(
-            self.projector.parameters(),
-            lr=1e-4,
-            betas=(0.9, 0.999)
-        )
-        self.stats: dict[str, int] = {
-            "input_no_det": 0,
-            "gen_no_det": 0,
-            "discarded_batches": 0,
-        }
+        
+        # Optimizer Setup
+        self.optimizer = torch.optim.Adam(self.projector.parameters(), lr=1e-4)
+        
+        self.stats: Dict[str, int] = {"input_no_det": 0, "gen_no_det": 0, "discarded_batches": 0}
 
-        # Freeze other components when they expose parameters
-        if hasattr(self.embedder, "parameters"):
-            for param in self.embedder.parameters():
-                param.requires_grad = False
-
-        if self.stylegan is not None and hasattr(self.stylegan, "parameters"):
-            for param in self.stylegan.parameters():
-                param.requires_grad = False
-
-        # Place modules on the target device when possible
-        if hasattr(self.embedder, "to"):
-            self.embedder.to(self.device)
-        if self.stylegan is not None and hasattr(self.stylegan, "to"):
-            self.stylegan.to(self.device)
+        # Transfer and Freeze
+        if hasattr(self.embedder, "to"): self.embedder.to(self.device)
+        if self.stylegan is not None: self.stylegan.to(self.device)
         self.projector.to(self.device)
 
-    def forward(self, frames: torch.Tensor | np.ndarray, key: torch.Tensor, source_path: Path | None = None, seq_len: int | None = None) -> KfaarResult:
+        # Generated face saving configuration
+        self._save_enabled = save_dir is not None
+        self._saving_active = self._save_enabled
+        self._save_dir = Path(save_dir) if save_dir is not None else None
+        self._save_mode = save_mode
+        self._save_max_per_epoch = save_max_per_epoch
+        self._saved_this_epoch = 0
+        self._current_epoch = 0
+        if self._save_enabled:
+            self._save_dir.mkdir(parents=True, exist_ok=True)
+
+    def forward(self, frames: torch.Tensor, key: torch.Tensor) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
-        if seq_len is not None:
-            frames_t = frames_t[:seq_len]
         seq_len = frames_t.shape[0]
 
-        detections: list[Detection | None] = []
-        aligned_by_idx: list[tuple[int, torch.Tensor]] = []
-        aligned_faces: list[torch.Tensor] = []
-        valid_mask: list[bool] = []
-
-        for idx in range(seq_len):
-            frame = frames_t[idx]
+        # 1. Input Processing
+        input_mask = []
+        aligned_faces = []
+        real_emb = torch.zeros(seq_len, 512, device=device)
+        
+        for frame in frames_t:
             dets = self.detector.detect(frame)
             if dets:
-                top_det = max(dets, key=lambda d: d.score)
-                detections.append(top_det)
-                aligned_face = self.aligner.align(frame, top_det).to(device)
-                aligned_by_idx.append((idx, aligned_face))
-                aligned_faces.append(aligned_face)
-                valid_mask.append(True)
+                top = max(dets, key=lambda d: d.score)
+                aligned = self.aligner.align(frame, top).to(device)
+                aligned_faces.append(aligned)
+                input_mask.append(True)
             else:
-                detections.append(None)
-                aligned_faces.append(torch.empty(0, device=device))
-                valid_mask.append(False)
-                self.stats["input_no_det"] = self.stats.get("input_no_det", 0) + 1
+                aligned_faces.append(torch.empty(0))
+                input_mask.append(False)
+                self.stats["input_no_det"] += 1
 
-        embed_size = getattr(self.embedder, "embedding_size", None) or 512
-        real_embeddings = torch.zeros(seq_len, embed_size, device=device)
+        if any(input_mask):
+            valid_idx = [i for i, m in enumerate(input_mask) if m]
+            embs = self.embedder.embed([aligned_faces[i] for i in valid_idx], with_grad=False)
+            for e, idx in zip(embs, valid_idx):
+                real_emb[idx] = e
 
-        if aligned_by_idx:
-            align_only = [item[1] for item in aligned_by_idx]
-            source_paths = [source_path] * len(align_only) if source_path is not None else None
-            emb = self.embedder.embed(align_only, source_paths=source_paths, with_grad=False).to(device)
-            for emb_val, (idx, _) in zip(emb, aligned_by_idx):
-                real_embeddings[idx] = emb_val
-
+        # 2. Projection
         key_t = key.to(device)
-        projected_z: torch.Tensor
-
         if self._projector_is_lstm:
-            if key_t.dim() == 1:
-                key_t = key_t.unsqueeze(0)
-            if key_t.dim() == 2:
-                key_t = key_t.unsqueeze(1).expand(-1, seq_len, -1)
-            elif key_t.dim() == 3 and key_t.shape[1] != seq_len:
-                key_t = key_t.expand(-1, seq_len, -1)
-
-            proj_in = real_embeddings.unsqueeze(0)
-            projected_seq = self.projector.project(proj_in, key_t)
-            projected_z = projected_seq[0]
+            k_in = key_t.view(1, 1, -1).expand(1, seq_len, -1)
+            projected_z = self.projector.project(real_emb.unsqueeze(0), k_in)[0]
         else:
-            projected_list: list[torch.Tensor] = []
-            for idx in range(seq_len):
-                z_in = real_embeddings[idx]
-                projected = self.projector.project(z_in, key_t)
-                projected_list.append(projected.squeeze(0) if projected.dim() > 1 else projected)
-            projected_z = torch.stack(projected_list, dim=0) if projected_list else torch.zeros(seq_len, embed_size, device=device)
+            projected_z = self.projector.project(real_emb, key_t.expand(seq_len, -1))
 
-        w_latents: torch.Tensor | None = None
-        generated_images: torch.Tensor | None = None
-        virtual_embeddings: torch.Tensor | None = None
-
-        if self.stylegan is not None and projected_z.numel() > 0:
-            w_list: list[torch.Tensor] = []
-            gen_images: list[torch.Tensor] = []
-            virtual_list: list[torch.Tensor] = []
-
-            for latent in projected_z:
-                w = self.stylegan.map(latent.unsqueeze(0))
-                use_fp32 = device.type == "cpu"
-                images = self.stylegan.synthesize(w, noise_mode="const", force_fp32=use_fp32)
-
-                w_list.append(w[0])
-                gen_img = images[0]
-                gen_images.append(gen_img)
-
-                img_01 = gen_img.clamp(-1, 1).add(1).div(2.0)
-                dets = self.detector.detect(img_01)
+        # 3. Virtual Processing
+        v_embeddings = torch.zeros(seq_len, 512, device=device)
+        gen_mask = [False] * seq_len
+        
+        images = None
+        if self.stylegan is not None:
+            w = self.stylegan.map(projected_z)
+            images = self.stylegan.synthesize(w, noise_mode="const")
+            for i in range(seq_len):
+                img = images[i].clamp(-1, 1).add(1).div(2.0)
+                dets = self.detector.detect(img)
                 if dets:
-                    top_det = max(dets, key=lambda d: d.score)
-                    synth_aligned = self.aligner.align(img_01, top_det).to(device)
-                    virt = self.embedder.embed([synth_aligned], with_grad=True).to(device)[0]
+                    top = max(dets, key=lambda d: d.score)
+                    aligned = self.aligner.align(img, top).to(device)
+                    # Carry grad from projected_z through StyleGAN to Embedder
+                    v_embeddings[i] = self.embedder.embed([aligned], with_grad=True)[0]
+                    gen_mask[i] = True
                 else:
-                    virt = torch.zeros(embed_size, device=device)
-                    self.stats["gen_no_det"] = self.stats.get("gen_no_det", 0) + 1
-                virtual_list.append(virt)
+                    # Maintain grad path but keep value 0 to signal failure
+                    v_embeddings[i] = projected_z[i].sum() * 0.0
+                    self.stats["gen_no_det"] += 1
 
-            w_latents = torch.stack(w_list, dim=0) if w_list else None
-            generated_images = torch.stack(gen_images, dim=0) if gen_images else None
-            virtual_embeddings = torch.stack(virtual_list, dim=0) if virtual_list else None
-        else:
-            virtual_embeddings = torch.zeros(seq_len, embed_size, device=device)
+            self._maybe_save_generated(images, gen_mask)
+
+        valid_mask = torch.tensor([i and g for i, g in zip(input_mask, gen_mask)], device=device)
 
         return KfaarResult(
-            detections=detections,
+            detections=[], # Simplified for training speed
             aligned_faces=aligned_faces,
-            real_embeddings=real_embeddings.detach(),
+            real_embeddings=real_emb.detach(),
             projected_z=projected_z,
-            w_latents=w_latents,
-            generated_images=generated_images,
-            virtual_embeddings=virtual_embeddings,
-            valid_mask=torch.tensor(valid_mask, device=device, dtype=torch.bool),
+            virtual_embeddings=v_embeddings,
+            valid_mask=valid_mask
         )
 
-    @staticmethod
-    def _to_sequence_tensor(frames: torch.Tensor | np.ndarray, device: torch.device) -> torch.Tensor:
-        if isinstance(frames, torch.Tensor):
-            tensor = frames
-        else:
-            tensor = torch.from_numpy(np.asarray(frames))
-
-        if tensor.dim() == 3:
-            if tensor.shape[0] == 3:
-                tensor = tensor.unsqueeze(0)
-            elif tensor.shape[-1] == 3:
-                tensor = tensor.permute(2, 0, 1).unsqueeze(0)
-            else:
-                raise ValueError(f"Expected image with 3 channels, got {tuple(tensor.shape)}")
-        elif tensor.dim() == 4:
-            if tensor.shape[-1] == 3 and tensor.shape[1] != 3:
-                tensor = tensor.permute(0, 3, 1, 2)
-        else:
-            raise ValueError(f"Expected frames with shape (Seq,C,H,W) or (C,H,W), got {tuple(tensor.shape)}")
-
-        tensor = tensor.float()
-        if tensor.max() > 1.0 or tensor.min() < 0.0:
-            tensor = tensor / 255.0
-        return tensor.to(device)
-
-    def hpvg_train_step(
-        self,
-        frames: torch.Tensor,
-        labels: torch.Tensor,
-        seq_lens: torch.Tensor | list[int] | None,
-        key_1: torch.Tensor,
-        key_2: torch.Tensor,
-        *,
-        margin: float = 0.5,
-        lambda_ano: float = 0.4,
-        lambda_syn: float = 1.0,
-        lambda_div: float = 1.0,
-        lambda_dif: float = 1.0,
-        lambda_temp: float = 0.0,
-    ) -> torch.Tensor:
-        """Compute loss, apply gradients, and return total loss."""
-        loss = self.hpvg_loss(
-            frames,
-            labels,
-            seq_lens,
-            key_1,
-            key_2,
-            margin=margin,
-            lambda_ano=lambda_ano,
-            lambda_syn=lambda_syn,
-            lambda_div=lambda_div,
-            lambda_dif=lambda_dif,
-            lambda_temp=lambda_temp,
-        )
-
+    def hpvg_train_step(self, frames, labels, seq_lens, key_1, key_2, **kwargs) -> torch.Tensor:
         self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        self.optimizer.step()
         
-        return loss
+        # components will return None if criteria not met
+        comps = self.hpvg_loss_components(frames, labels, seq_lens, key_1, key_2, **kwargs)
+        
+        if comps is None:
+            self.stats["discarded_batches"] += 1
+            return torch.tensor(0.0, device=self.device)
 
-    def hpvg_loss(
-        self,
-        frames: torch.Tensor,
-        labels: torch.Tensor,
-        seq_lens: torch.Tensor | list[int] | None,
-        key_1: torch.Tensor,
-        key_2: torch.Tensor,
-        *,
-        margin: float = 0.5,
-        lambda_ano: float = 0.4,
-        lambda_syn: float = 1.0,
-        lambda_div: float = 1.0,
-        lambda_dif: float = 1.0,
-        lambda_temp: float = 0.0,
-    ) -> torch.Tensor:
-        """
-        Compute the HPVG loss without performing an optimizer step.
-        Useful for validation or any gradient-free evaluation.
-        """
-        *_, total = self.hpvg_loss_components(
-            frames,
-            labels,
-            seq_lens,
-            key_1,
-            key_2,
-            margin=margin,
-            lambda_ano=lambda_ano,
-            lambda_syn=lambda_syn,
-            lambda_div=lambda_div,
-            lambda_dif=lambda_dif,
-            lambda_temp=lambda_temp,
-        )
-        return total
+        ano, syn, div, dif, total = comps
+        
+        # Only backprop if total is linked to a grad_fn
+        if total.requires_grad:
+            total.backward()
+            self.optimizer.step()
+            return total
+        
+        return torch.tensor(0.0, device=self.device)
 
     def hpvg_loss_components(
-        self,
-        frames: torch.Tensor,
-        labels: torch.Tensor,
-        seq_lens: torch.Tensor | list[int] | None,
-        key_1: torch.Tensor,
-        key_2: torch.Tensor,
-        *,
-        margin: float = 0.5,
-        lambda_ano: float = 0.4,
-        lambda_syn: float = 1.0,
-        lambda_div: float = 1.0,
-        lambda_dif: float = 1.0,
-        lambda_temp: float = 0.0,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, frames, labels, seq_lens, key_1, key_2,
+        margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         
         device = self.device
-
-        if frames.dim() == 4:
-            frames = frames.unsqueeze(1)
-
-        if frames.dim() != 5:
-            raise ValueError(f"Expected frames with shape (B,Seq,C,H,W), got {tuple(frames.shape)}")
-
-        batch_size, max_seq, _, _, _ = frames.shape
-        if seq_lens is None:
-            seq_lens = [max_seq] * batch_size
+        batch_size = frames.shape[0]
         seq_lens_list = [int(x) for x in (seq_lens.tolist() if torch.is_tensor(seq_lens) else seq_lens)]
 
-        outs_k1 = []
-        outs_k2 = []
-        for idx in range(batch_size):
-            seq_len = seq_lens_list[idx]
-            sample_frames = frames[idx, :seq_len]
-            outs_k1.append(self.forward(sample_frames, key_1, seq_len=seq_len))
-            outs_k2.append(self.forward(sample_frames, key_2, seq_len=seq_len))
+        all_real, all_v1, all_v2, all_labels = [], [], [], []
 
-        real_feats: list[torch.Tensor] = []
-        virt_k1_feats: list[torch.Tensor] = []
-        virt_k2_feats: list[torch.Tensor] = []
-        filtered_labels: list[int] = []
+        for b in range(batch_size):
+            res1 = self.forward(frames[b, :seq_lens_list[b]], key_1)
+            res2 = self.forward(frames[b, :seq_lens_list[b]], key_2)
+            
+            mask = res1.valid_mask & res2.valid_mask
+            if mask.any():
+                all_real.append(res1.real_embeddings[mask])
+                all_v1.append(res1.virtual_embeddings[mask])
+                all_v2.append(res2.virtual_embeddings[mask])
+                all_labels.extend([labels[b].item()] * int(mask.sum()))
 
-        for idx in range(batch_size):
-            out1 = outs_k1[idx]
-            out2 = outs_k2[idx]
+        # --- VALIDATION GATE ---
+        if not all_labels:
+            return None
 
-            mask1 = out1.valid_mask if out1.valid_mask is not None else torch.ones(out1.real_embeddings.shape[0], device=device, dtype=torch.bool)
-            mask2 = out2.valid_mask if out2.valid_mask is not None else torch.ones(out2.real_embeddings.shape[0], device=device, dtype=torch.bool)
-            joint_mask = mask1 & mask2
-            if joint_mask.dim() == 0:
-                joint_mask = joint_mask.unsqueeze(0)
+        # Requirement: At least 2 identities AND each has at least 2 samples
+        unique_labels, counts = np.unique(all_labels, return_counts=True)
+        valid_identities = unique_labels[counts >= 2]
 
-            if joint_mask.any():
-                real_feats.append(out1.real_embeddings[joint_mask])
-                virt_k1_feats.append(out1.virtual_embeddings[joint_mask])
-                virt_k2_feats.append(out2.virtual_embeddings[joint_mask])
-                filtered_labels.extend([int(labels[idx].item())] * int(joint_mask.sum().item()))
+        if len(valid_identities) < 2:
+            return None
 
-        if not filtered_labels or sum(t.shape[0] for t in real_feats) < 2:
-            self.stats["discarded_batches"] = self.stats.get("discarded_batches", 0) + 1
-            penalty_val = 10.0
-            param_anchor = next(iter(self.projector.parameters()), None)
-            if param_anchor is None:
-                penalty = torch.tensor(penalty_val, device=device, requires_grad=True)
-            else:
-                penalty = param_anchor.sum() * 0.0 + torch.tensor(penalty_val, device=device)
-            return penalty, penalty, penalty, penalty, penalty
+        # Filter tensors to only include identities with >= 2 samples
+        lab_t = torch.tensor(all_labels, device=device)
+        keep_mask = torch.zeros_like(lab_t, dtype=torch.bool)
+        for vid in valid_identities:
+            keep_mask |= (lab_t == int(vid))
 
-        real_concat = torch.cat(real_feats, dim=0)
-        virt_k1_concat = torch.cat(virt_k1_feats, dim=0)
-        virt_k2_concat = torch.cat(virt_k2_feats, dim=0)
-        labels_tensor = torch.tensor(filtered_labels, device=device, dtype=torch.long)
+        real_c = torch.cat(all_real)[keep_mask]
+        v1_c = torch.cat(all_v1)[keep_mask]
+        v2_c = torch.cat(all_v2)[keep_mask]
+        lab_final = lab_t[keep_mask]
 
-        ano = anonymity_loss(real_feat=real_concat, virtual_feat=virt_k1_concat, margin=margin)
-        div = diversity_loss(virtual_feat_k1=virt_k1_concat, virtual_feat_k2=virt_k2_concat, margin=margin)
+        # Compute Losses
+        ano = anonymity_loss(real_c, v1_c, margin=margin)
+        div = diversity_loss(v1_c, v2_c, margin=margin)
+        syn = synchronism_loss(v1_c, v1_c, labels=lab_final, margin=margin)
+        dif = differentiation_loss(v1_c, v1_c, labels=lab_final, margin=margin)
 
-        syn_loss_val = torch.tensor(0.0, device=device)
-        dif_loss_val = torch.tensor(0.0, device=device)
-        syn_count = 0
-        dif_count = 0
+        total = (lambda_ano * ano + lambda_syn * syn + 
+                 lambda_div * div + lambda_dif * dif)
 
-        num_valid = real_concat.shape[0]
-        for i in range(num_valid):
-            for j in range(i + 1, num_valid):
-                f_i = virt_k1_concat[i : i + 1]
-                f_j = virt_k1_concat[j : j + 1]
-                if labels_tensor[i] == labels_tensor[j]:
-                    syn_loss_val = syn_loss_val + synchronism_loss(f_i, f_j, margin=margin)
-                    syn_count += 1
-                else:
-                    dif_loss_val = dif_loss_val + differentiation_loss(f_i, f_j, margin=margin)
-                    dif_count += 1
+        return ano, syn, div, dif, total
 
-        if syn_count > 0:
-            syn_loss_val = syn_loss_val / syn_count
-        if dif_count > 0:
-            dif_loss_val = dif_loss_val / dif_count
+    @staticmethod
+    def _to_sequence_tensor(frames, device):
+        t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
+        return t.float().to(device)
 
-        temp_loss = torch.tensor(0.0, device=device)
-        if lambda_temp > 0.0 and self._projector_is_lstm:
-            seq_virtuals: list[torch.Tensor] = []
-            for out1 in outs_k1:
-                vm = out1.valid_mask if out1.valid_mask is not None else torch.ones(out1.virtual_embeddings.shape[0], device=device, dtype=torch.bool)
-                seq_feats = out1.virtual_embeddings[vm]
-                if seq_feats.dim() == 1:
-                    seq_feats = seq_feats.unsqueeze(0)
-                seq_virtuals.append(seq_feats)
-            if len(seq_virtuals) >= 2:
-                temp_loss = temporal_smoothness_loss(seq_virtuals, reduction="mean")
+    def configure_saving(self, save_dir: Path, *, mode: str = "detected", max_per_epoch: Optional[int] = None) -> None:
+        """Enable saving synthesized faces to disk with a per-epoch cap."""
+        self._save_enabled = True
+        self._saving_active = True
+        self._save_dir = Path(save_dir)
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+        self._save_mode = mode
+        self._save_max_per_epoch = max_per_epoch
+        self._saved_this_epoch = 0
 
-        total = total_hpvg_loss(
-            ano,
-            syn_loss_val,
-            div,
-            dif_loss_val,
-            temp_loss if lambda_temp > 0.0 and self._projector_is_lstm else None,
-            lambda_ano,
-            lambda_syn,
-            lambda_div,
-            lambda_dif,
-            lambda_temp,
-        )
+    def begin_epoch(self, epoch: int) -> None:
+        """Reset save counters for a new epoch and prepare the epoch directory."""
+        self._current_epoch = epoch
+        self._saved_this_epoch = 0
+        if self._save_enabled and self._save_dir is not None:
+            (self._save_dir / f"epoch_{epoch:03d}").mkdir(parents=True, exist_ok=True)
+        self._saving_active = self._save_enabled
 
-        return ano, syn_loss_val, div, dif_loss_val, total
+    def disable_saving(self) -> None:
+        self._saving_active = False
+
+    def enable_saving(self) -> None:
+        if self._save_enabled:
+            self._saving_active = True
+
+    def _maybe_save_generated(self, images: Optional[torch.Tensor], gen_mask: Sequence[bool]) -> None:
+        if not self._save_enabled or not self._saving_active:
+            return
+        if images is None:
+            return
+        if self._save_max_per_epoch is not None and self._saved_this_epoch >= self._save_max_per_epoch:
+            return
+
+        mode = self._save_mode
+        save_dir = self._save_dir if self._save_dir is not None else None
+        if save_dir is None:
+            return
+
+        epoch_dir = save_dir / f"epoch_{self._current_epoch:03d}"
+        epoch_dir.mkdir(parents=True, exist_ok=True)
+
+        with torch.no_grad():
+            for idx in range(images.shape[0]):
+                if self._save_max_per_epoch is not None and self._saved_this_epoch >= self._save_max_per_epoch:
+                    break
+
+                detected = bool(gen_mask[idx])
+                if mode == "detected" and not detected:
+                    continue
+                if mode == "undetected" and detected:
+                    continue
+
+                filename = (
+                    f"epoch{self._current_epoch:03d}_sample{self._saved_this_epoch:06d}_"
+                    f"f{idx:03d}_{'det' if detected else 'undet'}.png"
+                )
+                vutils.save_image(images[idx].detach().cpu().clamp(0.0, 1.0), epoch_dir / filename)
+                self._saved_this_epoch += 1
