@@ -210,8 +210,8 @@ class KfaarPipeline:
         # Compute Losses
         ano = anonymity_loss(real_c, v1_c, margin=margin)
         div = diversity_loss(v1_c, v2_c, margin=margin)
-        syn = synchronism_loss(v1_c, v1_c, labels=lab_final, margin=margin)
-        dif = differentiation_loss(v1_c, v1_c, labels=lab_final, margin=margin)
+        syn = synchronism_loss(v1_c, v1_c, margin=margin)
+        dif = differentiation_loss(v1_c, v1_c, margin=margin)
 
         total = (lambda_ano * ano + lambda_syn * syn + 
                  lambda_div * div + lambda_dif * dif)
