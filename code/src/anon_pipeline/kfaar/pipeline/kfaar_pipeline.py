@@ -173,49 +173,80 @@ class KfaarPipeline:
         seq_lens_list = [int(x) for x in (seq_lens.tolist() if torch.is_tensor(seq_lens) else seq_lens)]
 
         all_real, all_v1, all_v2, all_labels = [], [], [], []
+        det_failures = 0  # Track how many frames failed StyleGAN/Detection
 
         for b in range(batch_size):
             label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
             res1 = self.forward(frames[b, :seq_lens_list[b]], key_1, sample_label=label_int, key_tag="k1")
             res2 = self.forward(frames[b, :seq_lens_list[b]], key_2, sample_label=label_int, key_tag="k2")
             
+            # Mask is True only if BOTH keys produced a valid face
             mask = res1.valid_mask & res2.valid_mask
+            
+            # Track failures for the realism penalty
+            det_failures += (~mask).sum().item()
+
             if mask.any():
                 all_real.append(res1.real_embeddings[mask])
                 all_v1.append(res1.virtual_embeddings[mask])
                 all_v2.append(res2.virtual_embeddings[mask])
-                all_labels.extend([labels[b].item()] * int(mask.sum()))
+                all_labels.extend([label_int] * int(mask.sum()))
 
-        # --- VALIDATION GATE ---
+        # --- THE REALISM ANCHOR (Detection Penalty) ---
+        # We multiply a parameter by 0 to keep the gradient path alive.
+        projector_param = next(self.projector.parameters())
+        det_penalty = (projector_param.sum() * 0.0) + (det_failures * 2.0)
+
         if not all_labels:
-            return None
+            # If the whole batch is garbage, return high penalty to force the model back to realism
+            total = det_penalty + torch.tensor(10.0, device=device)
+            return det_penalty, det_penalty, det_penalty, det_penalty, total
 
         # Requirement: At least 2 identities AND each has at least 2 samples
         unique_labels, counts = np.unique(all_labels, return_counts=True)
         valid_identities = unique_labels[counts >= 2]
 
+        # If the criteria for Syn/Dif aren't met, we return the penalty to guide the model
         if len(valid_identities) < 2:
-            return None
+            total = det_penalty + torch.tensor(5.0, device=device)
+            return det_penalty, det_penalty, det_penalty, det_penalty, total
 
-        # Filter tensors to only include identities with >= 2 samples
+        # Filter tensors for Synchronism/Differentiation
         lab_t = torch.tensor(all_labels, device=device)
         keep_mask = torch.zeros_like(lab_t, dtype=torch.bool)
         for vid in valid_identities:
             keep_mask |= (lab_t == int(vid))
 
-        real_c = torch.cat(all_real)[keep_mask]
         v1_c = torch.cat(all_v1)[keep_mask]
         v2_c = torch.cat(all_v2)[keep_mask]
+        real_c = torch.cat(all_real)[keep_mask]
         lab_final = lab_t[keep_mask]
 
-        # Compute Losses
-        ano = anonymity_loss(real_c, v1_c, v2_c, margin=margin)
+        # 1. Sample-wise Losses
+        ano = anonymity_loss(real_c, v1_c, margin=margin)
         div = diversity_loss(v1_c, v2_c, margin=margin)
-        syn = synchronism_loss(v1_c, v2_c, lab_final, margin=margin)
-        dif = differentiation_loss(v1_c, v2_c, lab_final, margin=margin)
+
+        # 2. Pair-wise Identity Losses (Syn and Dif)
+        syn_list, dif_list = [], []
+        num_samples = lab_final.size(0)
+        for i in range(num_samples):
+            for j in range(i + 1, num_samples):
+                if lab_final[i] == lab_final[j]:
+                    # Synchronism: Different samples of same identity [cite: 278, 282]
+                    syn_list.append(synchronism_loss(v1_c[i:i+1], v1_c[j:j+1], margin=margin))
+                else:
+                    # Differentiation: Samples from different identities [cite: 287, 290]
+                    dif_list.append(differentiation_loss(v1_c[i:i+1], v1_c[j:j+1], margin=margin))
+
+        syn = torch.stack(syn_list).mean() if syn_list else (projector_param.sum() * 0.0)
+        dif = torch.stack(dif_list).mean() if dif_list else (projector_param.sum() * 0.0)
+
+        # 3. Latent Regularization
+        # Prevents extreme Z values that cause StyleGAN to output garbage.
+        z_reg = torch.mean(v1_c**2) * 0.01
 
         total = (lambda_ano * ano + lambda_syn * syn + 
-                 lambda_div * div + lambda_dif * dif)
+                lambda_div * div + lambda_dif * dif) + det_penalty + z_reg
 
         return ano, syn, div, dif, total
 
