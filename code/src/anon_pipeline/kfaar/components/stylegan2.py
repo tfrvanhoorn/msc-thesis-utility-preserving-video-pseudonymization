@@ -66,8 +66,8 @@ class StyleGAN2Generator:
         self,
         z: torch.Tensor,
         conditioning: Optional[torch.Tensor] = None,
-        truncation_psi: float = 0.5,
-        truncation_cutoff: Optional[int] = 8,
+        truncation_psi: float = 0.3,
+        truncation_cutoff: Optional[int] = None,
     ) -> torch.Tensor:
         return self.mapping(
             z,
@@ -89,8 +89,8 @@ class StyleGAN2Generator:
         self,
         z: torch.Tensor,
         conditioning: Optional[torch.Tensor] = None,
-        truncation_psi: float = 0.5,
-        truncation_cutoff: Optional[int] = 8,
+        truncation_psi: float = 0.3,
+        truncation_cutoff: Optional[int] = None,
         noise_mode: str = "const",
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:

@@ -73,7 +73,15 @@ class KfaarPipeline:
         if self._save_enabled:
             self._save_dir.mkdir(parents=True, exist_ok=True)
 
-    def forward(self, frames: torch.Tensor, key: torch.Tensor, *, sample_label: Optional[int] = None, key_tag: Optional[str] = None) -> KfaarResult:
+    def forward(
+        self,
+        frames: torch.Tensor,
+        key: torch.Tensor,
+        *,
+        sample_label: Optional[int] = None,
+        key_tag: Optional[str] = None,
+        batch_index: Optional[int] = None,
+    ) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
         seq_len = frames_t.shape[0]
@@ -131,7 +139,14 @@ class KfaarPipeline:
                     v_embeddings[i] = projected_z[i].sum() * 0.0
                     self.stats["gen_no_det"] += 1
 
-            self._maybe_save_generated(images, gen_mask, sample_label=sample_label, key_tag=key_tag)
+            self._maybe_save_generated(
+                images,
+                gen_mask,
+                sample_label=sample_label,
+                key_tag=key_tag,
+                batch_index=batch_index,
+                input_frames=frames_t,
+            )
 
         input_mask_t = torch.tensor(input_mask, device=device, dtype=torch.bool)
         gen_mask_t = torch.tensor(gen_mask, device=device, dtype=torch.bool)
@@ -147,11 +162,11 @@ class KfaarPipeline:
             gen_mask=gen_mask_t,
         )
 
-    def hpvg_train_step(self, frames, labels, seq_lens, key_1, key_2, **kwargs) -> torch.Tensor:
+    def hpvg_train_step(self, frames, labels, seq_lens, key_1, key_2, batch_index: Optional[int] = None, **kwargs) -> torch.Tensor:
         self.optimizer.zero_grad(set_to_none=True)
         
         # components will return None if criteria not met
-        comps = self.hpvg_loss_components(frames, labels, seq_lens, key_1, key_2, **kwargs)
+        comps = self.hpvg_loss_components(frames, labels, seq_lens, key_1, key_2, batch_index=batch_index, **kwargs)
         
         if comps is None:
             self.stats["discarded_batches"] += 1
@@ -169,7 +184,8 @@ class KfaarPipeline:
 
     def hpvg_loss_components(
         self, frames, labels, seq_lens, key_1, key_2,
-        margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0
+        margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0,
+        batch_index: Optional[int] = None,
     ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         
         device = self.device
@@ -183,8 +199,20 @@ class KfaarPipeline:
 
         for b in range(batch_size):
             label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
-            res1 = self.forward(frames[b, :seq_lens_list[b]], key_1, sample_label=label_int, key_tag="k1")
-            res2 = self.forward(frames[b, :seq_lens_list[b]], key_2, sample_label=label_int, key_tag="k2")
+            res1 = self.forward(
+                frames[b, :seq_lens_list[b]],
+                key_1,
+                sample_label=label_int,
+                key_tag="k1",
+                batch_index=batch_index,
+            )
+            res2 = self.forward(
+                frames[b, :seq_lens_list[b]],
+                key_2,
+                sample_label=label_int,
+                key_tag="k2",
+                batch_index=batch_index,
+            )
 
             proj_norm_terms.append(res1.projected_z.pow(2).mean())
             proj_norm_terms.append(res2.projected_z.pow(2).mean())
@@ -278,7 +306,16 @@ class KfaarPipeline:
         if self._save_enabled:
             self._saving_active = True
 
-    def _maybe_save_generated(self, images: Optional[torch.Tensor], gen_mask: Sequence[bool], *, sample_label: Optional[int], key_tag: Optional[str]) -> None:
+    def _maybe_save_generated(
+        self,
+        images: Optional[torch.Tensor],
+        gen_mask: Sequence[bool],
+        *,
+        sample_label: Optional[int],
+        key_tag: Optional[str],
+        batch_index: Optional[int],
+        input_frames: Optional[torch.Tensor] = None,
+    ) -> None:
         if not self._save_enabled or not self._saving_active:
             return
         if images is None:
@@ -305,11 +342,23 @@ class KfaarPipeline:
                 if mode == "undetected" and detected:
                     continue
 
-                label_part = f"id{int(sample_label):06d}_" if sample_label is not None else ""
-                key_part = f"{key_tag}_" if key_tag else ""
-                filename = (
-                    f"epoch{self._current_epoch:03d}_{label_part}{key_part}sample{self._saved_this_epoch:06d}_"
-                    f"f{idx:03d}_{'det' if detected else 'undet'}.png"
-                )
-                vutils.save_image(images[idx].detach().cpu().clamp(0.0, 1.0), epoch_dir / filename)
-                self._saved_this_epoch += 1
+                label_val = int(sample_label) if sample_label is not None else None
+                label_part = f"id{label_val:06d}" if label_val is not None else "idunknown"
+                key_part = f"key{key_tag}" if key_tag else "key"
+                batch_part = f"{int(batch_index):06d}" if batch_index is not None else "000000"
+                sample_part = f"{self._saved_this_epoch:06d}"
+                status_part = "det" if detected else "undet"
+                base = f"{label_part}_key{key_part}_batch{batch_part}_sample{sample_part}_{status_part}"
+
+                sample_id = self._saved_this_epoch
+                if input_frames is not None:
+                    input_img = input_frames[idx].detach().cpu()
+                    if input_img.min() < 0.0 or input_img.max() > 1.0:
+                        input_img = input_img.add(1).div(2.0)
+                    input_img = input_img.clamp(0.0, 1.0)
+                    vutils.save_image(input_img, epoch_dir / f"{base}_input.png")
+
+                gen_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
+                vutils.save_image(gen_img, epoch_dir / f"{base}_gen.png")
+
+                self._saved_this_epoch = sample_id + 1

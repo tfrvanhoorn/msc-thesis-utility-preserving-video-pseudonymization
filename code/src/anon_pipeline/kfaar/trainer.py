@@ -103,13 +103,23 @@ class KfaarTrainer:
             if self.save_generated_faces and hasattr(self.pipeline, "begin_epoch"):
                 self.pipeline.begin_epoch(epoch + 1)
 
-            progress = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}", file=sys.stdout)
-            for batch in progress:
+            progress = tqdm(
+                enumerate(self.train_loader),
+                total=len(self.train_loader),
+                desc=f"Epoch {epoch + 1}/{self.epochs}",
+                file=sys.stdout,
+            )
+
+            for batch_idx, batch in progress:
                 frames, labels, seq_lens = self._extract_batch(batch)
 
-                for sub_frames, sub_labels, sub_seq_lens in self._iter_effective_batches(frames, labels, seq_lens):
+                for sub_idx, (sub_frames, sub_labels, sub_seq_lens) in enumerate(
+                    self._iter_effective_batches(frames, labels, seq_lens)
+                ):
                     key_1 = torch.randn(self.key_dim, device=self.device)
                     key_2 = torch.randn(self.key_dim, device=self.device)
+
+                    batch_number = int(batch_idx + 1)
 
                     loss = self.pipeline.hpvg_train_step(
                         sub_frames,
@@ -117,6 +127,7 @@ class KfaarTrainer:
                         sub_seq_lens,
                         key_1,
                         key_2,
+                        batch_index=batch_number,
                         margin=self.margin,
                         lambda_ano=self.lambda_ano,
                         lambda_syn=self.lambda_syn,
