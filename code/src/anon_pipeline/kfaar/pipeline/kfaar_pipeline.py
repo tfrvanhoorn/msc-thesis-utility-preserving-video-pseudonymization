@@ -72,7 +72,7 @@ class KfaarPipeline:
         if self._save_enabled:
             self._save_dir.mkdir(parents=True, exist_ok=True)
 
-    def forward(self, frames: torch.Tensor, key: torch.Tensor) -> KfaarResult:
+    def forward(self, frames: torch.Tensor, key: torch.Tensor, *, sample_label: Optional[int] = None, key_tag: Optional[str] = None) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
         seq_len = frames_t.shape[0]
@@ -130,7 +130,7 @@ class KfaarPipeline:
                     v_embeddings[i] = projected_z[i].sum() * 0.0
                     self.stats["gen_no_det"] += 1
 
-            self._maybe_save_generated(images, gen_mask)
+            self._maybe_save_generated(images, gen_mask, sample_label=sample_label, key_tag=key_tag)
 
         valid_mask = torch.tensor([i and g for i, g in zip(input_mask, gen_mask)], device=device)
 
@@ -175,8 +175,9 @@ class KfaarPipeline:
         all_real, all_v1, all_v2, all_labels = [], [], [], []
 
         for b in range(batch_size):
-            res1 = self.forward(frames[b, :seq_lens_list[b]], key_1)
-            res2 = self.forward(frames[b, :seq_lens_list[b]], key_2)
+            label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
+            res1 = self.forward(frames[b, :seq_lens_list[b]], key_1, sample_label=label_int, key_tag="k1")
+            res2 = self.forward(frames[b, :seq_lens_list[b]], key_2, sample_label=label_int, key_tag="k2")
             
             mask = res1.valid_mask & res2.valid_mask
             if mask.any():
@@ -248,7 +249,7 @@ class KfaarPipeline:
         if self._save_enabled:
             self._saving_active = True
 
-    def _maybe_save_generated(self, images: Optional[torch.Tensor], gen_mask: Sequence[bool]) -> None:
+    def _maybe_save_generated(self, images: Optional[torch.Tensor], gen_mask: Sequence[bool], *, sample_label: Optional[int], key_tag: Optional[str]) -> None:
         if not self._save_enabled or not self._saving_active:
             return
         if images is None:
@@ -275,8 +276,10 @@ class KfaarPipeline:
                 if mode == "undetected" and detected:
                     continue
 
+                label_part = f"id{int(sample_label):06d}_" if sample_label is not None else ""
+                key_part = f"{key_tag}_" if key_tag else ""
                 filename = (
-                    f"epoch{self._current_epoch:03d}_sample{self._saved_this_epoch:06d}_"
+                    f"epoch{self._current_epoch:03d}_{label_part}{key_part}sample{self._saved_this_epoch:06d}_"
                     f"f{idx:03d}_{'det' if detected else 'undet'}.png"
                 )
                 vutils.save_image(images[idx].detach().cpu().clamp(0.0, 1.0), epoch_dir / filename)
