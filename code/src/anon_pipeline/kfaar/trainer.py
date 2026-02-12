@@ -222,7 +222,7 @@ class KfaarTrainer:
                 for sub_frames, sub_labels, sub_seq_lens in self._iter_effective_batches(frames, labels, seq_lens):
                     key_1 = torch.randn(self.key_dim, device=self.device)
                     key_2 = torch.randn(self.key_dim, device=self.device)
-                    ano, syn, div, dif, loss = self.pipeline.hpvg_loss_components(
+                    comps = self.pipeline.hpvg_loss_components(
                         sub_frames,
                         sub_labels,
                         sub_seq_lens,
@@ -235,6 +235,11 @@ class KfaarTrainer:
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
                     )
+
+                    if comps is None:
+                        continue
+
+                    ano, syn, div, dif, loss = comps
                     total_ano += float(ano.item())
                     total_syn += float(syn.item())
                     total_div += float(div.item())
