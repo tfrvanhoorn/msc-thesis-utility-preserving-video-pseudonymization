@@ -179,6 +179,7 @@ class KfaarPipeline:
         all_real, all_v1, all_v2, all_labels = [], [], [], []
         proj_norm_terms = []
         nondet_faces = 0
+        det_failures = 0
 
         for b in range(batch_size):
             label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
@@ -191,8 +192,8 @@ class KfaarPipeline:
             
             mask = res1.valid_mask & res2.valid_mask
             
-            # Track failures for the realism penalty
-            det_failures += (~mask).sum().item()
+            # Track frames where we could not form a valid pair (input or gen missing)
+            det_failures += int((~mask).sum().item())
 
             if mask.any():
                 all_real.append(res1.real_embeddings[mask])
@@ -205,7 +206,7 @@ class KfaarPipeline:
         # --- VALIDATION GATE ---
         if not all_labels:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
-            penalty_missing_pairs = proj_norm * 1.0
+            penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
             total = penalty_missing_pairs + penalty_nondet
             return ano, syn, div, dif, total
@@ -217,7 +218,7 @@ class KfaarPipeline:
         # If the criteria for Syn/Dif aren't met, we return the penalty to guide the model
         if len(valid_identities) < 2:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
-            penalty_missing_pairs = proj_norm * 1.0
+            penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
             total = penalty_missing_pairs + penalty_nondet
             return ano, syn, div, dif, total
@@ -234,15 +235,16 @@ class KfaarPipeline:
         lab_final = lab_t[keep_mask]
 
         # 1. Sample-wise Losses
-        ano = anonymity_loss(real_c, v1_c, margin=margin)
+        ano = anonymity_loss(real_c, v1_c, v2_c, margin=margin)
         div = diversity_loss(v1_c, v2_c, margin=margin)
         syn = synchronism_loss(v1_c, v2_c, lab_final, margin=margin)
         dif = differentiation_loss(v1_c, v2_c, lab_final, margin=margin)
 
+        penalty_missing_pairs = proj_norm * (0.1 * float(det_failures))
         penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
 
         total = (lambda_ano * ano + lambda_syn * syn + 
-             lambda_div * div + lambda_dif * dif + penalty_nondet)
+            lambda_div * div + lambda_dif * dif + penalty_nondet + penalty_missing_pairs)
 
         return ano, syn, div, dif, total
 
