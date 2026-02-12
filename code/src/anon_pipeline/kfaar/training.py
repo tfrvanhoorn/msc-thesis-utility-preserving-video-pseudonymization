@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
     parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video"], help="Dataset type to use")
     parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
+    parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
     parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "train_results", help="Directory to save checkpoints")
 
     # Hyperparameters (Projector & Trainer)
@@ -145,7 +146,7 @@ def main():
     # 3. Initialize Pipeline Components
     logging.info(f"Loading StyleGAN2 from {args.stylegan_ckpt}...")
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
-    pipeline = build_kfaar_pipeline(cfg, stylegan=stylegan, device=device)
+    pipeline = build_kfaar_pipeline(cfg, stylegan=stylegan, device=device, truncation_psi=args.truncation_psi)
 
     start_epoch = args.start_epoch if args.start_epoch is not None else 0
     if args.resume_ckpt is not None:

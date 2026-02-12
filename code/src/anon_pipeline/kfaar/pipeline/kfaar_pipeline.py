@@ -43,6 +43,7 @@ class KfaarPipeline:
         save_dir: Optional[Path] = None,
         save_mode: str = "detected",
         save_max_per_epoch: Optional[int] = None,
+        truncation_psi: float = 0.5,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -70,6 +71,7 @@ class KfaarPipeline:
         self._save_max_per_epoch = save_max_per_epoch
         self._saved_this_epoch = 0
         self._current_epoch = 0
+        self.truncation_psi = truncation_psi
         if self._save_enabled:
             self._save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,7 +125,7 @@ class KfaarPipeline:
         
         images = None
         if self.stylegan is not None:
-            w = self.stylegan.map(projected_z)
+            w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
             for i in range(seq_len):
                 img = images[i].clamp(-1, 1).add(1).div(2.0)

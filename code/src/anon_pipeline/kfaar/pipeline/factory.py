@@ -19,6 +19,7 @@ def build_kfaar_pipeline(
     config: PipelineConfig,
     stylegan: StyleGAN2Generator | None = None,
     device: str | torch.device | None = None,
+    truncation_psi: float = 0.5,
 ) -> KfaarPipeline:
     target_device = _resolve_device(config, device)
 
@@ -68,6 +69,7 @@ def build_kfaar_pipeline(
         projector=projector,
         stylegan=stylegan,
         device=target_device,
+        truncation_psi=truncation_psi,
     )
 
 
