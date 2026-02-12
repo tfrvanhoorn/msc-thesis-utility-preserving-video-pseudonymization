@@ -190,11 +190,15 @@ class KfaarPipeline:
             nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
             
             mask = res1.valid_mask & res2.valid_mask
+            
+            # Track failures for the realism penalty
+            det_failures += (~mask).sum().item()
+
             if mask.any():
                 all_real.append(res1.real_embeddings[mask])
                 all_v1.append(res1.virtual_embeddings[mask])
                 all_v2.append(res2.virtual_embeddings[mask])
-                all_labels.extend([labels[b].item()] * int(mask.sum()))
+                all_labels.extend([label_int] * int(mask.sum()))
 
         proj_norm = torch.stack(proj_norm_terms).mean() if proj_norm_terms else torch.tensor(0.0, device=device)
 
@@ -210,6 +214,7 @@ class KfaarPipeline:
         unique_labels, counts = np.unique(all_labels, return_counts=True)
         valid_identities = unique_labels[counts >= 2]
 
+        # If the criteria for Syn/Dif aren't met, we return the penalty to guide the model
         if len(valid_identities) < 2:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * 1.0
@@ -217,19 +222,19 @@ class KfaarPipeline:
             total = penalty_missing_pairs + penalty_nondet
             return ano, syn, div, dif, total
 
-        # Filter tensors to only include identities with >= 2 samples
+        # Filter tensors for Synchronism/Differentiation
         lab_t = torch.tensor(all_labels, device=device)
         keep_mask = torch.zeros_like(lab_t, dtype=torch.bool)
         for vid in valid_identities:
             keep_mask |= (lab_t == int(vid))
 
-        real_c = torch.cat(all_real)[keep_mask]
         v1_c = torch.cat(all_v1)[keep_mask]
         v2_c = torch.cat(all_v2)[keep_mask]
+        real_c = torch.cat(all_real)[keep_mask]
         lab_final = lab_t[keep_mask]
 
-        # Compute Losses
-        ano = anonymity_loss(real_c, v1_c, v2_c, margin=margin)
+        # 1. Sample-wise Losses
+        ano = anonymity_loss(real_c, v1_c, margin=margin)
         div = diversity_loss(v1_c, v2_c, margin=margin)
         syn = synchronism_loss(v1_c, v2_c, lab_final, margin=margin)
         dif = differentiation_loss(v1_c, v2_c, lab_final, margin=margin)
