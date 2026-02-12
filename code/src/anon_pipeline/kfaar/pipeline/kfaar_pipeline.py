@@ -28,6 +28,7 @@ class KfaarResult:
     projected_z: torch.Tensor
     virtual_embeddings: torch.Tensor
     valid_mask: torch.Tensor # Mask where both input AND gen-output had faces
+    gen_mask: torch.Tensor   # Mask where generated output had a detected face
 
 class KfaarPipeline:
     def __init__(
@@ -132,7 +133,9 @@ class KfaarPipeline:
 
             self._maybe_save_generated(images, gen_mask, sample_label=sample_label, key_tag=key_tag)
 
-        valid_mask = torch.tensor([i and g for i, g in zip(input_mask, gen_mask)], device=device)
+        input_mask_t = torch.tensor(input_mask, device=device, dtype=torch.bool)
+        gen_mask_t = torch.tensor(gen_mask, device=device, dtype=torch.bool)
+        valid_mask = input_mask_t & gen_mask_t
 
         return KfaarResult(
             detections=[], # Simplified for training speed
@@ -140,7 +143,8 @@ class KfaarPipeline:
             real_embeddings=real_emb.detach(),
             projected_z=projected_z,
             virtual_embeddings=v_embeddings,
-            valid_mask=valid_mask
+            valid_mask=valid_mask,
+            gen_mask=gen_mask_t,
         )
 
     def hpvg_train_step(self, frames, labels, seq_lens, key_1, key_2, **kwargs) -> torch.Tensor:
@@ -173,11 +177,17 @@ class KfaarPipeline:
         seq_lens_list = [int(x) for x in (seq_lens.tolist() if torch.is_tensor(seq_lens) else seq_lens)]
 
         all_real, all_v1, all_v2, all_labels = [], [], [], []
+        proj_norm_terms = []
+        nondet_faces = 0
 
         for b in range(batch_size):
             label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
             res1 = self.forward(frames[b, :seq_lens_list[b]], key_1, sample_label=label_int, key_tag="k1")
             res2 = self.forward(frames[b, :seq_lens_list[b]], key_2, sample_label=label_int, key_tag="k2")
+
+            proj_norm_terms.append(res1.projected_z.pow(2).mean())
+            proj_norm_terms.append(res2.projected_z.pow(2).mean())
+            nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
             
             mask = res1.valid_mask & res2.valid_mask
             if mask.any():
@@ -186,16 +196,26 @@ class KfaarPipeline:
                 all_v2.append(res2.virtual_embeddings[mask])
                 all_labels.extend([labels[b].item()] * int(mask.sum()))
 
+        proj_norm = torch.stack(proj_norm_terms).mean() if proj_norm_terms else torch.tensor(0.0, device=device)
+
         # --- VALIDATION GATE ---
         if not all_labels:
-            return None
+            ano = syn = div = dif = torch.tensor(0.0, device=device)
+            penalty_missing_pairs = proj_norm * 1.0
+            penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
+            total = penalty_missing_pairs + penalty_nondet
+            return ano, syn, div, dif, total
 
         # Requirement: At least 2 identities AND each has at least 2 samples
         unique_labels, counts = np.unique(all_labels, return_counts=True)
         valid_identities = unique_labels[counts >= 2]
 
         if len(valid_identities) < 2:
-            return None
+            ano = syn = div = dif = torch.tensor(0.0, device=device)
+            penalty_missing_pairs = proj_norm * 1.0
+            penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
+            total = penalty_missing_pairs + penalty_nondet
+            return ano, syn, div, dif, total
 
         # Filter tensors to only include identities with >= 2 samples
         lab_t = torch.tensor(all_labels, device=device)
@@ -214,8 +234,10 @@ class KfaarPipeline:
         syn = synchronism_loss(v1_c, v2_c, lab_final, margin=margin)
         dif = differentiation_loss(v1_c, v2_c, lab_final, margin=margin)
 
+        penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
+
         total = (lambda_ano * ano + lambda_syn * syn + 
-                 lambda_div * div + lambda_dif * dif)
+             lambda_div * div + lambda_dif * dif + penalty_nondet)
 
         return ano, syn, div, dif, total
 
