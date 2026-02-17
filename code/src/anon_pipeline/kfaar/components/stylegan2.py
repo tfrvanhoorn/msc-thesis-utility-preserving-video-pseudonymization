@@ -80,7 +80,7 @@ class StyleGAN2Generator:
         self,
         w: torch.Tensor,
         noise_mode: str = "const",
-        force_fp32: bool = False,
+        force_fp32: bool = True,
         **kwargs,
     ) -> torch.Tensor:
         return self.synthesis(w, noise_mode=noise_mode, force_fp32=force_fp32, **kwargs)
