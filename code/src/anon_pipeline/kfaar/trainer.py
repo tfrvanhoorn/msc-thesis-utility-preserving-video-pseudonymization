@@ -77,10 +77,28 @@ class KfaarTrainer:
         # Ensure pipeline modules are on the target device
         if hasattr(self.pipeline, "projector"):
             self.pipeline.projector.to(self.device)
+            
+        # LOCK DOWN EMBEDDER
         if hasattr(self.pipeline, "embedder") and hasattr(self.pipeline.embedder, "to"):
             self.pipeline.embedder.to(self.device)
+            self.pipeline.embedder.eval()               # Stop BatchNorm updates
+            self.pipeline.embedder.requires_grad_(False) # Save memory
+            
+        # LOCK DOWN STYLEGAN
         if hasattr(self.pipeline, "stylegan") and self.pipeline.stylegan is not None and hasattr(self.pipeline.stylegan, "to"):
             self.pipeline.stylegan.to(self.device)
+            self.pipeline.stylegan._G.eval()               # Stop any internal updates
+            self.pipeline.stylegan._G.requires_grad_(False) # Save memory
+
+        # LOCK DOWN DETECTOR & ALIGNER (If applicable)
+        if hasattr(self.pipeline, "detector"):
+            if hasattr(self.pipeline.detector, "eval"): self.pipeline.detector.eval()
+            if hasattr(self.pipeline.detector, "requires_grad_"): self.pipeline.detector.requires_grad_(False)
+            
+        if hasattr(self.pipeline, "aligner"):
+            if hasattr(self.pipeline.aligner, "eval"): self.pipeline.aligner.eval()
+            if hasattr(self.pipeline.aligner, "requires_grad_"): self.pipeline.aligner.requires_grad_(False)
+
         self.pipeline.device = self.device
 
         if self.save_generated_faces and hasattr(self.pipeline, "configure_saving"):

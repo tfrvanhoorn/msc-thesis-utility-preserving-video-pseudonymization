@@ -1,16 +1,13 @@
 from __future__ import annotations
-
 import logging
-
 import torch
 import torch.nn as nn
 import torch.nn.init as init
 
-
 logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
-    """Projecteert face embedding z + key k naar een begrensde z' via Tanh."""
+    """Projecteert face embedding z + key k naar een z' gelimiteerd tot (-3, 3)."""
 
     def __init__(
         self,
@@ -21,49 +18,58 @@ class ProjectorMLP(nn.Module):
     ) -> None:
         super().__init__()
         input_dim = output_dim + key_dim
+        
+        # We bouwen de hidden layers apart
         layers: list[nn.Module] = []
         in_dim = input_dim
-        
-        # Hidden Layers met ReLU
         for h in hidden_dims:
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.ReLU(inplace=True))
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
             in_dim = h
-            
-        # Laatste laag met Tanh voor begrenzing rond 0
-        layers.append(nn.Linear(in_dim, output_dim))
-        layers.append(nn.Tanh()) 
         
-        self.net = nn.Sequential(*layers)
+        self.hidden_net = nn.Sequential(*layers)
+        
+        # De output sectie
+        self.output_layer = nn.Linear(in_dim, output_dim)
+        
+        # --- OUDE IMPLEMENTATIE: LayerNorm (veroorzaakte uitschieters) ---
+        # self.norm = nn.LayerNorm(output_dim, elementwise_affine=True)
         
         # Pas initialisatie toe
         self.apply(self._init_weights)
 
     def _init_weights(self, m: nn.Module) -> None:
-        """Initialiseert gewichten op basis van de activatiefunctie."""
+        """Initialiseert gewichten voor netwerken."""
         if isinstance(m, nn.Linear):
-            # Gebruik Xavier voor de output laag (omdat deze Tanh gebruikt)
-            # Gebruik Kaiming voor hidden layers (omdat deze ReLU gebruiken)
-            if m is self.net[-2]: # De laatste Linear laag voor de Tanh
-                init.xavier_uniform_(m.weight, gain=init.calculate_gain('tanh'))
-            else:
-                init.kaiming_normal_(m.weight, nonlinearity='relu')
-            
+            init.kaiming_normal_(m.weight, nonlinearity='relu')
             if m.bias is not None:
                 init.constant_(m.bias, 0)
+                
+        # --- OUDE IMPLEMENTATIE: LayerNorm init ---
+        # elif isinstance(m, nn.LayerNorm):
+        #     init.constant_(m.bias, 0)
+        #     init.constant_(m.weight, 1)
 
     def forward(self, z: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         if key.dim() == 1: key = key.unsqueeze(0)
         if z.dim() == 1: z = z.unsqueeze(0)
+        
         concat = torch.cat([z, key], dim=-1)
-        out = self.net(concat)
+        
+        # Doorloop hidden layers
+        x = self.hidden_net(concat)
+        
+        # Projecteer naar output_dim
+        out = self.output_layer(x)
+        
+        # --- OUDE IMPLEMENTATIE: LayerNorm ---
+        # out = self.norm(out)
 
-        # Debug: log the first 10 elements of the projected embedding
-        with torch.no_grad():
-            sample = out.flatten()[:10]
-            logger.debug("ProjectorMLP output sample (first 10 values): %s", sample.tolist())
+        # --- NIEUWE IMPLEMENTATIE: Scaled Tanh ---
+        # Beperkt waarden strikt tussen -3 en 3, maar laat waarden rond 0 vrij intact
+        out = 3.0 * torch.tanh(out / 3)
 
         return out
 
