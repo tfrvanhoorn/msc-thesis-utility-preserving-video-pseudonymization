@@ -1,7 +1,13 @@
 from __future__ import annotations
+
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+
+
+logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
     """Projecteert face embedding z + key k naar een begrensde z' via Tanh."""
@@ -52,7 +58,14 @@ class ProjectorMLP(nn.Module):
         if key.dim() == 1: key = key.unsqueeze(0)
         if z.dim() == 1: z = z.unsqueeze(0)
         concat = torch.cat([z, key], dim=-1)
-        return self.net(concat)
+        out = self.net(concat)
+
+        # Debug: log the first 10 elements of the projected embedding
+        with torch.no_grad():
+            sample = out.flatten()[:10]
+            logger.debug("ProjectorMLP output sample (first 10 values): %s", sample.tolist())
+
+        return out
 
     def project(self, z: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         return self.forward(z, key)
