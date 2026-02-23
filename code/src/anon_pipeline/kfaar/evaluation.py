@@ -91,6 +91,28 @@ def parse_args() -> argparse.Namespace:
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
 
+    # Generated face saving (matches training flags)
+    parser.add_argument("--save_generated_faces", action="store_true", help="Store generated faces to disk during evaluation")
+    parser.add_argument(
+        "--save_generated_mode",
+        type=str,
+        default="detected",
+        choices=["detected", "undetected", "all"],
+        help="Which generated frames to store",
+    )
+    parser.add_argument(
+        "--save_generated_dir",
+        type=Path,
+        default=None,
+        help="Directory to store generated face images (defaults to output_dir/generated_faces)",
+    )
+    parser.add_argument(
+        "--save_generated_max_per_epoch",
+        type=int,
+        default=100,
+        help="Maximum number of generated samples to store per evaluation run (set <=0 for no limit)",
+    )
+
     return parser.parse_args()
 
 
@@ -191,6 +213,13 @@ def main() -> None:
     logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
     pipeline = build_kfaar_pipeline(cfg, stylegan=stylegan, device=device, truncation_psi=args.truncation_psi)
+
+    if args.save_generated_faces and hasattr(pipeline, "configure_saving"):
+        save_dir = args.save_generated_dir if args.save_generated_dir is not None else args.output_dir / "generated_faces"
+        save_max = None if args.save_generated_max_per_epoch is not None and args.save_generated_max_per_epoch <= 0 else args.save_generated_max_per_epoch
+        pipeline.configure_saving(save_dir, mode=args.save_generated_mode, max_per_epoch=save_max)
+        if hasattr(pipeline, "begin_epoch"):
+            pipeline.begin_epoch(1)
 
     logging.info("Loading checkpoint %s", args.checkpoint)
     ckpt = torch.load(args.checkpoint, map_location=device)
