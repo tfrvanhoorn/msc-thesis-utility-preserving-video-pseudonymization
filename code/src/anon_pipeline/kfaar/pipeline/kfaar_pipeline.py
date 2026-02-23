@@ -6,6 +6,10 @@ from typing import Optional, Sequence, Dict
 import numpy as np
 import torch
 from torchvision import utils as vutils, io as tvio
+try:
+    import imageio.v2 as imageio  # type: ignore
+except Exception:  # pragma: no cover
+    imageio = None
 from ..components import EmbeddingModel, FaceDetector, ProjectorMLP, ProjectorLSTM
 from ..components.alignment import FaceAligner
 from ..components.detector import Detection
@@ -397,20 +401,44 @@ class KfaarPipeline:
                     vutils.save_image(gen_img, epoch_image_dir / f"{base}_gen.png")
 
                 if (not video_written) and epoch_video_dir is not None and input_frames is not None:
-                    try:
-                        inp_frames = input_frames.detach().cpu()
-                        if inp_frames.min() < 0.0 or inp_frames.max() > 1.0:
-                            inp_frames = inp_frames.add(1).div(2.0)
-                        inp_frames = inp_frames.clamp(0.0, 1.0)
-                        inp_vid = (inp_frames.permute(0, 2, 3, 1) * 255).byte()
-                        tvio.write_video(epoch_video_dir / f"{base_video}_input.mp4", inp_vid, fps=10)
+                    # Attempt torchvision (requires PyAV), then fallback to imageio; otherwise skip with warning.
+                    inp_frames = input_frames.detach().cpu()
+                    if inp_frames.min() < 0.0 or inp_frames.max() > 1.0:
+                        inp_frames = inp_frames.add(1).div(2.0)
+                    inp_frames = inp_frames.clamp(0.0, 1.0)
+                    inp_vid = (inp_frames.permute(0, 2, 3, 1) * 255).byte()
 
-                        gen_vid_frames = images.detach().cpu()
-                        gen_vid_frames = gen_vid_frames.add(1).div(2.0).clamp(0.0, 1.0)
-                        gen_vid = (gen_vid_frames.permute(0, 2, 3, 1) * 255).byte()
+                    gen_vid_frames = images.detach().cpu()
+                    gen_vid_frames = gen_vid_frames.add(1).div(2.0).clamp(0.0, 1.0)
+                    gen_vid = (gen_vid_frames.permute(0, 2, 3, 1) * 255).byte()
+
+                    written = False
+                    try:
+                        tvio.write_video(epoch_video_dir / f"{base_video}_input.mp4", inp_vid, fps=10)
                         tvio.write_video(epoch_video_dir / f"{base_video}_gen.mp4", gen_vid, fps=10)
+                        written = True
+                    except Exception as exc:
+                        logging.warning("torchvision video write failed for %s: %s", base_video, exc)
+
+                    if (not written) and imageio is not None:
+                        try:
+                            imageio.mimwrite(epoch_video_dir / f"{base_video}_input.mp4", inp_vid.numpy(), fps=10, codec="libx264")
+                            imageio.mimwrite(epoch_video_dir / f"{base_video}_gen.mp4", gen_vid.numpy(), fps=10, codec="libx264")
+                            written = True
+                        except Exception as exc:  # pragma: no cover
+                            logging.warning("imageio video write failed for %s: %s", base_video, exc)
+
+                    if not written and imageio is not None:
+                        try:
+                            imageio.mimsave(epoch_video_dir / f"{base_video}_input.gif", inp_vid.numpy(), fps=10)
+                            imageio.mimsave(epoch_video_dir / f"{base_video}_gen.gif", gen_vid.numpy(), fps=10)
+                            written = True
+                        except Exception as exc:  # pragma: no cover
+                            logging.warning("imageio GIF write failed for %s: %s", base_video, exc)
+
+                    if written:
                         video_written = True
-                    except Exception as exc:  # log and continue
-                        logging.warning("Failed to save video for sample %s: %s", base_video, exc)
+                    else:
+                        logging.warning("Failed to save video for sample %s: no available writer", base_video)
 
                 self._saved_this_epoch = sample_id + 1
