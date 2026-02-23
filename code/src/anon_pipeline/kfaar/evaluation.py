@@ -27,7 +27,7 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
 from anon_pipeline.kfaar.metrics import MetricsAccumulator  # noqa: E402
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline  # noqa: E402
 from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict  # noqa: E402
-from anon_pipeline.shared.data.splits import build_train_test_loaders  # noqa: E402
+from anon_pipeline.shared.data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
 from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
 
 
@@ -73,7 +73,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--syn_threshold", type=float, default=0.7, help="Cosine similarity threshold for synchronism success")
 
     # Dataset & Split
-    parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training (rest for eval)")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
     parser.add_argument("--max_per_identity", type=int, default=None, help="Max samples per identity to use from dataset")
     parser.add_argument("--window_size", type=int, default=16, help="Window size for voxceleb_video sequences")
@@ -194,19 +193,20 @@ def main() -> None:
         projector=projector_cfg,
     )
 
-    logging.info("Building data loaders for evaluation...")
-    split, _, test_loader = build_train_test_loaders(
+    logging.info("Building data loader for evaluation (all identities)...")
+    all_identities = list_identities(cfg.data)
+    if args.max_identities is not None:
+        all_identities = all_identities[: args.max_identities]
+
+    test_loader = build_dataloader_for_identities(
         cfg.data,
-        train_fraction=args.train_fraction,
-        seed=args.seed,
-        max_identities=args.max_identities,
+        all_identities,
         batch_size=args.batch_identities * args.batch_samples_per_identity,
         identity_batching=True,
         batch_identities=args.batch_identities,
         samples_per_identity=args.batch_samples_per_identity,
         min_samples_per_identity=args.min_samples_per_identity,
-        shuffle_train=True,
-        shuffle_test=False,
+        shuffle=False,
         num_workers=args.num_workers,
     )
 
@@ -260,8 +260,7 @@ def main() -> None:
 
                 valid_virtual = res.virtual_embeddings[res.valid_mask]
                 if valid_virtual.numel() > 0:
-                    sample_emb = valid_virtual.mean(dim=0)
-                    metrics.add_synchronism_embedding(label, sample_emb)
+                    metrics.add_synchronism_embeddings(label, valid_virtual)
 
                 total_samples += 1
 
@@ -282,12 +281,10 @@ def main() -> None:
                 "checkpoint": str(args.checkpoint),
                 "dataset_type": args.dataset_type,
                 "seed": args.seed,
-                "train_fraction": args.train_fraction,
                 "metrics": summary,
                 "total_samples": total_samples,
                 "identities": {
-                    "train": split.train,
-                    "test": split.test,
+                    "all": all_identities,
                 },
             },
             f,

@@ -40,12 +40,15 @@ class MetricsAccumulator:
         self.anonymization_success += int(successes)
         self.anonymization_total += int(cos.numel())
 
-    def add_synchronism_embedding(self, identity: int, embedding: torch.Tensor) -> None:
-        if embedding is None:
+    def add_synchronism_embeddings(self, identity: int, embeddings: torch.Tensor) -> None:
+        """Accumulate all frame-level embeddings for an identity."""
+
+        if embeddings is None:
             return
-        emb = embedding.detach().cpu()
+        if embeddings.numel() == 0:
+            return
         bucket = self._sync_buckets.setdefault(int(identity), [])
-        bucket.append(emb)
+        bucket.extend([e.detach().cpu() for e in embeddings])
 
     def finalize(self) -> dict[str, float]:
         self._compute_synchronism()
