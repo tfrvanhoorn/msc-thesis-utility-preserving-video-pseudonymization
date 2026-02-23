@@ -111,6 +111,11 @@ def parse_args() -> argparse.Namespace:
         default=100,
         help="Maximum number of generated samples to store per evaluation run (set <=0 for no limit)",
     )
+    parser.add_argument(
+        "--save_videos",
+        action="store_true",
+        help="Also save each window as an input/gen video alongside frame images",
+    )
 
     return parser.parse_args()
 
@@ -217,7 +222,12 @@ def main() -> None:
     if args.save_generated_faces and hasattr(pipeline, "configure_saving"):
         save_dir = args.save_generated_dir if args.save_generated_dir is not None else args.output_dir / "generated_faces"
         save_max = None if args.save_generated_max_per_epoch is not None and args.save_generated_max_per_epoch <= 0 else args.save_generated_max_per_epoch
-        pipeline.configure_saving(save_dir, mode=args.save_generated_mode, max_per_epoch=save_max)
+        pipeline.configure_saving(
+            save_dir,
+            mode=args.save_generated_mode,
+            max_per_epoch=save_max,
+            save_videos=args.save_videos,
+        )
         if hasattr(pipeline, "begin_epoch"):
             pipeline.begin_epoch(1)
 

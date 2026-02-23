@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Sequence, Dict
 import numpy as np
 import torch
-from torchvision import utils as vutils
+from torchvision import utils as vutils, io as tvio
 from ..components import EmbeddingModel, FaceDetector, ProjectorMLP, ProjectorLSTM
 from ..components.alignment import FaceAligner
 from ..components.detector import Detection
@@ -67,13 +67,20 @@ class KfaarPipeline:
         self._save_enabled = save_dir is not None
         self._saving_active = self._save_enabled
         self._save_dir = Path(save_dir) if save_dir is not None else None
+        self._save_dir_images = self._save_dir / "images" if self._save_dir is not None else None
+        self._save_dir_videos = self._save_dir / "videos" if self._save_dir is not None else None
         self._save_mode = save_mode
         self._save_max_per_epoch = save_max_per_epoch
+        self._save_videos = False
         self._saved_this_epoch = 0
         self._current_epoch = 0
         self.truncation_psi = truncation_psi
         if self._save_enabled:
             self._save_dir.mkdir(parents=True, exist_ok=True)
+            if self._save_dir_images is not None:
+                self._save_dir_images.mkdir(parents=True, exist_ok=True)
+            if self._save_dir_videos is not None:
+                self._save_dir_videos.mkdir(parents=True, exist_ok=True)
 
     def forward(
         self,
@@ -283,22 +290,38 @@ class KfaarPipeline:
         t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
         return t.float().to(device)
 
-    def configure_saving(self, save_dir: Path, *, mode: str = "detected", max_per_epoch: Optional[int] = None) -> None:
+    def configure_saving(
+        self,
+        save_dir: Path,
+        *,
+        mode: str = "detected",
+        max_per_epoch: Optional[int] = None,
+        save_videos: bool = False,
+    ) -> None:
         """Enable saving synthesized faces to disk with a per-epoch cap."""
         self._save_enabled = True
         self._saving_active = True
         self._save_dir = Path(save_dir)
+        self._save_dir_images = self._save_dir / "images"
+        self._save_dir_videos = self._save_dir / "videos"
         self._save_dir.mkdir(parents=True, exist_ok=True)
+        self._save_dir_images.mkdir(parents=True, exist_ok=True)
+        if save_videos:
+            self._save_dir_videos.mkdir(parents=True, exist_ok=True)
         self._save_mode = mode
         self._save_max_per_epoch = max_per_epoch
+        self._save_videos = bool(save_videos)
         self._saved_this_epoch = 0
 
     def begin_epoch(self, epoch: int) -> None:
         """Reset save counters for a new epoch and prepare the epoch directory."""
         self._current_epoch = epoch
         self._saved_this_epoch = 0
-        if self._save_enabled and self._save_dir is not None:
-            (self._save_dir / f"epoch_{epoch:03d}").mkdir(parents=True, exist_ok=True)
+        if self._save_enabled:
+            if self._save_dir_images is not None:
+                (self._save_dir_images / f"epoch_{epoch:03d}").mkdir(parents=True, exist_ok=True)
+            if self._save_videos and self._save_dir_videos is not None:
+                (self._save_dir_videos / f"epoch_{epoch:03d}").mkdir(parents=True, exist_ok=True)
         self._saving_active = self._save_enabled
 
     def disable_saving(self) -> None:
@@ -326,12 +349,16 @@ class KfaarPipeline:
             return
 
         mode = self._save_mode
-        save_dir = self._save_dir if self._save_dir is not None else None
-        if save_dir is None:
+        save_images_dir = self._save_dir_images if self._save_dir_images is not None else None
+        save_videos_dir = self._save_dir_videos if self._save_videos and self._save_dir_videos is not None else None
+        if save_images_dir is None and save_videos_dir is None:
             return
-
-        epoch_dir = save_dir / f"epoch_{self._current_epoch:03d}"
-        epoch_dir.mkdir(parents=True, exist_ok=True)
+        epoch_image_dir = save_images_dir / f"epoch_{self._current_epoch:03d}" if save_images_dir is not None else None
+        epoch_video_dir = save_videos_dir / f"epoch_{self._current_epoch:03d}" if save_videos_dir is not None else None
+        if epoch_image_dir is not None:
+            epoch_image_dir.mkdir(parents=True, exist_ok=True)
+        if epoch_video_dir is not None:
+            epoch_video_dir.mkdir(parents=True, exist_ok=True)
 
         with torch.no_grad():
             for idx in range(images.shape[0]):
@@ -358,9 +385,27 @@ class KfaarPipeline:
                     if input_img.min() < 0.0 or input_img.max() > 1.0:
                         input_img = input_img.add(1).div(2.0)
                     input_img = input_img.clamp(0.0, 1.0)
-                    vutils.save_image(input_img, epoch_dir / f"{base}_input.png")
+                    if epoch_image_dir is not None:
+                        vutils.save_image(input_img, epoch_image_dir / f"{base}_input.png")
 
                 gen_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
-                vutils.save_image(gen_img, epoch_dir / f"{base}_gen.png")
+                if epoch_image_dir is not None:
+                    vutils.save_image(gen_img, epoch_image_dir / f"{base}_gen.png")
+
+                if epoch_video_dir is not None and input_frames is not None:
+                    try:
+                        inp_frames = input_frames.detach().cpu()
+                        if inp_frames.min() < 0.0 or inp_frames.max() > 1.0:
+                            inp_frames = inp_frames.add(1).div(2.0)
+                        inp_frames = inp_frames.clamp(0.0, 1.0)
+                        inp_vid = (inp_frames.permute(0, 2, 3, 1) * 255).byte()
+                        tvio.write_video(epoch_video_dir / f"{base}_input.mp4", inp_vid, fps=10)
+
+                        gen_vid_frames = images.detach().cpu()
+                        gen_vid_frames = gen_vid_frames.add(1).div(2.0).clamp(0.0, 1.0)
+                        gen_vid = (gen_vid_frames.permute(0, 2, 3, 1) * 255).byte()
+                        tvio.write_video(epoch_video_dir / f"{base}_gen.mp4", gen_vid, fps=10)
+                    except Exception:
+                        pass
 
                 self._saved_this_epoch = sample_id + 1

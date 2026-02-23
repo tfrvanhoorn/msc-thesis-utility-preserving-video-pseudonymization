@@ -41,7 +41,7 @@ class MetricsAccumulator:
         self.anonymization_total += int(cos.numel())
 
     def add_synchronism_embeddings(self, identity: int, embeddings: torch.Tensor) -> None:
-        """Accumulate all frame-level embeddings for an identity."""
+        """Accumulate all frame-level embeddings for an identity (including self-pairs)."""
 
         if embeddings is None:
             return
@@ -81,10 +81,10 @@ class MetricsAccumulator:
         if self.synchronism_total > 0:
             return
         for embeds in self._sync_buckets.values():
-            if len(embeds) < 2:
+            if len(embeds) < 1:
                 continue
             stack = torch.stack(embeds, dim=0)
-            idx = torch.combinations(torch.arange(stack.shape[0]))
+            idx = torch.combinations(torch.arange(stack.shape[0]), r=2, with_replacement=True)
             if idx.numel() == 0:
                 continue
             a = stack[idx[:, 0]]
