@@ -75,3 +75,37 @@ class ProjectorMLP(nn.Module):
 
     def project(self, z: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         return self.forward(z, key)
+
+
+def load_projector_state_dict(model: nn.Module, state_dict: dict[str, torch.Tensor], *, strict: bool = True) -> None:
+    """Load projector weights, remapping legacy MLP checkpoint keys when needed."""
+
+    def _remap_legacy_mlp_keys(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        mapped: dict[str, torch.Tensor] = {}
+        legacy_found = False
+
+        for key, tensor in sd.items():
+            if key.startswith("net."):
+                legacy_found = True
+                if key.startswith("net.0."):
+                    new_key = key.replace("net.0", "hidden_net.0", 1)
+                elif key.startswith("net.2."):
+                    new_key = key.replace("net.2", "hidden_net.2", 1)
+                elif key.startswith("net.4."):
+                    new_key = key.replace("net.4", "output_layer", 1)
+                else:
+                    new_key = key
+            else:
+                new_key = key
+
+            mapped[new_key] = tensor
+
+        if legacy_found:
+            logger.info("Remapped legacy ProjectorMLP checkpoint keys (net.* -> hidden_net.*, output_layer)")
+
+        return mapped
+
+    if isinstance(model, ProjectorMLP):
+        state_dict = _remap_legacy_mlp_keys(state_dict)
+
+    model.load_state_dict(state_dict, strict=strict)

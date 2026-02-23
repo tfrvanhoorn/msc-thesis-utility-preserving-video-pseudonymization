@@ -26,7 +26,7 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
 )
 from anon_pipeline.kfaar.metrics import MetricsAccumulator  # noqa: E402
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline  # noqa: E402
-from anon_pipeline.kfaar.components import load_stylegan2  # noqa: E402
+from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict  # noqa: E402
 from anon_pipeline.shared.data.splits import build_train_test_loaders  # noqa: E402
 from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
 
@@ -192,7 +192,7 @@ def main() -> None:
 
     logging.info("Loading checkpoint %s", args.checkpoint)
     ckpt = torch.load(args.checkpoint, map_location=device)
-    pipeline.projector.load_state_dict(ckpt["model_state_dict"])
+    load_projector_state_dict(pipeline.projector, ckpt["model_state_dict"])
     pipeline.projector.eval()
     if hasattr(pipeline.embedder, "eval"):
         pipeline.embedder.eval()

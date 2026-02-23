@@ -23,7 +23,7 @@ from anon_pipeline.kfaar.config import (
     SeedConfig,
 )
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline
-from anon_pipeline.kfaar.components import load_stylegan2
+from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict
 from anon_pipeline.shared.data.splits import build_train_test_loaders
 from anon_pipeline.shared.utils.logging import configure_logging
 
@@ -151,7 +151,7 @@ def main():
     start_epoch = args.start_epoch if args.start_epoch is not None else 0
     if args.resume_ckpt is not None:
         ckpt = torch.load(args.resume_ckpt, map_location=device)
-        pipeline.projector.load_state_dict(ckpt["model_state_dict"])
+        load_projector_state_dict(pipeline.projector, ckpt["model_state_dict"])
         pipeline.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         if args.start_epoch is None:
             start_epoch = int(ckpt.get("epoch", -1)) + 1
