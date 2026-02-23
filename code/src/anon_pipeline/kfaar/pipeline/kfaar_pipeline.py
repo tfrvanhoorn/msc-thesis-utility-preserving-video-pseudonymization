@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Sequence, Dict
 import numpy as np
 import torch
-from torchvision import utils as vutils, io as tvio
+from torchvision import utils as vutils
 try:
     import imageio.v2 as imageio  # type: ignore
 except Exception:  # pragma: no cover
@@ -321,11 +321,7 @@ class KfaarPipeline:
         """Reset save counters for a new epoch and prepare the epoch directory."""
         self._current_epoch = epoch
         self._saved_this_epoch = 0
-        if self._save_enabled:
-            if self._save_dir_images is not None:
-                (self._save_dir_images / f"epoch_{epoch:03d}").mkdir(parents=True, exist_ok=True)
-            if self._save_videos and self._save_dir_videos is not None:
-                (self._save_dir_videos / f"epoch_{epoch:03d}").mkdir(parents=True, exist_ok=True)
+        # Evaluation uses single pass; no per-epoch subfolders for saves
         self._saving_active = self._save_enabled
 
     def disable_saving(self) -> None:
@@ -357,12 +353,10 @@ class KfaarPipeline:
         save_videos_dir = self._save_dir_videos if self._save_videos and self._save_dir_videos is not None else None
         if save_images_dir is None and save_videos_dir is None:
             return
-        epoch_image_dir = save_images_dir / f"epoch_{self._current_epoch:03d}" if save_images_dir is not None else None
-        epoch_video_dir = save_videos_dir / f"epoch_{self._current_epoch:03d}" if save_videos_dir is not None else None
-        if epoch_image_dir is not None:
-            epoch_image_dir.mkdir(parents=True, exist_ok=True)
-        if epoch_video_dir is not None:
-            epoch_video_dir.mkdir(parents=True, exist_ok=True)
+        if save_images_dir is not None:
+            save_images_dir.mkdir(parents=True, exist_ok=True)
+        if save_videos_dir is not None:
+            save_videos_dir.mkdir(parents=True, exist_ok=True)
 
         with torch.no_grad():
             video_written = False
@@ -393,15 +387,15 @@ class KfaarPipeline:
                     if input_img.min() < 0.0 or input_img.max() > 1.0:
                         input_img = input_img.add(1).div(2.0)
                     input_img = input_img.clamp(0.0, 1.0)
-                    if epoch_image_dir is not None:
-                        vutils.save_image(input_img, epoch_image_dir / f"{base}_input.png")
+                    if save_images_dir is not None:
+                        vutils.save_image(input_img, save_images_dir / f"{base}_input.png")
 
                 gen_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
-                if epoch_image_dir is not None:
-                    vutils.save_image(gen_img, epoch_image_dir / f"{base}_gen.png")
+                if save_images_dir is not None:
+                    vutils.save_image(gen_img, save_images_dir / f"{base}_gen.png")
 
-                if (not video_written) and epoch_video_dir is not None and input_frames is not None:
-                    # Attempt torchvision (requires PyAV), then fallback to imageio; otherwise skip with warning.
+                if (not video_written) and save_videos_dir is not None and input_frames is not None:
+                    # GIF-only saving (no mp4) to avoid PyAV dependency
                     inp_frames = input_frames.detach().cpu()
                     if inp_frames.min() < 0.0 or inp_frames.max() > 1.0:
                         inp_frames = inp_frames.add(1).div(2.0)
@@ -412,37 +406,14 @@ class KfaarPipeline:
                     gen_vid_frames = gen_vid_frames.add(1).div(2.0).clamp(0.0, 1.0)
                     gen_vid = (gen_vid_frames.permute(0, 2, 3, 1) * 255).byte()
 
-                    written = False
-                    try:
-                        tvio.write_video(epoch_video_dir / f"{base_video}_input.mp4", inp_vid, fps=10)
-                        tvio.write_video(epoch_video_dir / f"{base_video}_gen.mp4", gen_vid, fps=10)
-                        written = True
-                    except Exception as exc:
-                        logging.warning("torchvision video write failed for %s: %s", base_video, exc)
-
-                    if (not written) and imageio is not None:
+                    if imageio is None:
+                        logging.warning("GIF saving skipped for %s: imageio not available", base_video)
+                    else:
                         try:
-                            with imageio.get_writer(epoch_video_dir / f"{base_video}_input.mp4", fps=10, codec="libx264") as w:
-                                for frame in inp_vid.numpy():
-                                    w.append_data(frame)
-                            with imageio.get_writer(epoch_video_dir / f"{base_video}_gen.mp4", fps=10, codec="libx264") as w:
-                                for frame in gen_vid.numpy():
-                                    w.append_data(frame)
-                            written = True
-                        except Exception as exc:  # pragma: no cover
-                            logging.warning("imageio video write failed for %s: %s", base_video, exc)
-
-                    if not written and imageio is not None:
-                        try:
-                            imageio.mimsave(epoch_video_dir / f"{base_video}_input.gif", inp_vid.numpy(), duration=0.1)
-                            imageio.mimsave(epoch_video_dir / f"{base_video}_gen.gif", gen_vid.numpy(), duration=0.1)
-                            written = True
+                            imageio.mimsave(save_videos_dir / f"{base_video}_input.gif", inp_vid.numpy(), duration=0.1)
+                            imageio.mimsave(save_videos_dir / f"{base_video}_gen.gif", gen_vid.numpy(), duration=0.1)
+                            video_written = True
                         except Exception as exc:  # pragma: no cover
                             logging.warning("imageio GIF write failed for %s: %s", base_video, exc)
-
-                    if written:
-                        video_written = True
-                    else:
-                        logging.warning("Failed to save video for sample %s: no available writer", base_video)
 
                 self._saved_this_epoch = sample_id + 1
