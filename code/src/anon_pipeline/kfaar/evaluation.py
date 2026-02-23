@@ -101,7 +101,9 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
 
     if isinstance(batch, dict):
         frames = batch.get("frames")
-        labels = batch.get("label") or batch.get("labels")
+        labels = batch.get("label")
+        if labels is None:
+            labels = batch.get("labels")
         seq_lens = batch.get("seq_lens")
     elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
         frames, labels = batch[0], batch[1]
