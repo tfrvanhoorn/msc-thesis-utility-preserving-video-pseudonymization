@@ -285,6 +285,7 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report_path = args.output_dir / f"{args.checkpoint.stem}_{args.dataset_type}_eval.json"
+    serialized_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(
             {
@@ -293,6 +294,7 @@ def main() -> None:
                 "seed": args.seed,
                 "metrics": summary,
                 "total_samples": total_samples,
+                "settings": serialized_args,
                 "identities": {
                     "all": all_identities,
                 },
