@@ -422,16 +422,20 @@ class KfaarPipeline:
 
                     if (not written) and imageio is not None:
                         try:
-                            imageio.mimwrite(epoch_video_dir / f"{base_video}_input.mp4", inp_vid.numpy(), fps=10, codec="libx264")
-                            imageio.mimwrite(epoch_video_dir / f"{base_video}_gen.mp4", gen_vid.numpy(), fps=10, codec="libx264")
+                            with imageio.get_writer(epoch_video_dir / f"{base_video}_input.mp4", fps=10, codec="libx264") as w:
+                                for frame in inp_vid.numpy():
+                                    w.append_data(frame)
+                            with imageio.get_writer(epoch_video_dir / f"{base_video}_gen.mp4", fps=10, codec="libx264") as w:
+                                for frame in gen_vid.numpy():
+                                    w.append_data(frame)
                             written = True
                         except Exception as exc:  # pragma: no cover
                             logging.warning("imageio video write failed for %s: %s", base_video, exc)
 
                     if not written and imageio is not None:
                         try:
-                            imageio.mimsave(epoch_video_dir / f"{base_video}_input.gif", inp_vid.numpy(), fps=10)
-                            imageio.mimsave(epoch_video_dir / f"{base_video}_gen.gif", gen_vid.numpy(), fps=10)
+                            imageio.mimsave(epoch_video_dir / f"{base_video}_input.gif", inp_vid.numpy(), duration=0.1)
+                            imageio.mimsave(epoch_video_dir / f"{base_video}_gen.gif", gen_vid.numpy(), duration=0.1)
                             written = True
                         except Exception as exc:  # pragma: no cover
                             logging.warning("imageio GIF write failed for %s: %s", base_video, exc)
