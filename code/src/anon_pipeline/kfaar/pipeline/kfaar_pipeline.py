@@ -361,6 +361,8 @@ class KfaarPipeline:
             epoch_video_dir.mkdir(parents=True, exist_ok=True)
 
         with torch.no_grad():
+            video_written = False
+            base_video = None
             for idx in range(images.shape[0]):
                 if self._save_max_per_epoch is not None and self._saved_this_epoch >= self._save_max_per_epoch:
                     break
@@ -378,6 +380,8 @@ class KfaarPipeline:
                 sample_part = f"{self._saved_this_epoch:06d}"
                 status_part = "det" if detected else "undet"
                 base = f"{label_part}_key{key_part}_batch{batch_part}_sample{sample_part}_{status_part}"
+                if base_video is None:
+                    base_video = base
 
                 sample_id = self._saved_this_epoch
                 if input_frames is not None:
@@ -392,20 +396,21 @@ class KfaarPipeline:
                 if epoch_image_dir is not None:
                     vutils.save_image(gen_img, epoch_image_dir / f"{base}_gen.png")
 
-                if epoch_video_dir is not None and input_frames is not None:
+                if (not video_written) and epoch_video_dir is not None and input_frames is not None:
                     try:
                         inp_frames = input_frames.detach().cpu()
                         if inp_frames.min() < 0.0 or inp_frames.max() > 1.0:
                             inp_frames = inp_frames.add(1).div(2.0)
                         inp_frames = inp_frames.clamp(0.0, 1.0)
                         inp_vid = (inp_frames.permute(0, 2, 3, 1) * 255).byte()
-                        tvio.write_video(epoch_video_dir / f"{base}_input.mp4", inp_vid, fps=10)
+                        tvio.write_video(epoch_video_dir / f"{base_video}_input.mp4", inp_vid, fps=10)
 
                         gen_vid_frames = images.detach().cpu()
                         gen_vid_frames = gen_vid_frames.add(1).div(2.0).clamp(0.0, 1.0)
                         gen_vid = (gen_vid_frames.permute(0, 2, 3, 1) * 255).byte()
-                        tvio.write_video(epoch_video_dir / f"{base}_gen.mp4", gen_vid, fps=10)
-                    except Exception:
-                        pass
+                        tvio.write_video(epoch_video_dir / f"{base_video}_gen.mp4", gen_vid, fps=10)
+                        video_written = True
+                    except Exception as exc:  # log and continue
+                        logging.warning("Failed to save video for sample %s: %s", base_video, exc)
 
                 self._saved_this_epoch = sample_id + 1
