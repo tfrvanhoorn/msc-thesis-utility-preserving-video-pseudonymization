@@ -104,10 +104,12 @@ class VoxCelebVideoDataset(IterableDataset):
 
                         frames = torch.from_numpy(window).permute(0, 3, 1, 2).float() / 255.0
                         youtube_id = video_path.parent.name
+                        source_id = str(video_path.relative_to(self.base_dir))
                         yield {
                             "frames": frames,
                             "identity": identity,
                             "context": youtube_id,
+                            "source": source_id,
                         }
 
                         yielded_for_identity += 1

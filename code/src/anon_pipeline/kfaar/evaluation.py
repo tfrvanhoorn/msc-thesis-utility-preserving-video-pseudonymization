@@ -123,11 +123,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str] | None]:
+def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str] | None, list[str] | None]:
     frames: Any
     labels: torch.Tensor | None = None
     seq_lens: Any = None
     contexts: list[str] | None = None
+    sources: list[str] | None = None
 
     if isinstance(batch, dict):
         frames = batch.get("frames")
@@ -141,6 +142,12 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
                 contexts = [str(c) for c in ctx_val]
             else:
                 contexts = [str(ctx_val)]
+        src_val = batch.get("source")
+        if src_val is not None:
+            if isinstance(src_val, (list, tuple)):
+                sources = [str(s) for s in src_val]
+            else:
+                sources = [str(src_val)]
     elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
         frames, labels = batch[0], batch[1]
         if len(batch) >= 3:
@@ -164,7 +171,7 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
         (frame_tensor.shape[0],), frame_tensor.shape[1], dtype=torch.long
     )
 
-    return frame_tensor, labels_tensor, seq_len_tensor, contexts
+    return frame_tensor, labels_tensor, seq_len_tensor, contexts, sources
 
 
 def main() -> None:
@@ -267,7 +274,7 @@ def main() -> None:
     total_samples = 0
     with torch.no_grad():
         for batch in test_loader:
-            frames, labels, seq_lens, contexts = _extract_batch(batch)
+            frames, labels, seq_lens, contexts, sources = _extract_batch(batch)
             frames = frames.to(device)
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
@@ -283,6 +290,10 @@ def main() -> None:
                 if contexts is not None and idx < len(contexts):
                     sample_context = contexts[idx]
 
+                source_id = None
+                if sources is not None and idx < len(sources):
+                    source_id = sources[idx]
+
                 res = pipeline.forward(sample_frames, key, sample_label=label, sample_context=sample_context)
 
                 metrics.update_detection(res.gen_mask)
@@ -290,7 +301,7 @@ def main() -> None:
 
                 valid_virtual = res.virtual_embeddings[res.valid_mask]
                 if valid_virtual.numel() > 0:
-                    metrics.add_synchronism_embeddings(label, valid_virtual)
+                    metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
 
                 total_samples += 1
 
@@ -299,10 +310,12 @@ def main() -> None:
 
     summary = metrics.finalize()
     logging.info(
-        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | samples=%d",
+        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | syn_within=%.4f | syn_cross=%.4f | samples=%d",
         summary["detection_rate"],
         summary["anonymization_success_rate"],
         summary["synchronism_success_rate"],
+        summary["synchronism_within_success_rate"],
+        summary["synchronism_cross_success_rate"],
         total_samples,
     )
 

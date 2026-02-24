@@ -45,6 +45,7 @@ class SampleReference:
     window_size: int | None = None
     frame_stride: int | None = None
     context: str | None = None
+    source: str | None = None
 
 
 class ImageFolderDataset(IterableDataset):
@@ -398,6 +399,7 @@ def _collect_voxceleb_windows_for_identity(
                             window_size=window_size,
                             frame_stride=frame_stride,
                             context=youtube_dir.name,
+                            source=str(video_path.relative_to(base_dir)),
                         )
                     )
                     windows_from_video += 1
@@ -434,6 +436,7 @@ def unified_video_collate_fn(
             "frames": torch.empty(0, 0, 0, 0, 0),
             "identity": [],
             "context": [],
+            "source": [],
             "label": torch.empty(0, dtype=torch.long),
             "seq_lens": torch.empty(0, dtype=torch.long),
         }
@@ -441,6 +444,7 @@ def unified_video_collate_fn(
     frames_list: list[torch.Tensor] = []
     identities: list[str] = []
     contexts: list[str] = []
+    sources: list[str] = []
     lengths: list[int] = []
 
     for sample in batch:
@@ -458,12 +462,14 @@ def unified_video_collate_fn(
         frames_list.append(frames)
         identities.append(str(sample.get("identity", "")))
         contexts.append(str(sample.get("context", "")))
+        sources.append(str(sample.get("source", "")))
 
     if not frames_list:
         return {
             "frames": torch.empty(0, 0, 0, 0, 0),
             "identity": identities,
             "context": contexts,
+            "source": sources,
             "label": torch.empty(0, dtype=torch.long),
             "seq_lens": torch.empty(0, dtype=torch.long),
         }
@@ -494,6 +500,7 @@ def unified_video_collate_fn(
         "frames": batch_frames,
         "identity": identities,
         "context": contexts,
+        "source": sources,
         "label": labels,
         "seq_lens": torch.tensor(lengths, dtype=torch.long),
     }
@@ -565,12 +572,13 @@ class IdentityBatchingDataset(IterableDataset):
             groups.sort(key=lambda g: str(g[0].path))
         return groups
 
-    def _load_reference(self, ref: SampleReference) -> tuple[torch.Tensor | None, str]:
+    def _load_reference(self, ref: SampleReference) -> tuple[torch.Tensor | None, str, str]:
+        source_id = ref.source or str(ref.path)
         if ref.kind == "image":
             tensor = _load_image_tensor(ref.path)
             if tensor is None:
-                return None, ref.context or ""
-            return tensor.unsqueeze(0), ref.context or "static"
+                return None, ref.context or "", source_id
+            return tensor.unsqueeze(0), ref.context or "static", source_id
 
         if ref.kind == "video_window":
             try:
@@ -581,13 +589,13 @@ class IdentityBatchingDataset(IterableDataset):
                     frame_stride=int(ref.frame_stride or 1),
                 )
             except Exception:
-                return None, ref.context or ""
+                return None, ref.context or "", source_id
             if window is None:
-                return None, ref.context or ""
+                return None, ref.context or "", source_id
             frames = torch.from_numpy(window).permute(0, 3, 1, 2).float() / 255.0
-            return frames, ref.context or ""
+            return frames, ref.context or "", source_id
 
-        return None, ref.context or ""
+        return None, ref.context or "", source_id
 
     def _materialize_batch(self, batch_refs: list[tuple[str, list[SampleReference]]]) -> Optional[dict[str, Any]]:
         batch_sequences: list[torch.Tensor] = []
@@ -595,27 +603,29 @@ class IdentityBatchingDataset(IterableDataset):
         batch_seq_lens: list[int] = []
         batch_identities: list[str] = []
         batch_contexts: list[str] = []
+        batch_sources: list[str] = []
 
         for identity, refs in batch_refs:
-            loaded: list[tuple[torch.Tensor, str]] = []
+            loaded: list[tuple[torch.Tensor, str, str]] = []
             groups = self._group_refs(refs)
             if self.group_by_video and self.samples_per_identity and len(groups) < self.samples_per_identity:
                 continue
             groups = groups[: self.samples_per_identity] if self.samples_per_identity else groups
             for group in groups:
                 for ref in group:
-                    frames, ctx = self._load_reference(ref)
+                    frames, ctx, source_id = self._load_reference(ref)
                     if frames is None:
                         continue
-                    loaded.append((frames, ctx))
+                    loaded.append((frames, ctx, source_id))
             if len(loaded) < self.min_samples_per_identity:
                 continue
-            for frames, ctx in loaded:
+            for frames, ctx, source_id in loaded:
                 batch_sequences.append(frames)
                 batch_labels.append(self.identity_to_index[identity])
                 batch_seq_lens.append(int(frames.shape[0]))
                 batch_identities.append(identity)
                 batch_contexts.append(ctx)
+                batch_sources.append(source_id)
 
         if len(batch_sequences) < self.batch_identities * self.min_samples_per_identity:
             return None
@@ -628,6 +638,7 @@ class IdentityBatchingDataset(IterableDataset):
             "seq_lens": torch.tensor(batch_seq_lens, dtype=torch.long),
             "identity": batch_identities,
             "context": batch_contexts,
+            "source": batch_sources,
         }
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
