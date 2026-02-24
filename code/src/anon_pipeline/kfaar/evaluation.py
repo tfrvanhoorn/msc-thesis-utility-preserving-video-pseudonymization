@@ -274,6 +274,9 @@ def main() -> None:
     total_samples = 0
     with torch.no_grad():
         for batch in test_loader:
+            batch_div_embeddings: list[torch.Tensor] = []
+            batch_div_labels: list[int] = []
+
             frames, labels, seq_lens, contexts, sources = _extract_batch(batch)
             frames = frames.to(device)
             labels = labels.to(device)
@@ -303,19 +306,29 @@ def main() -> None:
                 if valid_virtual.numel() > 0:
                     metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
 
+                    # Collect valid virtual embeddings for diversity scoring across identities in the batch
+                    batch_div_embeddings.append(valid_virtual.detach())
+                    batch_div_labels.extend([label] * valid_virtual.shape[0])
+
                 total_samples += 1
+
+            if batch_div_embeddings:
+                div_embeds = torch.cat(batch_div_embeddings, dim=0)
+                div_labels = torch.as_tensor(batch_div_labels, device=div_embeds.device, dtype=torch.long)
+                metrics.update_diversity(div_embeds, div_labels)
 
     if hasattr(pipeline, "finalize_saving"):
         pipeline.finalize_saving()
 
     summary = metrics.finalize()
     logging.info(
-        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | syn_within=%.4f | syn_cross=%.4f | samples=%d",
+        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | syn_within=%.4f | syn_cross=%.4f | diversity_success=%.4f | samples=%d",
         summary["detection_rate"],
         summary["anonymization_success_rate"],
         summary["synchronism_success_rate"],
         summary["synchronism_within_success_rate"],
         summary["synchronism_cross_success_rate"],
+        summary.get("diversity_success_rate", 0.0),
         total_samples,
     )
 

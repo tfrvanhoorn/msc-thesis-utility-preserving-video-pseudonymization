@@ -21,6 +21,8 @@ class MetricsAccumulator:
     synchronism_within_total: int = 0
     synchronism_cross_success: int = 0
     synchronism_cross_total: int = 0
+    diversity_success: int = 0
+    diversity_total: int = 0
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
     _synchronism_computed: bool = field(default=False, init=False, repr=False)
 
@@ -77,12 +79,14 @@ class MetricsAccumulator:
         synchronism_cross_success_rate = (
             float(self.synchronism_cross_success) / self.synchronism_cross_total if self.synchronism_cross_total else 0.0
         )
+        diversity_success_rate = float(self.diversity_success) / self.diversity_total if self.diversity_total else 0.0
         return {
             "detection_rate": detection_rate,
             "anonymization_success_rate": anonymization_success_rate,
             "synchronism_success_rate": synchronism_success_rate,
             "synchronism_within_success_rate": synchronism_within_success_rate,
             "synchronism_cross_success_rate": synchronism_cross_success_rate,
+            "diversity_success_rate": diversity_success_rate,
             "counts": {
                 "detected_generated": int(self.detected_generated),
                 "total_generated": int(self.total_generated),
@@ -94,12 +98,48 @@ class MetricsAccumulator:
                 "synchronism_within_total": int(self.synchronism_within_total),
                 "synchronism_cross_success": int(self.synchronism_cross_success),
                 "synchronism_cross_total": int(self.synchronism_cross_total),
+                "diversity_success": int(self.diversity_success),
+                "diversity_total": int(self.diversity_total),
             },
             "thresholds": {
                 "anonymization": float(self.anonymization_threshold),
                 "synchronism": float(self.synchronism_threshold),
             },
         }
+
+    def update_diversity(self, embeddings: torch.Tensor, labels: torch.Tensor) -> None:
+        """Score cross-identity pairs using the anonymization threshold."""
+
+        if embeddings is None or labels is None:
+            return
+        if embeddings.numel() == 0:
+            return
+
+        embeds = embeddings
+        lbls = labels
+        if embeds.shape[0] != lbls.shape[0]:
+            raise ValueError("Embeddings and labels must have matching batch dimension for diversity scoring")
+
+        if embeds.shape[0] < 2:
+            return
+
+        idx = torch.arange(embeds.shape[0], device=embeds.device)
+        pairs = torch.combinations(idx, r=2, with_replacement=False)
+        if pairs.numel() == 0:
+            return
+        label_a = lbls[pairs[:, 0]]
+        label_b = lbls[pairs[:, 1]]
+        cross_mask = label_a != label_b
+        if not cross_mask.any():
+            return
+
+        pairs = pairs[cross_mask]
+        a = embeds[pairs[:, 0]]
+        b = embeds[pairs[:, 1]]
+        cos = F.cosine_similarity(a, b, dim=1)
+        successes = (cos < self.anonymization_threshold).sum().item()
+        self.diversity_success += int(successes)
+        self.diversity_total += int(cos.numel())
 
     def _compute_synchronism(self) -> None:
         if self._synchronism_computed:
