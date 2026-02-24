@@ -28,6 +28,9 @@ class VoxCelebVideoDataset(IterableDataset):
         root: Path,
         identities: Sequence[str] | None = None,
         max_per_identity: int | None = None,
+        max_videos_per_identity: int | None = None,
+        max_videos_per_youtube_id: int | None = None,
+        min_youtube_id_per_identity: int | None = None,
         window_size: int = 16,
         frame_stride: int = 1,
         window_step: int | None = None,
@@ -39,6 +42,9 @@ class VoxCelebVideoDataset(IterableDataset):
         self.base_dir = root / "dev" / "mp4"
         self.identities = list(identities) if identities else None
         self.max_per_identity = max_per_identity
+        self.max_videos_per_identity = max_videos_per_identity
+        self.max_videos_per_youtube_id = max_videos_per_youtube_id
+        self.min_youtube_id_per_identity = min_youtube_id_per_identity
         self.window_size = window_size
         self.frame_stride = frame_stride
         self.window_step = window_step if window_step is not None else window_size * frame_stride
@@ -61,39 +67,61 @@ class VoxCelebVideoDataset(IterableDataset):
             identity_dir = self.base_dir / identity
             if not identity_dir.exists():
                 continue
+            youtube_dirs = [p for p in identity_dir.iterdir() if p.is_dir()]
+            if self.min_youtube_id_per_identity is not None and len(youtube_dirs) < self.min_youtube_id_per_identity:
+                continue
+            if self.shuffle:
+                random.shuffle(youtube_dirs)
+            else:
+                youtube_dirs.sort()
             yielded_for_identity = 0
-            for video_path in self._iter_video_paths(identity_dir):
-                total_frames = get_video_frame_count(video_path)
-                usable_start_limit = total_frames - (self.window_size - 1) * self.frame_stride
-                if usable_start_limit <= 0:
-                    continue
-                starts = self._iter_starts(usable_start_limit)
-                windows_from_video = 0
-                for start in starts:
-                    window = load_video_window(
-                        video_path,
-                        start,
-                        self.window_size,
-                        frame_stride=self.frame_stride,
-                    )
-                    if window is None:
+            videos_seen = 0
+            for youtube_dir in youtube_dirs:
+                videos_seen_in_youtube = 0
+                for video_path in self._iter_video_paths(youtube_dir):
+                    videos_seen += 1
+                    videos_seen_in_youtube += 1
+                    if self.max_videos_per_identity and videos_seen > self.max_videos_per_identity:
+                        break
+                    if self.max_videos_per_youtube_id and videos_seen_in_youtube > self.max_videos_per_youtube_id:
+                        break
+
+                    total_frames = get_video_frame_count(video_path)
+                    usable_start_limit = total_frames - (self.window_size - 1) * self.frame_stride
+                    if usable_start_limit <= 0:
                         continue
+                    starts = self._iter_starts(usable_start_limit)
+                    windows_from_video = 0
+                    for start in starts:
+                        window = load_video_window(
+                            video_path,
+                            start,
+                            self.window_size,
+                            frame_stride=self.frame_stride,
+                        )
+                        if window is None:
+                            continue
 
-                    frames = torch.from_numpy(window).permute(0, 3, 1, 2).float() / 255.0
-                    youtube_id = video_path.parent.name
-                    yield {
-                        "frames": frames,
-                        "identity": identity,
-                        "context": youtube_id,
-                    }
+                        frames = torch.from_numpy(window).permute(0, 3, 1, 2).float() / 255.0
+                        youtube_id = video_path.parent.name
+                        yield {
+                            "frames": frames,
+                            "identity": identity,
+                            "context": youtube_id,
+                        }
 
-                    yielded_for_identity += 1
-                    windows_from_video += 1
+                        yielded_for_identity += 1
+                        windows_from_video += 1
+                        if self.max_per_identity and yielded_for_identity >= self.max_per_identity:
+                            break
+                        if self.max_windows_per_video and windows_from_video >= self.max_windows_per_video:
+                            break
+
                     if self.max_per_identity and yielded_for_identity >= self.max_per_identity:
                         break
-                    if self.max_windows_per_video and windows_from_video >= self.max_windows_per_video:
-                        break
                 if self.max_per_identity and yielded_for_identity >= self.max_per_identity:
+                    break
+                if self.max_videos_per_identity and videos_seen >= self.max_videos_per_identity:
                     break
 
     def _discover_identities(self) -> list[str]:
@@ -101,16 +129,12 @@ class VoxCelebVideoDataset(IterableDataset):
             return []
         return sorted([p.name for p in self.base_dir.iterdir() if p.is_dir()])
 
-    def _iter_video_paths(self, identity_dir: Path) -> Iterator[Path]:
-        # Expected layout: identity_dir / youtube_id / video_number.mp4
+    def _iter_video_paths(self, youtube_dir: Path) -> Iterator[Path]:
         candidates: list[Path] = []
-        for youtube_dir in identity_dir.iterdir():
-            if not youtube_dir.is_dir():
-                continue
-            for pattern in self.patterns:
-                for path in youtube_dir.glob(pattern):
-                    if path.is_file():
-                        candidates.append(path)
+        for pattern in self.patterns:
+            for path in youtube_dir.glob(pattern):
+                if path.is_file():
+                    candidates.append(path)
         if self.shuffle:
             random.shuffle(candidates)
         else:

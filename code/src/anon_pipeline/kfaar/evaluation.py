@@ -74,17 +74,20 @@ def parse_args() -> argparse.Namespace:
 
     # Dataset & Split
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--max_per_identity", type=int, default=None, help="Max samples per identity to use from dataset")
-    parser.add_argument("--window_size", type=int, default=16, help="Window size for voxceleb_video sequences")
-    parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for voxceleb_video")
-    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for voxceleb_video (defaults to window_size*frame_stride)")
-    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows to sample per video for voxceleb_video")
+    parser.add_argument("--max_per_identity", type=int, default=None, help="Max windows sampled per identity (post all caps)")
+    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (voxceleb_video)")
+    parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max video files sampled per YouTube ID (voxceleb_video)")
+    parser.add_argument("--min_youtube_id_per_identity", type=int, default=None, help="Require at least this many YouTube IDs per identity (voxceleb_video)")
+    parser.add_argument("--window_size", type=int, default=16, help="Window size (frames) for voxceleb_video sequences")
+    parser.add_argument("--frame_stride", type=int, default=1, help="Stride between frames inside a window")
+    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts (defaults to window_size*frame_stride)")
+    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (voxceleb_video)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting and key sampling")
 
     # Identity batching
     parser.add_argument("--batch_identities", type=int, default=4, help="Number of unique identities per batch")
-    parser.add_argument("--batch_samples_per_identity", type=int, default=2, help="Images per identity in a batch")
-    parser.add_argument("--min_samples_per_identity", type=int, default=2, help="Minimum samples required to include an identity in a batch")
+    parser.add_argument("--batch_videos_per_identity", type=int, default=2, help="Videos per identity per batch (voxceleb: all windows from each video) or samples for image datasets")
+    parser.add_argument("--min_samples_per_identity", type=int, default=2, help="Minimum sampled windows/images required to include an identity")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
 
     # Hardware
@@ -120,10 +123,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str] | None]:
     frames: Any
     labels: torch.Tensor | None = None
     seq_lens: Any = None
+    contexts: list[str] | None = None
 
     if isinstance(batch, dict):
         frames = batch.get("frames")
@@ -131,6 +135,12 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
         if labels is None:
             labels = batch.get("labels")
         seq_lens = batch.get("seq_lens")
+        ctx_val = batch.get("context")
+        if ctx_val is not None:
+            if isinstance(ctx_val, (list, tuple)):
+                contexts = [str(c) for c in ctx_val]
+            else:
+                contexts = [str(ctx_val)]
     elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
         frames, labels = batch[0], batch[1]
         if len(batch) >= 3:
@@ -154,7 +164,7 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
         (frame_tensor.shape[0],), frame_tensor.shape[1], dtype=torch.long
     )
 
-    return frame_tensor, labels_tensor, seq_len_tensor
+    return frame_tensor, labels_tensor, seq_len_tensor, contexts
 
 
 def main() -> None:
@@ -162,7 +172,12 @@ def main() -> None:
     configure_logging()
     device = torch.device(args.device)
 
-    data_options: dict[str, object] = {"max_per_identity": args.max_per_identity}
+    data_options: dict[str, object] = {
+        "max_per_identity": args.max_per_identity,
+        "max_videos_per_identity": args.max_videos_per_identity,
+        "max_videos_per_youtube_id": args.max_videos_per_youtube_id,
+        "min_youtube_id_per_identity": args.min_youtube_id_per_identity,
+    }
     if args.dataset_type == "voxceleb_video":
         data_options.update(
             {
@@ -206,13 +221,14 @@ def main() -> None:
     test_loader = build_dataloader_for_identities(
         cfg.data,
         all_identities,
-        batch_size=args.batch_identities * args.batch_samples_per_identity,
+        batch_size=args.batch_identities * args.batch_videos_per_identity,
         identity_batching=True,
         batch_identities=args.batch_identities,
-        samples_per_identity=args.batch_samples_per_identity,
+        samples_per_identity=args.batch_videos_per_identity,
         min_samples_per_identity=args.min_samples_per_identity,
         shuffle=False,
         num_workers=args.num_workers,
+        group_by_video=cfg.data.dataset_type.lower() == "voxceleb_video",
     )
 
     logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
@@ -251,7 +267,7 @@ def main() -> None:
     total_samples = 0
     with torch.no_grad():
         for batch in test_loader:
-            frames, labels, seq_lens = _extract_batch(batch)
+            frames, labels, seq_lens, contexts = _extract_batch(batch)
             frames = frames.to(device)
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
@@ -263,7 +279,11 @@ def main() -> None:
                 label = int(labels[idx].item())
                 key = _key_for(label)
 
-                res = pipeline.forward(sample_frames, key, sample_label=label)
+                sample_context = None
+                if contexts is not None and idx < len(contexts):
+                    sample_context = contexts[idx]
+
+                res = pipeline.forward(sample_frames, key, sample_label=label, sample_context=sample_context)
 
                 metrics.update_detection(res.gen_mask)
                 metrics.update_anonymization(res.real_embeddings, res.virtual_embeddings, res.valid_mask)
@@ -273,6 +293,9 @@ def main() -> None:
                     metrics.add_synchronism_embeddings(label, valid_virtual)
 
                 total_samples += 1
+
+    if hasattr(pipeline, "finalize_saving"):
+        pipeline.finalize_saving()
 
     summary = metrics.finalize()
     logging.info(

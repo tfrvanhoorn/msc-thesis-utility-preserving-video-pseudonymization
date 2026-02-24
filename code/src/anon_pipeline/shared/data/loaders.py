@@ -212,6 +212,9 @@ def _build_voxceleb_video_dataset(config: SupportsDataConfig) -> VoxCelebVideoDa
         root=config.dataset_path,
         identities=_normalize_identities(options.get("identities")),
         max_per_identity=_as_optional_int(options.get("max_per_identity")),
+        max_videos_per_identity=_as_optional_int(options.get("max_videos_per_identity")),
+        max_videos_per_youtube_id=_as_optional_int(options.get("max_videos_per_youtube_id")),
+        min_youtube_id_per_identity=_as_optional_int(options.get("min_youtube_id_per_identity")),
         window_size=_as_optional_int(options.get("window_size")) or 16,
         frame_stride=_as_optional_int(options.get("frame_stride")) or 1,
         window_step=_as_optional_int(options.get("window_step")),
@@ -290,6 +293,9 @@ def _build_identity_sample_index(
         window_step = int(window_step)
         patterns = options.get("patterns") or DEFAULT_VIDEO_PATTERNS
         max_windows_per_video = _as_optional_int(options.get("max_windows_per_video"))
+        max_videos_per_identity = _as_optional_int(options.get("max_videos_per_identity"))
+        max_videos_per_youtube_id = _as_optional_int(options.get("max_videos_per_youtube_id"))
+        min_youtube_id_per_identity = _as_optional_int(options.get("min_youtube_id_per_identity"))
         for identity in identities:
             refs = _collect_voxceleb_windows_for_identity(
                 base,
@@ -299,6 +305,9 @@ def _build_identity_sample_index(
                 frame_stride,
                 window_step,
                 max_per_identity,
+                max_videos_per_identity,
+                max_videos_per_youtube_id,
+                min_youtube_id_per_identity,
                 max_windows_per_video,
             )
             if len(refs) >= min_samples_per_identity:
@@ -347,17 +356,33 @@ def _collect_voxceleb_windows_for_identity(
     frame_stride: int,
     window_step: int,
     max_per_identity: int | None,
+    max_videos_per_identity: int | None,
+    max_videos_per_youtube_id: int | None,
+    min_youtube_id_per_identity: int | None,
     max_windows_per_video: int | None,
 ) -> list[SampleReference]:
     identity_dir = base_dir / identity
     if not identity_dir.exists():
         return []
+    youtube_dirs = [p for p in identity_dir.iterdir() if p.is_dir()]
+    if min_youtube_id_per_identity is not None and len(youtube_dirs) < min_youtube_id_per_identity:
+        return []
+    youtube_dirs.sort()
+
     refs: list[SampleReference] = []
-    for youtube_dir in sorted([p for p in identity_dir.iterdir() if p.is_dir()]):
+    videos_seen = 0
+    for youtube_dir in youtube_dirs:
+        videos_in_youtube = 0
         for pattern in patterns:
             for video_path in sorted(youtube_dir.glob(pattern)):
                 if not video_path.is_file():
                     continue
+                videos_seen += 1
+                videos_in_youtube += 1
+                if max_videos_per_identity and videos_seen > max_videos_per_identity:
+                    return refs
+                if max_videos_per_youtube_id and videos_in_youtube > max_videos_per_youtube_id:
+                    break
                 total_frames = get_video_frame_count(video_path)
                 usable_start_limit = total_frames - (window_size - 1) * frame_stride
                 if usable_start_limit <= 0:
@@ -380,8 +405,8 @@ def _collect_voxceleb_windows_for_identity(
                         return refs
                     if max_windows_per_video and windows_from_video >= max_windows_per_video:
                         break
-                if max_per_identity and len(refs) >= max_per_identity:
-                    return refs
+        if max_videos_per_identity and videos_seen >= max_videos_per_identity:
+            return refs
     return refs
 
 
@@ -478,9 +503,10 @@ class IdentityBatchingDataset(IterableDataset):
     """Emit identity-balanced batches with minimal in-memory buffering.
 
     Identities are iterated in shuffled order per epoch. For each identity we
-    load at most ``samples_per_identity`` samples (keeping them if at least
-    ``min_samples_per_identity`` are available) and form batches with the first
-    ``batch_identities`` identities. Only lightweight references are cached; frames
+    select samples and form batches with the first ``batch_identities`` identities.
+    When ``group_by_video`` is True, ``samples_per_identity`` counts videos and
+    all windows from those videos are included (subject to earlier caps). Otherwise
+    it counts individual samples. Only lightweight references are cached; frames
     are loaded just-in-time for each batch.
     """
 
@@ -494,6 +520,7 @@ class IdentityBatchingDataset(IterableDataset):
         min_samples_per_identity: int = 2,
         shuffle_identities: bool = True,
         seed: int | None = None,
+        group_by_video: bool = False,
     ) -> None:
         self.sample_index = sample_index
         self.identity_to_index = identity_to_index
@@ -501,6 +528,7 @@ class IdentityBatchingDataset(IterableDataset):
         self.samples_per_identity = samples_per_identity
         self.min_samples_per_identity = max(1, min_samples_per_identity)
         self.shuffle_identities = shuffle_identities
+        self.group_by_video = group_by_video
         self._rng = random.Random(seed)
 
     def _pad_sequence(self, seq: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -523,6 +551,19 @@ class IdentityBatchingDataset(IterableDataset):
         if self.shuffle_identities:
             self._rng.shuffle(refs)
         return refs
+
+    def _group_refs(self, refs: list[SampleReference]) -> list[list[SampleReference]]:
+        if not self.group_by_video:
+            return [[r] for r in refs]
+        buckets: dict[Path, list[SampleReference]] = {}
+        for ref in refs:
+            buckets.setdefault(ref.path, []).append(ref)
+        groups = list(buckets.values())
+        if self.shuffle_identities:
+            self._rng.shuffle(groups)
+        else:
+            groups.sort(key=lambda g: str(g[0].path))
+        return groups
 
     def _load_reference(self, ref: SampleReference) -> tuple[torch.Tensor | None, str]:
         if ref.kind == "image":
@@ -557,15 +598,19 @@ class IdentityBatchingDataset(IterableDataset):
 
         for identity, refs in batch_refs:
             loaded: list[tuple[torch.Tensor, str]] = []
-            for ref in refs:
-                frames, ctx = self._load_reference(ref)
-                if frames is None:
-                    continue
-                loaded.append((frames, ctx))
+            groups = self._group_refs(refs)
+            if self.group_by_video and self.samples_per_identity and len(groups) < self.samples_per_identity:
+                continue
+            groups = groups[: self.samples_per_identity] if self.samples_per_identity else groups
+            for group in groups:
+                for ref in group:
+                    frames, ctx = self._load_reference(ref)
+                    if frames is None:
+                        continue
+                    loaded.append((frames, ctx))
             if len(loaded) < self.min_samples_per_identity:
                 continue
-            use = loaded[: self.samples_per_identity]
-            for frames, ctx in use:
+            for frames, ctx in loaded:
                 batch_sequences.append(frames)
                 batch_labels.append(self.identity_to_index[identity])
                 batch_seq_lens.append(int(frames.shape[0]))
@@ -593,7 +638,6 @@ class IdentityBatchingDataset(IterableDataset):
             refs = self._iter_refs_for_identity(identity)
             if len(refs) < self.min_samples_per_identity:
                 continue
-            refs = refs[: self.samples_per_identity] if len(refs) >= self.samples_per_identity else refs
             batch_refs.append((identity, refs))
 
             if len(batch_refs) == self.batch_identities:

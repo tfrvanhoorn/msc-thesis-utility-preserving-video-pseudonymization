@@ -100,6 +100,7 @@ def build_dataloader_for_identities(
     batch_identities: int | None = None,
     samples_per_identity: int | None = None,
     min_samples_per_identity: int = 2,
+    group_by_video: bool = False,
 ) -> DataLoader:
     identity_to_index = {ident: idx for idx, ident in enumerate(identities)}
 
@@ -114,6 +115,7 @@ def build_dataloader_for_identities(
             samples_per_identity=samples_per_identity,
             min_samples_per_identity=min_samples_per_identity,
             shuffle_identities=shuffle,
+            group_by_video=group_by_video,
         )
         return DataLoader(batched_dataset, batch_size=None, shuffle=False, num_workers=num_workers)
 
@@ -137,6 +139,7 @@ def build_train_test_loaders(
     samples_per_identity: int | None = None,
     identity_batching: bool = False,
     min_samples_per_identity: int = 2,
+    group_by_video: bool = False,
     shuffle_train: bool = True,
     shuffle_test: bool = False,
     num_workers: int = 0,
@@ -151,6 +154,7 @@ def build_train_test_loaders(
         batch_identities=batch_identities,
         samples_per_identity=samples_per_identity,
         min_samples_per_identity=min_samples_per_identity,
+        group_by_video=group_by_video,
         shuffle=shuffle_train,
         num_workers=num_workers,
         collate_fn=collate_fn,
@@ -163,6 +167,7 @@ def build_train_test_loaders(
         batch_identities=batch_identities,
         samples_per_identity=samples_per_identity,
         min_samples_per_identity=min_samples_per_identity,
+        group_by_video=group_by_video,
         shuffle=shuffle_test,
         num_workers=num_workers,
         collate_fn=collate_fn,

@@ -76,6 +76,7 @@ class KfaarPipeline:
         self._save_mode = save_mode
         self._save_max_per_epoch = save_max_per_epoch
         self._save_videos = False
+        self._video_accumulators: Dict[str, Dict[str, list[np.ndarray]]] = {}
         self._saved_this_epoch = 0
         self._current_epoch = 0
         self.truncation_psi = truncation_psi
@@ -94,10 +95,12 @@ class KfaarPipeline:
         sample_label: Optional[int] = None,
         key_tag: Optional[str] = None,
         batch_index: Optional[int] = None,
+        sample_context: Optional[str] = None,
     ) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
         seq_len = frames_t.shape[0]
+        center_idx = max(0, (seq_len - 1) // 2)
 
         # 1. Input Processing
         input_mask = []
@@ -122,35 +125,34 @@ class KfaarPipeline:
             for e, idx in zip(embs, valid_idx):
                 real_emb[idx] = e
 
-        # 2. Projection
+        # 2. Projection (single-frame target per window)
         key_t = key.to(device)
         if self._projector_is_lstm:
             k_in = key_t.view(1, 1, -1).expand(1, seq_len, -1)
-            projected_z = self.projector.project(real_emb.unsqueeze(0), k_in)[0]
+            projected_seq = self.projector.project(real_emb.unsqueeze(0), k_in)[0]
+            projected_z = projected_seq[center_idx : center_idx + 1]
         else:
-            projected_z = self.projector.project(real_emb, key_t.expand(seq_len, -1))
+            real_center = real_emb[center_idx : center_idx + 1]
+            projected_z = self.projector.project(real_center, key_t.expand(1, -1))
 
         # 3. Virtual Processing
-        v_embeddings = torch.zeros(seq_len, 512, device=device)
-        gen_mask = [False] * seq_len
+        v_embeddings = torch.zeros_like(projected_z)
+        gen_mask = [False]
         
         images = None
         if self.stylegan is not None:
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
-            for i in range(seq_len):
-                img = images[i].clamp(-1, 1).add(1).div(2.0)
-                dets = self.detector.detect(img)
-                if dets:
-                    top = max(dets, key=lambda d: d.score)
-                    aligned = self.aligner.align(img, top).to(device)
-                    # Carry grad from projected_z through StyleGAN to Embedder
-                    v_embeddings[i] = self.embedder.embed([aligned], with_grad=True)[0]
-                    gen_mask[i] = True
-                else:
-                    # Maintain grad path but keep value 0 to signal failure
-                    v_embeddings[i] = projected_z[i].sum() * 0.0
-                    self.stats["gen_no_det"] += 1
+            img = images[0].clamp(-1, 1).add(1).div(2.0)
+            dets = self.detector.detect(img)
+            if dets:
+                top = max(dets, key=lambda d: d.score)
+                aligned = self.aligner.align(img, top).to(device)
+                v_embeddings[0] = self.embedder.embed([aligned], with_grad=True)[0]
+                gen_mask[0] = True
+            else:
+                v_embeddings[0] = projected_z[0].sum() * 0.0
+                self.stats["gen_no_det"] += 1
 
             self._maybe_save_generated(
                 images,
@@ -158,17 +160,18 @@ class KfaarPipeline:
                 sample_label=sample_label,
                 key_tag=key_tag,
                 batch_index=batch_index,
-                input_frames=frames_t,
+                input_frames=frames_t[center_idx : center_idx + 1],
+                sample_context=sample_context,
             )
 
-        input_mask_t = torch.tensor(input_mask, device=device, dtype=torch.bool)
+        input_mask_t = torch.tensor([input_mask[center_idx]], device=device, dtype=torch.bool)
         gen_mask_t = torch.tensor(gen_mask, device=device, dtype=torch.bool)
         valid_mask = input_mask_t & gen_mask_t
 
         return KfaarResult(
             detections=[], # Simplified for training speed
-            aligned_faces=aligned_faces,
-            real_embeddings=real_emb.detach(),
+            aligned_faces=[aligned_faces[center_idx]],
+            real_embeddings=real_emb[center_idx : center_idx + 1].detach(),
             projected_z=projected_z,
             virtual_embeddings=v_embeddings,
             valid_mask=valid_mask,
@@ -323,6 +326,7 @@ class KfaarPipeline:
         self._saved_this_epoch = 0
         # Evaluation uses single pass; no per-epoch subfolders for saves
         self._saving_active = self._save_enabled
+        self._video_accumulators.clear()
 
     def disable_saving(self) -> None:
         self._saving_active = False
@@ -340,6 +344,7 @@ class KfaarPipeline:
         key_tag: Optional[str],
         batch_index: Optional[int],
         input_frames: Optional[torch.Tensor] = None,
+        sample_context: Optional[str] = None,
     ) -> None:
         if not self._save_enabled or not self._saving_active:
             return
@@ -359,8 +364,6 @@ class KfaarPipeline:
             save_videos_dir.mkdir(parents=True, exist_ok=True)
 
         with torch.no_grad():
-            video_written = False
-            base_video = None
             for idx in range(images.shape[0]):
                 if self._save_max_per_epoch is not None and self._saved_this_epoch >= self._save_max_per_epoch:
                     break
@@ -378,8 +381,8 @@ class KfaarPipeline:
                 sample_part = f"{self._saved_this_epoch:06d}"
                 status_part = "det" if detected else "undet"
                 base = f"{label_part}_key{key_part}_batch{batch_part}_sample{sample_part}_{status_part}"
-                if base_video is None:
-                    base_video = base
+                context_part = (sample_context or "context").replace("/", "_").replace("\\", "_")
+                video_key = f"{label_part}_{context_part}"
 
                 sample_id = self._saved_this_epoch
                 if input_frames is not None:
@@ -394,26 +397,37 @@ class KfaarPipeline:
                 if save_images_dir is not None:
                     vutils.save_image(gen_img, save_images_dir / f"{base}_gen.png")
 
-                if (not video_written) and save_videos_dir is not None and input_frames is not None:
-                    # GIF-only saving (no mp4) to avoid PyAV dependency
-                    inp_frames = input_frames.detach().cpu()
-                    if inp_frames.min() < 0.0 or inp_frames.max() > 1.0:
-                        inp_frames = inp_frames.add(1).div(2.0)
-                    inp_frames = inp_frames.clamp(0.0, 1.0)
-                    inp_vid = (inp_frames.permute(0, 2, 3, 1) * 255).byte()
-
-                    gen_vid_frames = images.detach().cpu()
-                    gen_vid_frames = gen_vid_frames.add(1).div(2.0).clamp(0.0, 1.0)
-                    gen_vid = (gen_vid_frames.permute(0, 2, 3, 1) * 255).byte()
-
-                    if imageio is None:
-                        logging.warning("GIF saving skipped for %s: imageio not available", base_video)
-                    else:
-                        try:
-                            imageio.mimsave(save_videos_dir / f"{base_video}_input.gif", inp_vid.numpy(), duration=0.1)
-                            imageio.mimsave(save_videos_dir / f"{base_video}_gen.gif", gen_vid.numpy(), duration=0.1)
-                            video_written = True
-                        except Exception as exc:  # pragma: no cover
-                            logging.warning("imageio GIF write failed for %s: %s", base_video, exc)
+                if save_videos_dir is not None and imageio is not None:
+                    buffers = self._video_accumulators.setdefault(video_key, {"input": [], "gen": []})
+                    gen_frame = (gen_img.permute(1, 2, 0) * 255).byte().numpy()
+                    buffers["gen"].append(gen_frame)
+                    if input_frames is not None:
+                        in_frame = (input_img.permute(1, 2, 0) * 255).byte().numpy()
+                        buffers["input"].append(in_frame)
 
                 self._saved_this_epoch = sample_id + 1
+
+    def finalize_saving(self) -> None:
+        """Flush accumulated video frames into GIF files."""
+        if not self._save_enabled or not self._save_videos:
+            return
+        save_videos_dir = self._save_dir_videos if self._save_dir_videos is not None else None
+        if save_videos_dir is None:
+            return
+        save_videos_dir.mkdir(parents=True, exist_ok=True)
+        if imageio is None:
+            logging.warning("GIF saving skipped: imageio not available")
+            self._video_accumulators.clear()
+            return
+
+        for video_key, buffers in list(self._video_accumulators.items()):
+            gen_frames = buffers.get("gen", [])
+            inp_frames = buffers.get("input", [])
+            try:
+                if gen_frames:
+                    imageio.mimsave(save_videos_dir / f"{video_key}_gen.gif", gen_frames, duration=0.1)
+                if inp_frames:
+                    imageio.mimsave(save_videos_dir / f"{video_key}_input.gif", inp_frames, duration=0.1)
+            except Exception as exc:  # pragma: no cover
+                logging.warning("imageio GIF write failed for %s: %s", video_key, exc)
+        self._video_accumulators.clear()
