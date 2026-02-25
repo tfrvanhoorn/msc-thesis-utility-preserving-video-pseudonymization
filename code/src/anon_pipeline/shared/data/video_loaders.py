@@ -122,13 +122,10 @@ class VoxCelebVideoDataset(IterableDataset):
     def _iter_video_paths(self, youtube_dir: Path) -> Iterator[Path]:
         candidates: list[Path] = []
         for pattern in self.patterns:
-            for path in youtube_dir.glob(pattern):
-                if path.is_file():
-                    candidates.append(path)
-        if self.shuffle:
-            random.shuffle(candidates)
-        else:
-            candidates.sort()
+            candidates.extend([p for p in youtube_dir.glob(pattern) if p.is_file()])
+        candidates = sorted(candidates) if not self.shuffle else random.sample(candidates, k=len(candidates))
+        if self.max_videos_per_youtube_id:
+            candidates = candidates[: self.max_videos_per_youtube_id]
         for path in candidates:
             yield path
 

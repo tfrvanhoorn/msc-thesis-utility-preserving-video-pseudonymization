@@ -353,38 +353,39 @@ def _collect_voxceleb_windows_for_identity(
     refs: list[SampleReference] = []
     videos_seen = 0
     for youtube_dir in youtube_dirs:
-        videos_in_youtube = 0
+        video_candidates: list[Path] = []
         for pattern in patterns:
-            for video_path in sorted(youtube_dir.glob(pattern)):
-                if not video_path.is_file():
-                    continue
-                videos_seen += 1
-                videos_in_youtube += 1
-                if max_videos_per_identity and videos_seen > max_videos_per_identity:
-                    return refs
-                if max_videos_per_youtube_id and videos_in_youtube > max_videos_per_youtube_id:
-                    break
-                total_frames = get_video_frame_count(video_path)
-                usable_start_limit = total_frames - (window_size - 1) * frame_stride
-                if usable_start_limit <= 0:
-                    continue
-                windows_from_video = 0
-                for start in range(0, max(0, usable_start_limit), window_step):
-                    refs.append(
-                        SampleReference(
-                            identity=identity,
-                            path=video_path,
-                            kind="video_window",
-                            start=start,
-                            window_size=window_size,
-                            frame_stride=frame_stride,
-                            context=youtube_dir.name,
-                            source=str(video_path.relative_to(base_dir)),
-                        )
+            video_candidates.extend([p for p in youtube_dir.glob(pattern) if p.is_file()])
+        video_candidates = sorted(video_candidates)
+        if max_videos_per_youtube_id:
+            video_candidates = video_candidates[:max_videos_per_youtube_id]
+
+        for video_path in video_candidates:
+            videos_seen += 1
+            if max_videos_per_identity and videos_seen > max_videos_per_identity:
+                return refs
+
+            total_frames = get_video_frame_count(video_path)
+            usable_start_limit = total_frames - (window_size - 1) * frame_stride
+            if usable_start_limit <= 0:
+                continue
+            windows_from_video = 0
+            for start in range(0, max(0, usable_start_limit), window_step):
+                refs.append(
+                    SampleReference(
+                        identity=identity,
+                        path=video_path,
+                        kind="video_window",
+                        start=start,
+                        window_size=window_size,
+                        frame_stride=frame_stride,
+                        context=youtube_dir.name,
+                        source=str(video_path.relative_to(base_dir)),
                     )
-                    windows_from_video += 1
-                    if max_windows_per_video and windows_from_video >= max_windows_per_video:
-                        break
+                )
+                windows_from_video += 1
+                if max_windows_per_video and windows_from_video >= max_windows_per_video:
+                    break
         if max_videos_per_identity and videos_seen >= max_videos_per_identity:
             return refs
     return refs
