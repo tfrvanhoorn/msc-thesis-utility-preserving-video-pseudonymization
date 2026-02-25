@@ -4,7 +4,8 @@ pillow>=9.5.0
 opencv-python-headless==4.12.0.88
 insightface==0.7.3
 stringzilla==3.11.3
-onnxruntime-gpu==1.14.1
+# onnxruntime-gpu==1.14.1
+onnxruntime-gpu==1.8.1
 pandas
 typing_extensions>=4.7.1
 facenet-pytorch==2.4.1
