@@ -27,7 +27,6 @@ class VoxCelebVideoDataset(IterableDataset):
         self,
         root: Path,
         identities: Sequence[str] | None = None,
-        max_per_identity: int | None = None,
         max_videos_per_identity: int | None = None,
         max_videos_per_youtube_id: int | None = None,
         min_youtube_id_per_identity: int | None = None,
@@ -41,7 +40,6 @@ class VoxCelebVideoDataset(IterableDataset):
         self.root = root
         self.base_dir = root / "dev" / "mp4"
         self.identities = list(identities) if identities else None
-        self.max_per_identity = max_per_identity
         self.max_videos_per_identity = max_videos_per_identity
         self.max_videos_per_youtube_id = max_videos_per_youtube_id
         self.min_youtube_id_per_identity = min_youtube_id_per_identity
@@ -74,7 +72,6 @@ class VoxCelebVideoDataset(IterableDataset):
                 random.shuffle(youtube_dirs)
             else:
                 youtube_dirs.sort()
-            yielded_for_identity = 0
             videos_seen = 0
             for youtube_dir in youtube_dirs:
                 videos_seen_in_youtube = 0
@@ -111,18 +108,9 @@ class VoxCelebVideoDataset(IterableDataset):
                             "context": youtube_id,
                             "source": source_id,
                         }
-
-                        yielded_for_identity += 1
                         windows_from_video += 1
-                        if self.max_per_identity and yielded_for_identity >= self.max_per_identity:
-                            break
                         if self.max_windows_per_video and windows_from_video >= self.max_windows_per_video:
                             break
-
-                    if self.max_per_identity and yielded_for_identity >= self.max_per_identity:
-                        break
-                if self.max_per_identity and yielded_for_identity >= self.max_per_identity:
-                    break
                 if self.max_videos_per_identity and videos_seen >= self.max_videos_per_identity:
                     break
 

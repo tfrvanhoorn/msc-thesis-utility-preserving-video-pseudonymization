@@ -41,9 +41,7 @@ def _build_config() -> PipelineConfig:
     data_cfg = DataConfig(
         dataset_path=PROJECT_ROOT / "data" / "celeba",
         dataset_type="celeba",
-        options={
-            "max_per_identity": SAMPLES_PER_IDENTITY,
-        },
+        options={},
     )
     detector_cfg = DetectorConfig(score_threshold=0.4, image_size=256, margin=0, min_face_size=20, max_faces=1, device=str(TARGET_DEVICE))
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(TARGET_DEVICE))

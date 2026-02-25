@@ -53,14 +53,12 @@ class ImageFolderDataset(IterableDataset):
         self,
         root: Path,
         identities: Sequence[str] | None = None,
-        max_per_identity: int | None = None,
         patterns: Sequence[str] | None = None,
         recursive: bool = False,
         shuffle: bool = False,
     ) -> None:
         self.root = root
         self.identities = list(identities) if identities else None
-        self.max_per_identity = max_per_identity
         self.patterns = list(patterns) if patterns else list(DEFAULT_IMAGE_PATTERNS)
         self.recursive = recursive
         self.shuffle = shuffle
@@ -85,8 +83,7 @@ class ImageFolderDataset(IterableDataset):
                     "context": "static",
                 }
                 count += 1
-                if self.max_per_identity and count >= self.max_per_identity:
-                    break
+                # No per-identity cap; rely on upstream sampling controls
 
     def _discover_identities(self) -> List[str]:
         return sorted([p.name for p in self.root.iterdir() if p.is_dir()])
@@ -113,7 +110,6 @@ class CelebADataset(IterableDataset):
         images_subdir: str = "img_align_celeba",
         identity_file: str = "identity_CelebA.txt",
         identities: Sequence[str] | None = None,
-        max_per_identity: int | None = None,
         max_samples: int | None = None,
         shuffle: bool = False,
     ) -> None:
@@ -121,7 +117,6 @@ class CelebADataset(IterableDataset):
         self.images_dir = root / images_subdir
         self.identity_path = root / identity_file
         self.identities = set(str(identity) for identity in identities) if identities else None
-        self.max_per_identity = max_per_identity
         self.max_samples = max_samples
         self.shuffle = shuffle
         self._entries = self._load_identity_entries()
@@ -134,8 +129,6 @@ class CelebADataset(IterableDataset):
             random.shuffle(entries)
         for filename, identity in entries:
             if self.identities and identity not in self.identities:
-                continue
-            if self.max_per_identity and per_identity_counter[identity] >= self.max_per_identity:
                 continue
             image_path = self.images_dir / filename
             if not image_path.exists():
@@ -187,7 +180,6 @@ def _build_image_folder_dataset(config: SupportsDataConfig) -> ImageFolderDatase
     return ImageFolderDataset(
         root=config.dataset_path,
         identities=_normalize_identities(options.get("identities")),
-        max_per_identity=_as_optional_int(options.get("max_per_identity")),
         patterns=options.get("patterns"),
         recursive=bool(options.get("recursive", False)),
         shuffle=bool(options.get("shuffle", False)),
@@ -201,7 +193,6 @@ def _build_celeba_dataset(config: SupportsDataConfig) -> CelebADataset:
         images_subdir=options.get("images_subdir", "img_align_celeba"),
         identity_file=options.get("identity_file", "identity_CelebA.txt"),
         identities=_normalize_identities(options.get("identities")),
-        max_per_identity=_as_optional_int(options.get("max_per_identity")),
         max_samples=_as_optional_int(options.get("max_samples")),
         shuffle=bool(options.get("shuffle", False)),
     )
@@ -212,7 +203,6 @@ def _build_voxceleb_video_dataset(config: SupportsDataConfig) -> VoxCelebVideoDa
     return VoxCelebVideoDataset(
         root=config.dataset_path,
         identities=_normalize_identities(options.get("identities")),
-        max_per_identity=_as_optional_int(options.get("max_per_identity")),
         max_videos_per_identity=_as_optional_int(options.get("max_videos_per_identity")),
         max_videos_per_youtube_id=_as_optional_int(options.get("max_videos_per_youtube_id")),
         min_youtube_id_per_identity=_as_optional_int(options.get("min_youtube_id_per_identity")),
@@ -248,9 +238,7 @@ _DATASET_BUILDERS: Dict[str, Callable[[SupportsDataConfig], Iterable]] = {
 }
 
 
-def _build_identity_sample_index(
-    config: SupportsDataConfig, identities: Sequence[str], *, min_samples_per_identity: int
-) -> dict[str, list[SampleReference]]:
+def _build_identity_sample_index(config: SupportsDataConfig, identities: Sequence[str]) -> dict[str, list[SampleReference]]:
     dataset_type = config.dataset_type.lower()
     options = config.options or {}
     index: dict[str, list[SampleReference]] = {}
@@ -258,34 +246,28 @@ def _build_identity_sample_index(
     if dataset_type == "image_folder":
         patterns = options.get("patterns") or DEFAULT_IMAGE_PATTERNS
         recursive = bool(options.get("recursive", False))
-        max_per_identity = _as_optional_int(options.get("max_per_identity"))
         for identity in identities:
             paths = _collect_image_paths_for_identity(config.dataset_path, identity, patterns, recursive)
-            if max_per_identity:
-                paths = paths[:max_per_identity]
-            if len(paths) >= min_samples_per_identity:
+            if paths:
                 index[identity] = [SampleReference(identity, path, "image", context="static") for path in paths]
         return index
 
     if dataset_type == "celeba":
         images_subdir = options.get("images_subdir", "img_align_celeba")
         identity_file = options.get("identity_file", "identity_CelebA.txt")
-        max_per_identity = _as_optional_int(options.get("max_per_identity"))
         max_samples = _as_optional_int(options.get("max_samples"))
-        per_identity_cap = max_per_identity if max_per_identity is not None else max_samples
         identity_map = _collect_celeba_paths(config.dataset_path, identity_file)
         for identity in identities:
             files = identity_map.get(str(identity), [])
-            if per_identity_cap:
-                files = files[:per_identity_cap]
-            if len(files) >= min_samples_per_identity:
+            if max_samples:
+                files = files[:max_samples]
+            if files:
                 refs = [SampleReference(identity, config.dataset_path / images_subdir / fname, "image", context="static") for fname in files]
                 index[str(identity)] = refs
         return index
 
     if dataset_type == "voxceleb_video":
         base = config.dataset_path / "dev" / "mp4"
-        max_per_identity = _as_optional_int(options.get("max_per_identity"))
         window_size = _as_optional_int(options.get("window_size")) or 16
         frame_stride = _as_optional_int(options.get("frame_stride")) or 1
         window_step = options.get("window_step")
@@ -305,13 +287,12 @@ def _build_identity_sample_index(
                 window_size,
                 frame_stride,
                 window_step,
-                max_per_identity,
                 max_videos_per_identity,
                 max_videos_per_youtube_id,
                 min_youtube_id_per_identity,
                 max_windows_per_video,
             )
-            if len(refs) >= min_samples_per_identity:
+            if refs:
                 index[str(identity)] = refs
         return index
 
@@ -356,7 +337,6 @@ def _collect_voxceleb_windows_for_identity(
     window_size: int,
     frame_stride: int,
     window_step: int,
-    max_per_identity: int | None,
     max_videos_per_identity: int | None,
     max_videos_per_youtube_id: int | None,
     min_youtube_id_per_identity: int | None,
@@ -403,8 +383,6 @@ def _collect_voxceleb_windows_for_identity(
                         )
                     )
                     windows_from_video += 1
-                    if max_per_identity and len(refs) >= max_per_identity:
-                        return refs
                     if max_windows_per_video and windows_from_video >= max_windows_per_video:
                         break
         if max_videos_per_identity and videos_seen >= max_videos_per_identity:
@@ -524,7 +502,6 @@ class IdentityBatchingDataset(IterableDataset):
         *,
         batch_identities: int,
         samples_per_identity: int,
-        min_samples_per_identity: int = 2,
         shuffle_identities: bool = True,
         seed: int | None = None,
         group_by_video: bool = False,
@@ -533,7 +510,6 @@ class IdentityBatchingDataset(IterableDataset):
         self.identity_to_index = identity_to_index
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
-        self.min_samples_per_identity = max(1, min_samples_per_identity)
         self.shuffle_identities = shuffle_identities
         self.group_by_video = group_by_video
         self._rng = random.Random(seed)
@@ -617,7 +593,7 @@ class IdentityBatchingDataset(IterableDataset):
                     if frames is None:
                         continue
                     loaded.append((frames, ctx, source_id))
-            if len(loaded) < self.min_samples_per_identity:
+            if len(loaded) < 1:
                 continue
             for frames, ctx, source_id in loaded:
                 batch_sequences.append(frames)
@@ -627,7 +603,7 @@ class IdentityBatchingDataset(IterableDataset):
                 batch_contexts.append(ctx)
                 batch_sources.append(source_id)
 
-        if len(batch_sequences) < self.batch_identities * self.min_samples_per_identity:
+        if len(batch_sequences) < self.batch_identities:
             return None
 
         max_len = max(batch_seq_lens)
@@ -647,7 +623,7 @@ class IdentityBatchingDataset(IterableDataset):
 
         for identity in identity_order:
             refs = self._iter_refs_for_identity(identity)
-            if len(refs) < self.min_samples_per_identity:
+            if not refs:
                 continue
             batch_refs.append((identity, refs))
 

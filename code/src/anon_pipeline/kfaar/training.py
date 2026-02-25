@@ -41,7 +41,6 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch_identities", type=int, default=4, help="Number of unique identities per batch")
     parser.add_argument("--batch_samples_per_identity", type=int, default=2, help="Images per identity in a batch")
-    parser.add_argument("--min_samples_per_identity", type=int, default=2, help="Minimum samples required to include an identity in a batch")
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for the projector")
 
@@ -63,7 +62,6 @@ def parse_args():
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--max_per_identity", type=int, default=None, help="Max samples per identity to use from dataset")
     parser.add_argument("--window_size", type=int, default=16, help="Window size for voxceleb_video sequences")
     parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for voxceleb_video")
     parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for voxceleb_video (defaults to window_size*frame_stride)")
@@ -91,7 +89,7 @@ def main():
     device = torch.device(args.device)
     
     # 1. Setup Configurations
-    data_options: dict[str, object] = {"max_per_identity": args.max_per_identity}
+    data_options: dict[str, object] = {}
     if args.dataset_type == "voxceleb_video":
         data_options.update(
             {
@@ -138,7 +136,6 @@ def main():
         identity_batching=True,
         batch_identities=args.batch_identities,
         samples_per_identity=args.batch_samples_per_identity,
-        min_samples_per_identity=args.min_samples_per_identity,
         shuffle_train=True,
         shuffle_test=False,
     )

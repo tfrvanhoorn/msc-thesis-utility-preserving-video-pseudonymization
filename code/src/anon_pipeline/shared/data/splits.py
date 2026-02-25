@@ -99,7 +99,6 @@ def build_dataloader_for_identities(
     identity_batching: bool = False,
     batch_identities: int | None = None,
     samples_per_identity: int | None = None,
-    min_samples_per_identity: int = 2,
     group_by_video: bool = False,
 ) -> DataLoader:
     identity_to_index = {ident: idx for idx, ident in enumerate(identities)}
@@ -107,13 +106,12 @@ def build_dataloader_for_identities(
     if identity_batching:
         if not batch_identities or not samples_per_identity:
             raise ValueError("identity_batching requires batch_identities and samples_per_identity")
-        sample_index = _build_identity_sample_index(config, identities, min_samples_per_identity=min_samples_per_identity)
+        sample_index = _build_identity_sample_index(config, identities)
         batched_dataset = IdentityBatchingDataset(
             sample_index,
             identity_to_index,
             batch_identities=batch_identities,
             samples_per_identity=samples_per_identity,
-            min_samples_per_identity=min_samples_per_identity,
             shuffle_identities=shuffle,
             group_by_video=group_by_video,
         )
@@ -138,7 +136,6 @@ def build_train_test_loaders(
     batch_identities: int | None = None,
     samples_per_identity: int | None = None,
     identity_batching: bool = False,
-    min_samples_per_identity: int = 2,
     group_by_video: bool = False,
     shuffle_train: bool = True,
     shuffle_test: bool = False,
@@ -153,7 +150,6 @@ def build_train_test_loaders(
         identity_batching=identity_batching,
         batch_identities=batch_identities,
         samples_per_identity=samples_per_identity,
-        min_samples_per_identity=min_samples_per_identity,
         group_by_video=group_by_video,
         shuffle=shuffle_train,
         num_workers=num_workers,
@@ -166,7 +162,6 @@ def build_train_test_loaders(
         identity_batching=identity_batching,
         batch_identities=batch_identities,
         samples_per_identity=samples_per_identity,
-        min_samples_per_identity=min_samples_per_identity,
         group_by_video=group_by_video,
         shuffle=shuffle_test,
         num_workers=num_workers,

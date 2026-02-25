@@ -74,7 +74,6 @@ def parse_args() -> argparse.Namespace:
 
     # Dataset & Split
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--max_per_identity", type=int, default=None, help="Max windows sampled per identity (post all caps)")
     parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (voxceleb_video)")
     parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max video files sampled per YouTube ID (voxceleb_video)")
     parser.add_argument("--min_youtube_id_per_identity", type=int, default=None, help="Require at least this many YouTube IDs per identity (voxceleb_video)")
@@ -87,7 +86,6 @@ def parse_args() -> argparse.Namespace:
     # Identity batching
     parser.add_argument("--batch_identities", type=int, default=4, help="Number of unique identities per batch")
     parser.add_argument("--batch_videos_per_identity", type=int, default=2, help="Videos per identity per batch (voxceleb: all windows from each video) or samples for image datasets")
-    parser.add_argument("--min_samples_per_identity", type=int, default=2, help="Minimum sampled windows/images required to include an identity")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
 
     # Hardware
@@ -180,7 +178,6 @@ def main() -> None:
     device = torch.device(args.device)
 
     data_options: dict[str, object] = {
-        "max_per_identity": args.max_per_identity,
         "max_videos_per_identity": args.max_videos_per_identity,
         "max_videos_per_youtube_id": args.max_videos_per_youtube_id,
         "min_youtube_id_per_identity": args.min_youtube_id_per_identity,
@@ -232,7 +229,6 @@ def main() -> None:
         identity_batching=True,
         batch_identities=args.batch_identities,
         samples_per_identity=args.batch_videos_per_identity,
-        min_samples_per_identity=args.min_samples_per_identity,
         shuffle=False,
         num_workers=args.num_workers,
         group_by_video=cfg.data.dataset_type.lower() == "voxceleb_video",

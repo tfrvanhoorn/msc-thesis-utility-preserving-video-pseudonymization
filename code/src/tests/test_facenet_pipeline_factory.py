@@ -39,10 +39,7 @@ def _build_config() -> PipelineConfig:
     data_cfg = DataConfig(
         dataset_path=DATA_ROOT,
         dataset_type="celeba",
-        options={
-            # Only cap per-identity; let the loader stream until the batch is filled.
-            "max_per_identity": SAMPLES_PER_IDENTITY,
-        },
+        options={},
     )
     detector_cfg = DetectorConfig(score_threshold=0.4, image_size=160, margin=0, min_face_size=20, max_faces=1, device=str(TARGET_DEVICE))
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(TARGET_DEVICE))
