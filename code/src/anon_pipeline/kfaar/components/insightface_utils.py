@@ -30,9 +30,13 @@ def load_insightface_swapper(
         if ctx_device.type == "cuda" and not torch.cuda.is_available():
             logger.warning("CUDA requested for InsightFace but not available; falling back to CPU providers")
         ctx_id = 0 if use_cuda else -1
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
+        providers = ["CUDAExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
 
-        analyzer = FaceAnalysis(name=analyzer_name)
+        try:
+            analyzer = FaceAnalysis(name=analyzer_name, providers=providers)
+        except TypeError:
+            # Older insightface may not support providers kwarg; fall back
+            analyzer = FaceAnalysis(name=analyzer_name)
         analyzer.prepare(ctx_id=ctx_id, det_size=det_size)
 
         download_flag = not Path(model_path).exists()
