@@ -20,6 +20,8 @@ def build_kfaar_pipeline(
     stylegan: StyleGAN2Generator | None = None,
     device: str | torch.device | None = None,
     truncation_psi: float = 0.5,
+    face_swapper: object | None = None,
+    face_analyzer: object | None = None,
 ) -> KfaarPipeline:
     target_device = _resolve_device(config, device)
 
@@ -70,6 +72,8 @@ def build_kfaar_pipeline(
         stylegan=stylegan,
         device=target_device,
         truncation_psi=truncation_psi,
+        face_swapper=face_swapper,
+        face_analyzer=face_analyzer,
     )
 
 

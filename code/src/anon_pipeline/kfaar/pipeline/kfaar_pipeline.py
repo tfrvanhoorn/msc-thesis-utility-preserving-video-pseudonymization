@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Dict
+from typing import Dict, Optional, Sequence
 import numpy as np
 import torch
 from torchvision import utils as vutils
@@ -48,12 +48,17 @@ class KfaarPipeline:
         save_mode: str = "detected",
         save_max_per_epoch: Optional[int] = None,
         truncation_psi: float = 0.5,
+        *,
+        face_swapper: object | None = None,
+        face_analyzer: object | None = None,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
         self.embedder = embedder
         self.projector = projector
         self.stylegan = stylegan
+        self.face_swapper = face_swapper
+        self.face_analyzer = face_analyzer
         self.device = device or next(projector.parameters()).device
         self._projector_is_lstm = isinstance(projector, ProjectorLSTM)
         
@@ -96,6 +101,7 @@ class KfaarPipeline:
         key_tag: Optional[str] = None,
         batch_index: Optional[int] = None,
         sample_context: Optional[str] = None,
+        use_face_swapper: bool = False,
     ) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
@@ -140,23 +146,33 @@ class KfaarPipeline:
         gen_mask = [False]
         
         images = None
+        swapped_images = None
         if self.stylegan is not None:
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
-            dets = self.detector.detect(img)
+            swap_input = frames_t[center_idx]
+            swap_out: Optional[torch.Tensor] = None
+            if use_face_swapper and self.face_swapper is not None and self.face_analyzer is not None:
+                swap_out = self._run_face_swap(swap_input, img)
+            det_input = swap_out if swap_out is not None else img
+            dets = self.detector.detect(det_input)
             if dets:
                 top = max(dets, key=lambda d: d.score)
-                aligned = self.aligner.align(img, top).to(device)
-                v_embeddings[0] = self.embedder.embed([aligned], with_grad=True)[0]
+                aligned = self.aligner.align(det_input, top).to(device)
+                v_embeddings[0] = self.embedder.embed([aligned], with_grad=not use_face_swapper)[0]
                 gen_mask[0] = True
             else:
                 v_embeddings[0] = projected_z[0].sum() * 0.0
                 self.stats["gen_no_det"] += 1
 
+            if swap_out is not None:
+                swapped_images = swap_out.unsqueeze(0)
+            
             self._maybe_save_generated(
                 images,
                 gen_mask,
+                swapped_images=swapped_images,
                 sample_label=sample_label,
                 key_tag=key_tag,
                 batch_index=batch_index,
@@ -177,6 +193,28 @@ class KfaarPipeline:
             valid_mask=valid_mask,
             gen_mask=gen_mask_t,
         )
+
+    def forward_eval(
+        self,
+        frames: torch.Tensor,
+        key: torch.Tensor,
+        *,
+        sample_label: Optional[int] = None,
+        key_tag: Optional[str] = None,
+        batch_index: Optional[int] = None,
+        sample_context: Optional[str] = None,
+        use_face_swapper: bool = False,
+    ) -> KfaarResult:
+        with torch.no_grad():
+            return self.forward(
+                frames,
+                key,
+                sample_label=sample_label,
+                key_tag=key_tag,
+                batch_index=batch_index,
+                sample_context=sample_context,
+                use_face_swapper=use_face_swapper,
+            )
 
     def hpvg_train_step(self, frames, labels, seq_lens, key_1, key_2, batch_index: Optional[int] = None, **kwargs) -> torch.Tensor:
         self.optimizer.zero_grad(set_to_none=True)
@@ -297,6 +335,40 @@ class KfaarPipeline:
         t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
         return t.float().to(device)
 
+    def _run_face_swap(self, target_frame: torch.Tensor, gen_frame: torch.Tensor) -> Optional[torch.Tensor]:
+        if self.face_swapper is None or self.face_analyzer is None:
+            return None
+
+        try:
+            with torch.no_grad():
+                target_bgr = self._to_bgr_numpy(target_frame)
+                source_bgr = self._to_bgr_numpy(gen_frame)
+
+                target_faces = self.face_analyzer.get(target_bgr) or []
+                source_faces = self.face_analyzer.get(source_bgr) or []
+                if not target_faces or not source_faces:
+                    return None
+
+                target_face = max(target_faces, key=lambda f: getattr(f, "det_score", 0.0))
+                source_face = max(source_faces, key=lambda f: getattr(f, "det_score", 0.0))
+
+                swapped = self.face_swapper.get(target_bgr.copy(), target_face, source_face, paste_back=True)
+                swapped_rgb = swapped[:, :, ::-1].astype(np.float32) / 255.0
+                swapped_t = torch.from_numpy(swapped_rgb).permute(2, 0, 1).to(self.device)
+                return swapped_t.clamp(0.0, 1.0)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("face swap failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _to_bgr_numpy(img_t: torch.Tensor) -> np.ndarray:
+        img = img_t.detach().cpu()
+        if img.min() < 0.0 or img.max() > 1.0:
+            img = img.add(1).div(2.0)
+        img = img.clamp(0.0, 1.0)
+        img_np = (img.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+        return img_np[:, :, ::-1]
+
     def configure_saving(
         self,
         save_dir: Path,
@@ -340,6 +412,7 @@ class KfaarPipeline:
         images: Optional[torch.Tensor],
         gen_mask: Sequence[bool],
         *,
+        swapped_images: Optional[torch.Tensor] = None,
         sample_label: Optional[int],
         key_tag: Optional[str],
         batch_index: Optional[int],
@@ -393,13 +466,21 @@ class KfaarPipeline:
                     if save_images_dir is not None:
                         vutils.save_image(input_img, save_images_dir / f"{base}_input.png")
 
-                gen_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
+                stylegan_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
                 if save_images_dir is not None:
-                    vutils.save_image(gen_img, save_images_dir / f"{base}_gen.png")
+                    vutils.save_image(stylegan_img, save_images_dir / f"{base}_stylegan.png")
+                    vutils.save_image(stylegan_img, save_images_dir / f"{base}_gen.png")
+
+                swapped_img = None
+                if swapped_images is not None and idx < swapped_images.shape[0]:
+                    swapped_img = swapped_images[idx].detach().cpu().clamp(0.0, 1.0)
+                    if save_images_dir is not None:
+                        vutils.save_image(swapped_img, save_images_dir / f"{base}_swapped.png")
 
                 if save_videos_dir is not None and imageio is not None:
                     buffers = self._video_accumulators.setdefault(video_key, {"input": [], "gen": []})
-                    gen_frame = (gen_img.permute(1, 2, 0) * 255).byte().numpy()
+                    vid_frame_source = swapped_img if swapped_img is not None else stylegan_img
+                    gen_frame = (vid_frame_source.permute(1, 2, 0) * 255).byte().numpy()
                     buffers["gen"].append(gen_frame)
                     if input_frames is not None:
                         in_frame = (input_img.permute(1, 2, 0) * 255).byte().numpy()

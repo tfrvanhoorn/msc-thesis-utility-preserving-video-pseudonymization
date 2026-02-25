@@ -26,7 +26,7 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
 )
 from anon_pipeline.kfaar.metrics import MetricsAccumulator  # noqa: E402
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline  # noqa: E402
-from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict  # noqa: E402
+from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict, load_insightface_swapper  # noqa: E402
 from anon_pipeline.shared.data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
 from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
 
@@ -57,6 +57,28 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=SRC_ROOT / "anon_pipeline" / "kfaar" / "eval_results",
         help="Directory to save evaluation reports",
+    )
+
+    # InsightFace face swapping (evaluation-only)
+    parser.add_argument("--use_face_swapper", action="store_true", help="Use InsightFace face swapper during evaluation")
+    parser.add_argument(
+        "--face_swapper_model",
+        type=Path,
+        default=Path("inswapper_128.onnx"),
+        help="Path to InsightFace inswapper ONNX model",
+    )
+    parser.add_argument(
+        "--face_analyzer_name",
+        type=str,
+        default="buffalo_l",
+        help="InsightFace FaceAnalysis model name",
+    )
+    parser.add_argument(
+        "--face_analyzer_det_size",
+        type=int,
+        nargs=2,
+        default=(640, 640),
+        help="Detector size (width height) for InsightFace FaceAnalysis",
     )
 
     # Hyperparameters (Projector)
@@ -177,6 +199,16 @@ def main() -> None:
     configure_logging()
     device = torch.device(args.device)
 
+    face_swapper = None
+    face_analyzer = None
+    if args.use_face_swapper:
+        face_swapper, face_analyzer = load_insightface_swapper(
+            model_path=args.face_swapper_model,
+            analyzer_name=args.face_analyzer_name,
+            det_size=tuple(args.face_analyzer_det_size),
+            device=device,
+        )
+
     data_options: dict[str, object] = {
         "max_videos_per_identity": args.max_videos_per_identity,
         "max_videos_per_youtube_id": args.max_videos_per_youtube_id,
@@ -236,7 +268,16 @@ def main() -> None:
 
     logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
-    pipeline = build_kfaar_pipeline(cfg, stylegan=stylegan, device=device, truncation_psi=args.truncation_psi)
+    pipeline = build_kfaar_pipeline(
+        cfg,
+        stylegan=stylegan,
+        device=device,
+        truncation_psi=args.truncation_psi,
+        face_swapper=face_swapper,
+        face_analyzer=face_analyzer,
+    )
+
+    use_swapper = args.use_face_swapper and face_swapper is not None and face_analyzer is not None
 
     if args.save_generated_faces and hasattr(pipeline, "configure_saving"):
         save_dir = args.save_generated_dir if args.save_generated_dir is not None else args.output_dir / "generated_faces"
@@ -293,7 +334,14 @@ def main() -> None:
                 if sources is not None and idx < len(sources):
                     source_id = sources[idx]
 
-                res = pipeline.forward(sample_frames, key, sample_label=label, sample_context=sample_context)
+                forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
+                res = forward_fn(
+                    sample_frames,
+                    key,
+                    sample_label=label,
+                    sample_context=sample_context,
+                    use_face_swapper=use_swapper,
+                )
 
                 metrics.update_detection(res.gen_mask)
                 metrics.update_anonymization(res.real_embeddings, res.virtual_embeddings, res.valid_mask)
