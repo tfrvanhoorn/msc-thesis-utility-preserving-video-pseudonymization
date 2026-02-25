@@ -48,7 +48,6 @@ class KfaarPipeline:
         save_mode: str = "detected",
         save_max_per_epoch: Optional[int] = None,
         truncation_psi: float = 0.5,
-        *,
         face_swapper: object | None = None,
         face_analyzer: object | None = None,
     ) -> None:
