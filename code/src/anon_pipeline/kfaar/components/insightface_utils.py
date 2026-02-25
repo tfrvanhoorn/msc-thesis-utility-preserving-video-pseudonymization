@@ -14,7 +14,7 @@ def load_insightface_swapper(
     model_path: Path,
     analyzer_name: str = "buffalo_l",
     det_size: Tuple[int, int] = (640, 640),
-    device: torch.device | str = "cpu",
+    device: torch.device | str = "cuda",
 ) -> tuple[object | None, object | None]:
     """Load InsightFace FaceAnalysis and inswapper model.
 
