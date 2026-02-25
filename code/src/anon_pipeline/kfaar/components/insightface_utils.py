@@ -26,7 +26,9 @@ def load_insightface_swapper(
         from insightface.app import FaceAnalysis
 
         ctx_device = torch.device(device)
-        use_cuda = ctx_device.type == "cuda"
+        use_cuda = ctx_device.type == "cuda" and torch.cuda.is_available()
+        if ctx_device.type == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA requested for InsightFace but not available; falling back to CPU providers")
         ctx_id = 0 if use_cuda else -1
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
 
