@@ -26,11 +26,15 @@ def load_insightface_swapper(
         from insightface.app import FaceAnalysis
 
         ctx_device = torch.device(device)
-        use_cuda = ctx_device.type == "cuda" and torch.cuda.is_available()
-        if ctx_device.type == "cuda" and not torch.cuda.is_available():
-            logger.warning("CUDA requested for InsightFace but not available; falling back to CPU providers")
-        ctx_id = 0 if use_cuda else -1
-        providers = ["CUDAExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
+        if ctx_device.type != "cuda":
+            logger.error("InsightFace swapper/analyzer require CUDA, got device=%s", ctx_device)
+            raise RuntimeError(f"InsightFace swapper/analyzer require CUDA, got device={ctx_device}")
+        if not torch.cuda.is_available():
+            logger.error("CUDA requested for InsightFace but torch reports no CUDA device")
+            raise RuntimeError("CUDA requested for InsightFace but torch reports no CUDA device")
+
+        ctx_id = 0
+        providers = ["CUDAExecutionProvider"]
 
         try:
             analyzer = FaceAnalysis(name=analyzer_name, providers=providers)
@@ -38,6 +42,11 @@ def load_insightface_swapper(
             # Older insightface may not support providers kwarg; fall back
             analyzer = FaceAnalysis(name=analyzer_name)
         analyzer.prepare(ctx_id=ctx_id, det_size=det_size)
+
+        analyzer_providers = getattr(analyzer, "providers", providers)
+        if "CUDAExecutionProvider" not in analyzer_providers:
+            logger.error("InsightFace analyzer initialized without CUDA; providers=%s", analyzer_providers)
+            raise RuntimeError(f"InsightFace analyzer initialized without CUDA; providers={analyzer_providers}")
 
         download_flag = not Path(model_path).exists()
         try:
@@ -49,6 +58,16 @@ def load_insightface_swapper(
             swapper = insightface.model_zoo.get_model(
                 str(model_path), download=download_flag, download_zip=download_flag
             )
+        swapper_providers = providers
+        if hasattr(swapper, "providers"):
+            swapper_providers = getattr(swapper, "providers")
+        elif hasattr(swapper, "session") and hasattr(swapper.session, "get_providers"):
+            swapper_providers = swapper.session.get_providers()
+
+        if "CUDAExecutionProvider" not in swapper_providers:
+            logger.error("InsightFace swapper initialized without CUDA; providers=%s", swapper_providers)
+            raise RuntimeError(f"InsightFace swapper initialized without CUDA; providers={swapper_providers}")
+
         return swapper, analyzer
     except Exception as exc:  # pragma: no cover
         logger.warning("Failed to initialize InsightFace swapper/analyzer: %s", exc)
