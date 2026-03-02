@@ -1,20 +1,32 @@
-numpy==1.24.4
+# --- Original Requirements (Kept) ---
 pyyaml>=6.0
 pillow>=9.5.0
-opencv-python-headless==4.12.0.88
-insightface==0.7.3
 stringzilla==3.11.3
 onnxruntime-gpu==1.14.1
-# onnxruntime-gpu==1.8.1
 pandas
 typing_extensions>=4.7.1
 facenet-pytorch==2.4.1
 ninja==1.11.1.4
 psutil
-
 imageio>=2.31
 av>=12.0
 
+# --- Modified Requirements (Version Downgrades) ---
+# numpy==1.24.4
+numpy==1.23.5  # Downgraded to prevent object array/compatibility issues with SimSwap/ONNX
+# insightface==0.7.3
+insightface==0.2.1  # Replaced with SimSwap-compatible version (v0.7.x breaks imports)
+# opencv-python-headless==4.12.0.88
+opencv-python-headless==4.10.0.84 # Adjusted to a more stable version for Python 3.11/SimSwap
+
+# --- Added Requirements (Specific to SimSwap) ---
+moviepy==1.0.3        # Required for video frame management
+imageio-ffmpeg        # Backend for moviepy
+onnx                  # Required for the face detector modules
+timm==0.5.4           # Dependency for the SimSwap model architecture
+tqdm                  # Progress bar for long swap operations
+
+# --- Core PyTorch (Uncomment if needed, or keep your local install) ---
 # torch==1.8.1
 # torchvision==0.9.1
 # torchaudio==0.8.1
