@@ -28,7 +28,10 @@ class SimSwapFaceSwapper:
         if not torch.cuda.is_available():
             raise RuntimeError("SimSwap requires CUDA but torch.cuda.is_available() is False")
 
+        # Normalize device; SimSwap expects an explicit CUDA index
         self.device = torch.device(device)
+        if self.device.type == "cuda" and self.device.index is None:
+            self.device = torch.device("cuda:0")
         # Ensure SimSwap code is on import path
         simswap_root = Path(simswap_root).resolve()
         if str(simswap_root) not in sys.path:
@@ -45,7 +48,7 @@ class SimSwapFaceSwapper:
             checkpoints_dir=str(checkpoints_dir),
             name=name,
             which_epoch=str(which_epoch),
-            gpu_ids=[0],
+            gpu_ids=[self.device.index or 0],
             verbose=False,
             load_pretrain="",
             gan_mode="hinge",
@@ -56,7 +59,7 @@ class SimSwapFaceSwapper:
         )
 
         # fsModel currently hardcodes cuda:0; set the default device accordingly
-        torch.cuda.set_device(self.device)
+        torch.cuda.set_device(self.device.index or 0)
         self.model = fsModel()
         self.model.initialize(opt)
         self.model.eval()
