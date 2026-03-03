@@ -73,40 +73,75 @@ class SimSwapFaceSwapper:
 
     def swap(self, source_img: torch.Tensor, target_img: torch.Tensor) -> Optional[torch.Tensor]:
         """Swap the identity from source_img into target_img.
-
-        Automatically handles mapping standard pipeline tensors [-1, 1] 
-        to SimSwap's expected [0, 1] range and back.
+        
+        Universally handles any aspect ratio by padding to a perfect square, 
+        and dynamically adapts to [-1, 1] or [0, 1] input tensor ranges.
         """
         try:
-            # 1. FIX THE TENSOR RANGES: [-1.0, 1.0] -> [0.0, 1.0]
-            src = (source_img.unsqueeze(0).to(self.device) + 1.0) / 2.0
-            tgt = (target_img.unsqueeze(0).to(self.device) + 1.0) / 2.0
+            # 1. DYNAMIC RANGE FIX: SimSwap strictly expects [0.0, 1.0]
+            src = source_img.unsqueeze(0).to(self.device)
+            tgt = target_img.unsqueeze(0).to(self.device)
             
-            # Clamp to guarantee no StyleGAN outliers ruin the normalization
+            target_was_minus_one = tgt.min() < 0.0
+            
+            if src.min() < 0.0: src = (src + 1.0) / 2.0
+            if target_was_minus_one: tgt = (tgt + 1.0) / 2.0
+            
             src = src.clamp(0.0, 1.0)
             tgt = tgt.clamp(0.0, 1.0)
 
-            # Resize to SimSwap crop size
-            src_crop = F.interpolate(src, size=(self.crop_size, self.crop_size), mode="bilinear", align_corners=False)
-            tgt_crop = F.interpolate(tgt, size=(self.crop_size, self.crop_size), mode="bilinear", align_corners=False)
+            # 2. UNIVERSAL ASPECT RATIO PADDING
+            # Source Padding
+            _, _, h_src, w_src = src.shape
+            pad_h_src = max(h_src, w_src) - h_src
+            pad_w_src = max(h_src, w_src) - w_src
+            src_pad = F.pad(src, (pad_w_src // 2, pad_w_src - pad_w_src // 2, 
+                                  pad_h_src // 2, pad_h_src - pad_h_src // 2))
 
-            # ArcFace embedding from source
+            # Target Padding
+            _, _, h_tgt, w_tgt = tgt.shape
+            pad_h_tgt = max(h_tgt, w_tgt) - h_tgt
+            pad_w_tgt = max(h_tgt, w_tgt) - w_tgt
+            
+            tgt_left = pad_w_tgt // 2
+            tgt_right = pad_w_tgt - tgt_left
+            tgt_top = pad_h_tgt // 2
+            tgt_bottom = pad_h_tgt - tgt_top
+            
+            tgt_pad = F.pad(tgt, (tgt_left, tgt_right, tgt_top, tgt_bottom))
+
+            # 3. RESIZE SQUARES TO CROP_SIZE
+            src_crop = F.interpolate(src_pad, size=(self.crop_size, self.crop_size), mode="bilinear", align_corners=False)
+            tgt_crop = F.interpolate(tgt_pad, size=(self.crop_size, self.crop_size), mode="bilinear", align_corners=False)
+
+            # 4. ARCFACE EMBEDDING
             src_arc = F.interpolate(src_crop, size=(112, 112), mode="bilinear", align_corners=False)
             src_arc = (src_arc - self._mean) / self._std
             latent_id = self.model.netArc(src_arc)  # type: ignore[attr-defined]
             latent_id = latent_id / (torch.norm(latent_id, dim=1, keepdim=True) + 1e-6)
 
+            # 5. FORWARD PASS
             with torch.no_grad():
                 swapped = self.model(src_crop, tgt_crop, latent_id, latent_id, True)
 
-            # Resize back to target resolution
-            swapped = F.interpolate(swapped, size=target_img.shape[-2:], mode="bilinear", align_corners=False)
-            
-            # 2. CONVERT BACK TO PIPELINE RANGE: [0.0, 1.0] -> [-1.0, 1.0]
-            swapped = (swapped * 2.0) - 1.0
-            
-            return swapped.squeeze(0).clamp(-1.0, 1.0)
+            # 6. REVERSE ASPECT RATIO FIX (UN-PAD)
+            # Resize back to the padded square dimension of the target
+            max_tgt_dim = max(h_tgt, w_tgt)
+            swapped_square = F.interpolate(swapped, size=(max_tgt_dim, max_tgt_dim), mode="bilinear", align_corners=False)
+
+            # Slice out the padding to restore original exact dimensions
+            swapped_restored = swapped_square[..., tgt_top : max_tgt_dim - tgt_bottom, 
+                                                   tgt_left : max_tgt_dim - tgt_right]
+
+            # 7. REVERSE RANGE FIX
+            if target_was_minus_one:
+                swapped_restored = (swapped_restored * 2.0) - 1.0
+
+            # Clamp to the original requested limits based on input
+            out_min = -1.0 if target_was_minus_one else 0.0
+            return swapped_restored.squeeze(0).clamp(out_min, 1.0)
             
         except Exception as e:
-            print(f"FaceSwap failed: {e}")
+            import logging
+            logging.error(f"FaceSwap failed: {e}")
             return None
