@@ -71,7 +71,7 @@ class SimSwapFaceSwapper:
         self._std = std
         self.crop_size = int(crop_size)
 
-def swap(self, source_img: torch.Tensor, target_img: torch.Tensor) -> Optional[torch.Tensor]:
+    def swap(self, source_img: torch.Tensor, target_img: torch.Tensor) -> Optional[torch.Tensor]:
         """Swap the identity from source_img into target_img.
         
         Closely mirrors the official SimSwap example while adapting for 
