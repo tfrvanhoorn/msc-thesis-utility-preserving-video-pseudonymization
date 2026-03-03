@@ -24,8 +24,8 @@ class SimSwapFaceSwapper:
         name: str,
         which_epoch: str,
         arcface_ckpt: Path,
-        parsing_ckpt: Optional[Path] = None, # Path to 79999_iter.pth for BiSeNet
-        antelope_dir: str = './insightface_func/models', # Path to antelope models
+        parsing_ckpt: Optional[Path] = None, 
+        antelope_dir: Optional[str] = None, # Changed to Optional
         crop_size: int = 224,
         use_mask: bool = True,
         device: torch.device | str = "cuda:0",
@@ -58,8 +58,14 @@ class SimSwapFaceSwapper:
         self.model.initialize(opt)
         self.model.eval()
 
+        # --- FIX: Dynamically link the Antelope models based on SimSwap root ---
+        if antelope_dir is None:
+            actual_antelope_dir = str(simswap_root / 'insightface_func' / 'models')
+        else:
+            actual_antelope_dir = str(Path(antelope_dir).resolve())
+
         # 2. Initialize Detector/Aligner
-        self.app = Face_detect_crop(name='antelope', root=antelope_dir)
+        self.app = Face_detect_crop(name='antelope', root=actual_antelope_dir)
         # Using 'None' mode for generic arbitrary images
         self.app.prepare(ctx_id=self.device.index or 0, det_thresh=0.6, det_size=(640,640), mode='None')
         
