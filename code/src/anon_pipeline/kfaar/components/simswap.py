@@ -74,12 +74,17 @@ class SimSwapFaceSwapper:
     def swap(self, source_img: torch.Tensor, target_img: torch.Tensor) -> Optional[torch.Tensor]:
         """Swap the identity from source_img into target_img.
 
-        Both tensors are expected on the correct device, shape (C,H,W), values in [0,1].
-        Returns swapped image resized back to target_img resolution.
+        Automatically handles mapping standard pipeline tensors [-1, 1] 
+        to SimSwap's expected [0, 1] range and back.
         """
         try:
-            src = source_img.unsqueeze(0).to(self.device)
-            tgt = target_img.unsqueeze(0).to(self.device)
+            # 1. FIX THE TENSOR RANGES: [-1.0, 1.0] -> [0.0, 1.0]
+            src = (source_img.unsqueeze(0).to(self.device) + 1.0) / 2.0
+            tgt = (target_img.unsqueeze(0).to(self.device) + 1.0) / 2.0
+            
+            # Clamp to guarantee no StyleGAN outliers ruin the normalization
+            src = src.clamp(0.0, 1.0)
+            tgt = tgt.clamp(0.0, 1.0)
 
             # Resize to SimSwap crop size
             src_crop = F.interpolate(src, size=(self.crop_size, self.crop_size), mode="bilinear", align_corners=False)
@@ -96,6 +101,12 @@ class SimSwapFaceSwapper:
 
             # Resize back to target resolution
             swapped = F.interpolate(swapped, size=target_img.shape[-2:], mode="bilinear", align_corners=False)
-            return swapped.squeeze(0).clamp(0.0, 1.0)
-        except Exception:
+            
+            # 2. CONVERT BACK TO PIPELINE RANGE: [0.0, 1.0] -> [-1.0, 1.0]
+            swapped = (swapped * 2.0) - 1.0
+            
+            return swapped.squeeze(0).clamp(-1.0, 1.0)
+            
+        except Exception as e:
+            print(f"FaceSwap failed: {e}")
             return None
