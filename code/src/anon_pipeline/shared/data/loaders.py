@@ -56,12 +56,14 @@ class ImageFolderDataset(IterableDataset):
         patterns: Sequence[str] | None = None,
         recursive: bool = False,
         shuffle: bool = False,
+        max_samples_per_identity: int | None = None,
     ) -> None:
         self.root = root
         self.identities = list(identities) if identities else None
         self.patterns = list(patterns) if patterns else list(DEFAULT_IMAGE_PATTERNS)
         self.recursive = recursive
         self.shuffle = shuffle
+        self.max_samples_per_identity = max_samples_per_identity
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         identities = self.identities or self._discover_identities()
@@ -83,7 +85,8 @@ class ImageFolderDataset(IterableDataset):
                     "context": "static",
                 }
                 count += 1
-                # No per-identity cap; rely on upstream sampling controls
+                if self.max_samples_per_identity is not None and count >= self.max_samples_per_identity:
+                    break
 
     def _discover_identities(self) -> List[str]:
         return sorted([p.name for p in self.root.iterdir() if p.is_dir()])
@@ -110,24 +113,25 @@ class CelebADataset(IterableDataset):
         images_subdir: str = "img_align_celeba",
         identity_file: str = "identity_CelebA.txt",
         identities: Sequence[str] | None = None,
-        max_samples: int | None = None,
+        max_samples_per_identity: int | None = None,
         shuffle: bool = False,
     ) -> None:
         self.root = root
         self.images_dir = root / images_subdir
         self.identity_path = root / identity_file
         self.identities = set(str(identity) for identity in identities) if identities else None
-        self.max_samples = max_samples
+        self.max_samples_per_identity = max_samples_per_identity
         self.shuffle = shuffle
         self._entries = self._load_identity_entries()
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         per_identity_counter: MutableMapping[str, int] = defaultdict(int)
-        yielded = 0
         entries = list(self._entries)
         if self.shuffle:
             random.shuffle(entries)
         for filename, identity in entries:
+            if self.max_samples_per_identity and per_identity_counter[identity] >= self.max_samples_per_identity:
+                continue
             if self.identities and identity not in self.identities:
                 continue
             image_path = self.images_dir / filename
@@ -142,9 +146,6 @@ class CelebADataset(IterableDataset):
                 "context": "static",
             }
             per_identity_counter[identity] += 1
-            yielded += 1
-            if self.max_samples and yielded >= self.max_samples:
-                break
 
     def _load_identity_entries(self) -> List[tuple[str, str]]:
         entries: List[tuple[str, str]] = []
@@ -183,6 +184,7 @@ def _build_image_folder_dataset(config: SupportsDataConfig) -> ImageFolderDatase
         patterns=options.get("patterns"),
         recursive=bool(options.get("recursive", False)),
         shuffle=bool(options.get("shuffle", False)),
+        max_samples_per_identity=_as_optional_int(options.get("max_samples_per_identity")),
     )
 
 
@@ -193,7 +195,7 @@ def _build_celeba_dataset(config: SupportsDataConfig) -> CelebADataset:
         images_subdir=options.get("images_subdir", "img_align_celeba"),
         identity_file=options.get("identity_file", "identity_CelebA.txt"),
         identities=_normalize_identities(options.get("identities")),
-        max_samples=_as_optional_int(options.get("max_samples")),
+        max_samples_per_identity=_as_optional_int(options.get("max_samples_per_identity")),
         shuffle=bool(options.get("shuffle", False)),
     )
 
@@ -246,8 +248,11 @@ def _build_identity_sample_index(config: SupportsDataConfig, identities: Sequenc
     if dataset_type == "image_folder":
         patterns = options.get("patterns") or DEFAULT_IMAGE_PATTERNS
         recursive = bool(options.get("recursive", False))
+        max_per_identity = _as_optional_int(options.get("max_samples_per_identity"))
         for identity in identities:
             paths = _collect_image_paths_for_identity(config.dataset_path, identity, patterns, recursive)
+            if max_per_identity:
+                paths = paths[:max_per_identity]
             if paths:
                 index[identity] = [SampleReference(identity, path, "image", context="static") for path in paths]
         return index
@@ -255,7 +260,7 @@ def _build_identity_sample_index(config: SupportsDataConfig, identities: Sequenc
     if dataset_type == "celeba":
         images_subdir = options.get("images_subdir", "img_align_celeba")
         identity_file = options.get("identity_file", "identity_CelebA.txt")
-        max_samples = _as_optional_int(options.get("max_samples"))
+        max_samples = _as_optional_int(options.get("max_samples_per_identity"))
         identity_map = _collect_celeba_paths(config.dataset_path, identity_file)
         for identity in identities:
             files = identity_map.get(str(identity), [])

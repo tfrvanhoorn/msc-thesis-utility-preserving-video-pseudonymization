@@ -26,7 +26,7 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
 )
 from anon_pipeline.kfaar.metrics import MetricsAccumulator  # noqa: E402
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline  # noqa: E402
-from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict, load_insightface_swapper  # noqa: E402
+from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict, SimSwapFaceSwapper  # noqa: E402
 from anon_pipeline.shared.data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
 from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
 
@@ -59,26 +59,44 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save evaluation reports",
     )
 
-    # InsightFace face swapping (evaluation-only)
-    parser.add_argument("--use_face_swapper", action="store_true", help="Use InsightFace face swapper during evaluation")
+    # Face swapping via SimSwap
+    parser.add_argument("--use_face_swapper", action="store_true", help="Enable SimSwap face swapping")
     parser.add_argument(
-        "--face_swapper_model",
+        "--simswap_root",
         type=Path,
-        default=Path("inswapper_128.onnx"),
-        help="Path to InsightFace inswapper ONNX model",
+        default=PROJECT_ROOT / "external_libraries" / "SimSwap",
+        help="Path to SimSwap repository root",
     )
     parser.add_argument(
-        "--face_analyzer_name",
+        "--simswap_checkpoints_dir",
+        type=Path,
+        default=None,
+        help="Path to SimSwap checkpoints directory (defaults to simswap_root/checkpoints)",
+    )
+    parser.add_argument(
+        "--simswap_name",
         type=str,
-        default="buffalo_l",
-        help="InsightFace FaceAnalysis model name",
+        default="people",
+        help="SimSwap experiment name (subfolder in checkpoints_dir)",
     )
     parser.add_argument(
-        "--face_analyzer_det_size",
+        "--simswap_epoch",
+        type=str,
+        default="latest",
+        help="Generator checkpoint epoch tag (e.g., latest, 0015)",
+    )
+    parser.add_argument(
+        "--simswap_arcface_ckpt",
+        type=Path,
+        default=None,
+        help="Path to ArcFace checkpoint used by SimSwap (defaults to simswap_root/arcface_model/arcface_checkpoint.tar)",
+    )
+    parser.add_argument(
+        "--simswap_crop_size",
         type=int,
-        nargs=2,
-        default=(640, 640),
-        help="Detector size (width height) for InsightFace FaceAnalysis",
+        default=224,
+        choices=[224, 512],
+        help="Input/output resolution for SimSwap",
     )
 
     # Hyperparameters (Projector)
@@ -103,6 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame_stride", type=int, default=1, help="Stride between frames inside a window")
     parser.add_argument("--window_step", type=int, default=None, help="Step between window starts (defaults to window_size*frame_stride)")
     parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (voxceleb_video)")
+    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (voxceleb)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting and key sampling")
 
     # Identity batching
@@ -200,12 +219,16 @@ def main() -> None:
     device = torch.device(args.device)
 
     face_swapper = None
-    face_analyzer = None
     if args.use_face_swapper:
-        face_swapper, face_analyzer = load_insightface_swapper(
-            model_path=args.face_swapper_model,
-            analyzer_name=args.face_analyzer_name,
-            det_size=tuple(args.face_analyzer_det_size),
+        simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
+        arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
+        face_swapper = SimSwapFaceSwapper(
+            simswap_root=args.simswap_root,
+            checkpoints_dir=simswap_ckpt_dir,
+            name=args.simswap_name,
+            which_epoch=args.simswap_epoch,
+            arcface_ckpt=arcface_ckpt,
+            crop_size=args.simswap_crop_size,
             device=device,
         )
 
@@ -214,6 +237,10 @@ def main() -> None:
         "max_videos_per_youtube_id": args.max_videos_per_youtube_id,
         "min_youtube_id_per_identity": args.min_youtube_id_per_identity,
     }
+    if args.max_samples_per_identity is not None:
+        data_options["max_samples_per_identity"] = args.max_samples_per_identity
+        if args.dataset_type == "voxceleb_video":
+            data_options["max_videos_per_identity"] = args.max_samples_per_identity
     if args.dataset_type == "voxceleb_video":
         data_options.update(
             {
@@ -274,10 +301,8 @@ def main() -> None:
         device=device,
         truncation_psi=args.truncation_psi,
         face_swapper=face_swapper,
-        face_analyzer=face_analyzer,
     )
-
-    use_swapper = args.use_face_swapper and face_swapper is not None and face_analyzer is not None
+    use_swapper = args.use_face_swapper and face_swapper is not None
 
     if args.save_generated_faces and hasattr(pipeline, "configure_saving"):
         save_dir = args.save_generated_dir if args.save_generated_dir is not None else args.output_dir / "generated_faces"

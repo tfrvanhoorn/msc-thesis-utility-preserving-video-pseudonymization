@@ -4,7 +4,7 @@ from .embedding import EmbeddingModel, FacenetEmbedder, SemanticAttributeEmbedde
 from .projector import ProjectorMLP, load_projector_state_dict
 from .projector_lstm import ProjectorLSTM
 from .stylegan2 import StyleGAN2Generator, load_stylegan2, load_stylegan2_components
-from .insightface_utils import load_insightface_swapper
+from .simswap import SimSwapFaceSwapper
 
 __all__ = [
     "FaceAligner",
@@ -21,5 +21,5 @@ __all__ = [
     "StyleGAN2Generator",
     "load_stylegan2",
     "load_stylegan2_components",
-    "load_insightface_swapper",
+    "SimSwapFaceSwapper",
 ]

@@ -100,8 +100,24 @@ def build_dataloader_for_identities(
     batch_identities: int | None = None,
     samples_per_identity: int | None = None,
     group_by_video: bool = False,
+    max_samples_per_identity: int | None = None,
 ) -> DataLoader:
     identity_to_index = {ident: idx for idx, ident in enumerate(identities)}
+
+    # Propagate per-identity caps into options for datasets and batch index builders
+    if max_samples_per_identity is not None:
+        options = dict(config.options or {})
+        options["max_samples_per_identity"] = max_samples_per_identity
+        if config.dataset_type.lower() == "voxceleb_video":
+            options.setdefault("max_videos_per_identity", max_samples_per_identity)
+
+        class _ConfigProxy:
+            def __init__(self, base: SupportsDataConfig, opts):
+                self.dataset_path = base.dataset_path
+                self.dataset_type = base.dataset_type
+                self.options = opts
+
+        config = _ConfigProxy(config, options)
 
     if identity_batching:
         if not batch_identities or not samples_per_identity:
@@ -132,6 +148,7 @@ def build_train_test_loaders(
     train_fraction: float = 0.8,
     seed: int = 0,
     max_identities: int | None = None,
+    max_samples_per_identity: int | None = None,
     batch_size: int = 4,
     batch_identities: int | None = None,
     samples_per_identity: int | None = None,
@@ -154,6 +171,7 @@ def build_train_test_loaders(
         shuffle=shuffle_train,
         num_workers=num_workers,
         collate_fn=collate_fn,
+        max_samples_per_identity=max_samples_per_identity,
     )
     test_loader = build_dataloader_for_identities(
         config,
@@ -166,6 +184,7 @@ def build_train_test_loaders(
         shuffle=shuffle_test,
         num_workers=num_workers,
         collate_fn=collate_fn,
+        max_samples_per_identity=max_samples_per_identity,
     )
     return split, train_loader, test_loader
 

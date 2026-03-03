@@ -49,7 +49,6 @@ class KfaarPipeline:
         save_max_per_epoch: Optional[int] = None,
         truncation_psi: float = 0.5,
         face_swapper: object | None = None,
-        face_analyzer: object | None = None,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -57,9 +56,9 @@ class KfaarPipeline:
         self.projector = projector
         self.stylegan = stylegan
         self.face_swapper = face_swapper
-        self.face_analyzer = face_analyzer
         self.device = device or next(projector.parameters()).device
         self._projector_is_lstm = isinstance(projector, ProjectorLSTM)
+        self._warned_face_swapper = False
         
         # Optimizer Setup
         self.optimizer = torch.optim.Adam(self.projector.parameters(), lr=1e-4)
@@ -150,23 +149,29 @@ class KfaarPipeline:
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
-            swap_input = frames_t[center_idx]
-            swap_out: Optional[torch.Tensor] = None
-            if use_face_swapper and self.face_swapper is not None and self.face_analyzer is not None:
-                swap_out = self._run_face_swap(swap_input, img)
-            det_input = swap_out if swap_out is not None else img
+            det_input = img
+            if use_face_swapper:
+                if self.face_swapper is None and not self._warned_face_swapper:
+                    logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
+                    self._warned_face_swapper = True
+                elif self.face_swapper is not None:
+                    swapped = self.face_swapper.swap(img, frames_t[center_idx])
+                    if swapped is not None:
+                        det_input = swapped
+                        swapped_images = swapped.unsqueeze(0)
+                    elif not self._warned_face_swapper:
+                        logger.warning("Face swapper failed to produce output; proceeding without swap.")
+                        self._warned_face_swapper = True
+
             dets = self.detector.detect(det_input)
             if dets:
                 top = max(dets, key=lambda d: d.score)
                 aligned = self.aligner.align(det_input, top).to(device)
-                v_embeddings[0] = self.embedder.embed([aligned], with_grad=not use_face_swapper)[0]
+                v_embeddings[0] = self.embedder.embed([aligned], with_grad=True)[0]
                 gen_mask[0] = True
             else:
                 v_embeddings[0] = projected_z[0].sum() * 0.0
                 self.stats["gen_no_det"] += 1
-
-            if swap_out is not None:
-                swapped_images = swap_out.unsqueeze(0)
             
             self._maybe_save_generated(
                 images,
@@ -215,11 +220,30 @@ class KfaarPipeline:
                 use_face_swapper=use_face_swapper,
             )
 
-    def hpvg_train_step(self, frames, labels, seq_lens, key_1, key_2, batch_index: Optional[int] = None, **kwargs) -> torch.Tensor:
+    def hpvg_train_step(
+        self,
+        frames,
+        labels,
+        seq_lens,
+        key_1,
+        key_2,
+        batch_index: Optional[int] = None,
+        use_face_swapper: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
         self.optimizer.zero_grad(set_to_none=True)
         
         # components will return None if criteria not met
-        comps = self.hpvg_loss_components(frames, labels, seq_lens, key_1, key_2, batch_index=batch_index, **kwargs)
+        comps = self.hpvg_loss_components(
+            frames,
+            labels,
+            seq_lens,
+            key_1,
+            key_2,
+            batch_index=batch_index,
+            use_face_swapper=use_face_swapper,
+            **kwargs,
+        )
         
         if comps is None:
             self.stats["discarded_batches"] += 1
@@ -239,6 +263,7 @@ class KfaarPipeline:
         self, frames, labels, seq_lens, key_1, key_2,
         margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0,
         batch_index: Optional[int] = None,
+        use_face_swapper: bool = False,
     ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         
         device = self.device
@@ -258,6 +283,7 @@ class KfaarPipeline:
                 sample_label=label_int,
                 key_tag="k1",
                 batch_index=batch_index,
+                use_face_swapper=use_face_swapper,
             )
             res2 = self.forward(
                 frames[b, :seq_lens_list[b]],
@@ -265,6 +291,7 @@ class KfaarPipeline:
                 sample_label=label_int,
                 key_tag="k2",
                 batch_index=batch_index,
+                use_face_swapper=use_face_swapper,
             )
 
             proj_norm_terms.append(res1.projected_z.pow(2).mean())
@@ -333,40 +360,6 @@ class KfaarPipeline:
     def _to_sequence_tensor(frames, device):
         t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
         return t.float().to(device)
-
-    def _run_face_swap(self, target_frame: torch.Tensor, gen_frame: torch.Tensor) -> Optional[torch.Tensor]:
-        if self.face_swapper is None or self.face_analyzer is None:
-            return None
-
-        try:
-            with torch.no_grad():
-                target_bgr = self._to_bgr_numpy(target_frame)
-                source_bgr = self._to_bgr_numpy(gen_frame)
-
-                target_faces = self.face_analyzer.get(target_bgr) or []
-                source_faces = self.face_analyzer.get(source_bgr) or []
-                if not target_faces or not source_faces:
-                    return None
-
-                target_face = max(target_faces, key=lambda f: getattr(f, "det_score", 0.0))
-                source_face = max(source_faces, key=lambda f: getattr(f, "det_score", 0.0))
-
-                swapped = self.face_swapper.get(target_bgr.copy(), target_face, source_face, paste_back=True)
-                swapped_rgb = swapped[:, :, ::-1].astype(np.float32) / 255.0
-                swapped_t = torch.from_numpy(swapped_rgb).permute(2, 0, 1).to(self.device)
-                return swapped_t.clamp(0.0, 1.0)
-        except Exception as exc:  # pragma: no cover
-            logger.warning("face swap failed: %s", exc)
-            return None
-
-    @staticmethod
-    def _to_bgr_numpy(img_t: torch.Tensor) -> np.ndarray:
-        img = img_t.detach().cpu()
-        if img.min() < 0.0 or img.max() > 1.0:
-            img = img.add(1).div(2.0)
-        img = img.clamp(0.0, 1.0)
-        img_np = (img.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
-        return img_np[:, :, ::-1]
 
     def configure_saving(
         self,

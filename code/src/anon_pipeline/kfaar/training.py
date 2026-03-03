@@ -23,7 +23,7 @@ from anon_pipeline.kfaar.config import (
     SeedConfig,
 )
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline
-from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict
+from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict, SimSwapFaceSwapper
 from anon_pipeline.shared.data.splits import build_train_test_loaders
 from anon_pipeline.shared.utils.logging import configure_logging
 
@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for voxceleb_video")
     parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for voxceleb_video (defaults to window_size*frame_stride)")
     parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows to sample per video for voxceleb_video")
+    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (voxceleb)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
     # Resuming
@@ -81,18 +82,43 @@ def parse_args():
     parser.add_argument("--save_generated_dir", type=Path, default=None, help="Directory to store generated face images (defaults to output_dir/generated_faces)")
     parser.add_argument("--save_generated_max_per_epoch", type=int, default=100, help="Maximum number of generated samples to store per epoch (set <=0 for no limit)")
 
+    # Face swapping via SimSwap
+    parser.add_argument("--use_face_swapper", action="store_true", help="Enable SimSwap face swapping during training")
+    parser.add_argument("--simswap_root", type=Path, default=PROJECT_ROOT / "external_libraries" / "SimSwap", help="Path to SimSwap repository root")
+    parser.add_argument("--simswap_checkpoints_dir", type=Path, default=None, help="Path to SimSwap checkpoints directory (defaults to simswap_root/checkpoints)")
+    parser.add_argument("--simswap_name", type=str, default="people", help="SimSwap experiment name (subfolder in checkpoints_dir)")
+    parser.add_argument("--simswap_epoch", type=str, default="latest", help="Generator checkpoint epoch tag (e.g., latest, 0015)")
+    parser.add_argument("--simswap_arcface_ckpt", type=Path, default=None, help="Path to ArcFace checkpoint used by SimSwap (defaults to simswap_root/arcface_model/arcface_checkpoint.tar)")
+    parser.add_argument("--simswap_crop_size", type=int, default=224, choices=[224, 512], help="Input/output resolution for SimSwap")
+
     return parser.parse_args()
 
 def main():
     args = parse_args()
     configure_logging()
     device = torch.device(args.device)
+    face_swapper = None
+    if args.use_face_swapper:
+        simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
+        arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
+        face_swapper = SimSwapFaceSwapper(
+            simswap_root=args.simswap_root,
+            checkpoints_dir=simswap_ckpt_dir,
+            name=args.simswap_name,
+            which_epoch=args.simswap_epoch,
+            arcface_ckpt=arcface_ckpt,
+            crop_size=args.simswap_crop_size,
+            device=device,
+        )
     
     # 1. Setup Configurations
     data_options: dict[str, object] = {}
+    if args.max_samples_per_identity is not None:
+        data_options["max_samples_per_identity"] = args.max_samples_per_identity
     if args.dataset_type == "voxceleb_video":
         data_options.update(
             {
+                "max_videos_per_identity": args.max_samples_per_identity,
                 "window_size": args.window_size,
                 "frame_stride": args.frame_stride,
                 "window_step": args.window_step,
@@ -132,6 +158,7 @@ def main():
         train_fraction=args.train_fraction,
         seed=args.seed,
         max_identities=args.max_identities,
+        max_samples_per_identity=args.max_samples_per_identity,
         batch_size=args.batch_identities * args.batch_samples_per_identity,
         identity_batching=True,
         batch_identities=args.batch_identities,
@@ -143,7 +170,13 @@ def main():
     # 3. Initialize Pipeline Components
     logging.info(f"Loading StyleGAN2 from {args.stylegan_ckpt}...")
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
-    pipeline = build_kfaar_pipeline(cfg, stylegan=stylegan, device=device, truncation_psi=args.truncation_psi)
+    pipeline = build_kfaar_pipeline(
+        cfg,
+        stylegan=stylegan,
+        device=device,
+        truncation_psi=args.truncation_psi,
+        face_swapper=face_swapper,
+    )
 
     start_epoch = args.start_epoch if args.start_epoch is not None else 0
     if args.resume_ckpt is not None:
@@ -181,6 +214,7 @@ def main():
         save_generated_dir=save_dir,
         save_generated_mode=args.save_generated_mode,
         save_generated_max_per_epoch=save_max,
+        use_face_swapper=args.use_face_swapper,
     )
 
     logging.info("Starting training loop...")

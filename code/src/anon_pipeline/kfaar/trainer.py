@@ -43,6 +43,7 @@ class KfaarTrainer:
         save_generated_dir: str | Path | None = None,
         save_generated_mode: str = "detected",
         save_generated_max_per_epoch: int | None = None,
+        use_face_swapper: bool = False,
     ) -> None:
         self.pipeline = pipeline
         self.train_loader = train_loader
@@ -69,6 +70,7 @@ class KfaarTrainer:
         self.save_generated_dir = Path(save_generated_dir) if save_generated_dir else None
         self.save_generated_mode = save_generated_mode
         self.save_generated_max_per_epoch = save_generated_max_per_epoch
+        self.use_face_swapper = use_face_swapper
 
         default_ckpt_dir = Path(__file__).resolve().parent / "checkpoints"
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else default_ckpt_dir
@@ -141,6 +143,7 @@ class KfaarTrainer:
                         key_1,
                         key_2,
                         batch_index=batch_number,
+                        use_face_swapper=self.use_face_swapper,
                         margin=self.margin,
                         lambda_ano=self.lambda_ano,
                         lambda_syn=self.lambda_syn,
@@ -258,6 +261,7 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
+                        use_face_swapper=self.use_face_swapper,
                     )
 
                     if comps is None:
