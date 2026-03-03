@@ -134,7 +134,7 @@ class SimSwapFaceSwapper:
             with torch.no_grad():
                 img_fake = self.model(img_id, img_att, latend_id, latend_id, True)
 
-            # --- PIPELINE ADAPTATION: Revert Padding and Range ---
+# --- PIPELINE ADAPTATION: Revert Padding and Range ---
             
             # Resize back to the padded square dimension of the target
             max_tgt_dim = max(h_tgt, w_tgt)
@@ -144,12 +144,9 @@ class SimSwapFaceSwapper:
             swapped_restored = swapped_square[..., tgt_top : max_tgt_dim - tgt_bottom, 
                                                    tgt_left : max_tgt_dim - tgt_right]
 
-            # Reverse Range Fix if needed
-            if target_was_minus_one:
-                swapped_restored = (swapped_restored * 2.0) - 1.0
-
-            out_min = -1.0 if target_was_minus_one else 0.0
-            return swapped_restored.squeeze(0).clamp(out_min, 1.0)
+            # FIX: Always return [0, 1]. Do not reverse back to [-1, 1].
+            # KfaarPipeline expects det_input and the saved image to be [0, 1].
+            return swapped_restored.squeeze(0).clamp(0.0, 1.0)
             
         except Exception as e:
             import logging
