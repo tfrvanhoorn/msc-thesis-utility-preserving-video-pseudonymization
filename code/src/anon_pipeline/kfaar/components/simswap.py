@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import sys
-import os
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
-import cv2
-import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
-from torchvision import transforms
+
 
 class SimSwapFaceSwapper:
-    """Wrapper to run SimSwap for single-image swapping using affine alignment."""
+    """Lightweight wrapper to run SimSwap for single-image swapping.
+
+    This version bypasses SimSwap's native InsightFace detector and assumes the 
+    inputs (source and target) are already aligned by the KFAAR pipeline. 
+    It dynamically pads non-square inputs to preserve aspect ratios.
+    """
 
     def __init__(
         self,
@@ -24,152 +24,146 @@ class SimSwapFaceSwapper:
         name: str,
         which_epoch: str,
         arcface_ckpt: Path,
-        parsing_ckpt: Optional[Path] = None,
-        detector_name: str = "antelopev2",
-        detector_root: Optional[Path] = None,
         crop_size: int = 224,
-        use_mask: bool = True,
         device: torch.device | str = "cuda:0",
+        **kwargs  # Catches legacy KFAAR args (like antelope_dir) so it doesn't crash
     ) -> None:
         if not torch.cuda.is_available():
-            raise RuntimeError("SimSwap requires CUDA.")
+            raise RuntimeError("SimSwap requires CUDA but torch.cuda.is_available() is False")
 
+        # Normalize device; SimSwap expects an explicit CUDA index
         self.device = torch.device(device)
         if self.device.type == "cuda" and self.device.index is None:
             self.device = torch.device("cuda:0")
             
+        # Ensure SimSwap code is on import path
         simswap_root = Path(simswap_root).resolve()
         if str(simswap_root) not in sys.path:
             sys.path.insert(0, str(simswap_root))
 
         from models.fs_model import fsModel  # type: ignore
-        from insightface_func.face_detect_crop_single import Face_detect_crop # type: ignore
-        from util.norm import SpecificNorm # type: ignore
-        
-        # 1. Initialize SimSwap Model
+
+        # Initialize SimSwap Model with EXACT TestOptions & BaseOptions defaults
         opt = SimpleNamespace(
-            isTrain=False, resize_or_crop="none", crop_size=int(crop_size),
-            Arc_path=str(arcface_ckpt), checkpoints_dir=str(checkpoints_dir),
-            name=name, which_epoch=str(which_epoch), gpu_ids=[self.device.index or 0],
-            verbose=False, load_pretrain="", gan_mode="hinge",
-            lambda_feat=0.0, lambda_rec=0.0, no_ganFeat_loss=True, no_vgg_loss=True,
+            # --- Core / BaseOptions (Required for fsModel to not crash) ---
+            isTrain=False,
+            name=name,                             # Pipeline override
+            checkpoints_dir=str(checkpoints_dir),  # Pipeline override
+            which_epoch=str(which_epoch),          # Pipeline override
+            gpu_ids=[self.device.index or 0],      # Pipeline override
+            verbose=False,
+            resize_or_crop="none",
+            load_pretrain="",
+            gan_mode="hinge",
+            lambda_feat=0.0,
+            lambda_rec=0.0,
+            no_ganFeat_loss=True,
+            no_vgg_loss=True,
+            
+            # --- TestOptions Defaults ---
+            ntest=float("inf"),
+            results_dir='./results/',
+            aspect_ratio=1.0,
+            phase='test',
+            how_many=50,
+            cluster_path='features_clustered_010.npy',
+            use_encoded_image=False,
+            export_onnx=None,
+            engine=None,
+            onnx=None,
+            Arc_path=str(arcface_ckpt),            # Pipeline override
+            pic_a_path='G:/swap_data/ID/elon-musk-hero-image.jpeg',
+            pic_b_path='./demo_file/multi_people.jpg',
+            pic_specific_path='./crop_224/zrf.jpg',
+            multisepcific_dir='./demo_file/multispecific',
+            video_path='G:/swap_data/video/HSB_Demo_Trim.mp4',
+            temp_path='./temp_results',
+            output_path='./output/',
+            id_thres=0.03,
+            no_simswaplogo=False,
+            use_mask=False,
+            crop_size=int(crop_size)               # Pipeline override (usually 224)
         )
+
         torch.cuda.set_device(self.device.index or 0)
         self.model = fsModel()
         self.model.initialize(opt)
         self.model.eval()
 
-        # Detector root (defaults to SimSwap insightface models directory)
-        if detector_root is None:
-            actual_detector_root = str(simswap_root / "insightface_func" / "models")
-        else:
-            actual_detector_root = str(Path(detector_root).resolve())
-
-        # 2. Initialize Detector/Aligner
-        self.app = Face_detect_crop(name=detector_name, root=actual_detector_root)
-        # Using 'None' mode for generic arbitrary images
-        self.app.prepare(ctx_id=self.device.index or 0, det_thresh=0.6, det_size=(640,640), mode='None')
-        
-        # 3. Initialize Parsing Model (for masking)
-        self.use_mask = use_mask
-        self.net = None
-        if self.use_mask and parsing_ckpt is not None:
-            from parsing_model.model import BiSeNet # type: ignore
-            self.net = BiSeNet(n_classes=19)
-            self.net.to(self.device)
-            self.net.load_state_dict(torch.load(str(parsing_ckpt), map_location=self.device))
-            self.net.eval()
-            
-        self.spNorm = SpecificNorm()
         self.crop_size = int(crop_size)
+
+        # Precompute mean/std for ArcFace Identity Normalization
+        self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
+
+    def _pad_and_resize(self, tensor: torch.Tensor, target_size: int) -> tuple[torch.Tensor, tuple[int, int, int, int], tuple[int, int]]:
+        """Pads a [C, H, W] tensor to square, then resizes to target_size."""
+        _, h, w = tensor.shape
+        original_shape = (h, w)
+        max_dim = max(h, w)
         
-        self.transformer_Arcface = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
+        # Calculate padding to make it a square (left, right, top, bottom)
+        pad_w = max_dim - w
+        pad_h = max_dim - h
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        padding = (pad_left, pad_right, pad_top, pad_bottom)
         
-        # Dummy logoclass to satisfy reverse2wholeimage arguments (disabling logo anyway)
-        class DummyLogo:
-            def apply_frames(self, x): return x
-        self.logoclass = DummyLogo()
-
-    def _tensor_to_bgr(self, tensor: torch.Tensor) -> np.ndarray:
-        """Converts [C, H, W] [0, 1] tensor to [H, W, C] [0, 255] BGR numpy array."""
-        rgb_np = (tensor.detach().permute(1, 2, 0).cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-        return cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
-
-    def _bgr_to_tensor(self, bgr_np: np.ndarray, target_device: torch.device) -> torch.Tensor:
-        """Converts [H, W, C] [0, 255] BGR numpy array to [C, H, W] [0, 1] tensor."""
-        rgb_np = cv2.cvtColor(bgr_np, cv2.COLOR_BGR2RGB)
-        tensor = torch.from_numpy(rgb_np).permute(2, 0, 1).float() / 255.0
-        return tensor.to(target_device)
-
-    def swap(self, source_img: torch.Tensor, target_img: torch.Tensor) -> Optional[torch.Tensor]:
-        from util.reverse2original import reverse2wholeimage # type: ignore
+        padded = F.pad(tensor, padding, mode='constant', value=0.0)
+        resized = F.interpolate(padded.unsqueeze(0), size=(target_size, target_size), mode='bilinear', align_corners=False).squeeze(0)
         
-        # --- 1. Prepare Images ---
-        # Ensure tensors are [0, 1]
-        if source_img.min() < 0.0: source_img = (source_img + 1.0) / 2.0
-        if target_img.min() < 0.0: target_img = (target_img + 1.0) / 2.0
-        source_img = source_img.clamp(0.0, 1.0)
-        target_img = target_img.clamp(0.0, 1.0)
+        return resized, padding, original_shape
 
-        src_bgr = self._tensor_to_bgr(source_img)
-        tgt_bgr = self._tensor_to_bgr(target_img)
+    def _restore_shape(self, tensor: torch.Tensor, padding: tuple[int, int, int, int], original_shape: tuple[int, int]) -> torch.Tensor:
+        """Restores a [C, target_size, target_size] tensor back to original_shape by resizing and unpadding."""
+        h, w = original_shape
+        max_dim = max(h, w)
+        
+        # Resize back to the square max_dim
+        restored_square = F.interpolate(tensor.unsqueeze(0), size=(max_dim, max_dim), mode='bilinear', align_corners=False).squeeze(0)
+        
+        # Unpad (slice out the padded borders)
+        pad_left, pad_right, pad_top, pad_bottom = padding
+        restored = restored_square[:, pad_top : max_dim - pad_bottom, pad_left : max_dim - pad_right]
+        return restored
 
-        # --- 2. Identity Extraction (Source) ---
-        img_a_align_crop_list, _ = self.app.get(src_bgr, self.crop_size)
-        if not img_a_align_crop_list:
-            # Fallback: if source is already an aligned StyleGAN output, use it directly
-            src_crop = cv2.resize(src_bgr, (self.crop_size, self.crop_size))
-        else:
-            src_crop = img_a_align_crop_list[0]
+    def swap(self, source_aligned: torch.Tensor, target_aligned: torch.Tensor) -> Optional[torch.Tensor]:
+        """Swaps faces between two ALREADY ALIGNED [C, H, W] tensors of arbitrary aspect ratios.
+        
+        Expects tensors to be in [-1, 1] or [0, 1] range. Returns a [0, 1] tensor.
+        """
+        try:
+            # 1. Range Fix: Ensure tensors are strictly [0, 1]
+            if source_aligned.min() < 0.0: source_aligned = (source_aligned + 1.0) / 2.0
+            if target_aligned.min() < 0.0: target_aligned = (target_aligned + 1.0) / 2.0
+            src = source_aligned.clamp(0.0, 1.0).to(self.device)
+            tgt = target_aligned.clamp(0.0, 1.0).to(self.device)
 
-        img_a_pil = Image.fromarray(cv2.cvtColor(src_crop, cv2.COLOR_BGR2RGB))
-        img_id = self.transformer_Arcface(img_a_pil).unsqueeze(0).to(self.device)
+            # 2. Pad to square and resize to 224x224 safely
+            img_id_224, _, _ = self._pad_and_resize(src, self.crop_size)
+            img_att_224, tgt_pad, tgt_shape = self._pad_and_resize(tgt, self.crop_size)
 
-        img_id_downsample = F.interpolate(img_id, size=(112, 112))
-        latend_id = self.model.netArc(img_id_downsample)
-        latend_id = F.normalize(latend_id, p=2, dim=1)
+            # 3. Normalize Source for ArcFace (Identity Extraction)
+            img_id_norm = (img_id_224.unsqueeze(0) - self.mean) / self.std
+            
+            # Extract Latent ID
+            img_id_downsample = F.interpolate(img_id_norm, size=(112, 112), mode="bilinear", align_corners=False)
+            latend_id = self.model.netArc(img_id_downsample)
+            latend_id = F.normalize(latend_id, p=2, dim=1)
 
-        # --- 3. Target Extraction and Swap ---
-        img_b_align_crop_list, b_mat_list = self.app.get(tgt_bgr, self.crop_size)
-        if not img_b_align_crop_list:
-            return None # No face found in target frame
+            # 4. Forward Pass through GAN
+            img_att_unsqueeze = img_att_224.unsqueeze(0)
+            with torch.no_grad():
+                img_fake = self.model(img_id_norm, img_att_unsqueeze, latend_id, latend_id, True)
 
-        swap_result_list = []
-        b_align_crop_tensor_list = []
+            # 5. Restore original target dimensions and return
+            swapped_restored = self._restore_shape(img_fake.squeeze(0), tgt_pad, tgt_shape)
 
-        for b_align_crop in img_b_align_crop_list:
-            crop_rgb = cv2.cvtColor(b_align_crop, cv2.COLOR_BGR2RGB)
-            b_align_crop_tensor = torch.from_numpy(crop_rgb).float().div(255)
-            b_align_crop_tensor = b_align_crop_tensor.permute(2, 0, 1).unsqueeze(0).to(self.device)
+            return swapped_restored.clamp(0.0, 1.0)
 
-            swap_result = self.model(None, b_align_crop_tensor, latend_id, None, True)[0]
-            swap_result_list.append(swap_result)
-            b_align_crop_tensor_list.append(b_align_crop_tensor)
-
-        # --- 4. Reverse Mapping ---
-        # reverse2wholeimage forces a save to disk. We use a temp file to bridge it back to memory.
-        # (In the future, editing reverse2wholeimage to just return the image is faster for training).
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        reverse2wholeimage(
-            b_align_crop_tensor_list, swap_result_list, b_mat_list, self.crop_size,
-            tgt_bgr, self.logoclass, tmp_path, no_simswaplogo=True,
-            pasring_model=self.net, use_mask=self.use_mask, norm=self.spNorm
-        )
-
-        result_bgr = cv2.imread(tmp_path)
-        os.remove(tmp_path)
-
-        if result_bgr is None:
+        except Exception as e:
+            import logging
+            logging.error(f"FaceSwap failed: {e}")
             return None
-
-        return self._bgr_to_tensor(result_bgr, target_img.device)
-
-        # except Exception as e:
-        #     import logging
-        #     logging.error(f"FaceSwap failed: {e}")
-        #     return None

@@ -89,6 +89,7 @@ def parse_args():
     parser.add_argument("--simswap_name", type=str, default="people", help="SimSwap experiment name (subfolder in checkpoints_dir)")
     parser.add_argument("--simswap_epoch", type=str, default="latest", help="Generator checkpoint epoch tag (e.g., latest, 0015)")
     parser.add_argument("--simswap_arcface_ckpt", type=Path, default=None, help="Path to ArcFace checkpoint used by SimSwap (defaults to simswap_root/arcface_model/arcface_checkpoint.tar)")
+    parser.add_argument("--simswap_parsing_ckpt", type=Path, default=None, help="Path to face parsing checkpoint for SimSwap masking (optional)")
     parser.add_argument("--simswap_crop_size", type=int, default=224, choices=[224, 512], help="Input/output resolution for SimSwap")
     parser.add_argument("--simswap_detector_name", type=str, default="antelopev2", help="Face detector name for SimSwap (e.g., antelopev2)")
     parser.add_argument("--simswap_detector_root", type=Path, default=None, help="Path to SimSwap face detector models root (defaults to simswap_root/insightface_func/models)")
@@ -109,6 +110,7 @@ def main():
             name=args.simswap_name,
             which_epoch=args.simswap_epoch,
             arcface_ckpt=arcface_ckpt,
+            parsing_ckpt=args.simswap_parsing_ckpt,
             detector_name=args.simswap_detector_name,
             detector_root=args.simswap_detector_root,
             crop_size=args.simswap_crop_size,

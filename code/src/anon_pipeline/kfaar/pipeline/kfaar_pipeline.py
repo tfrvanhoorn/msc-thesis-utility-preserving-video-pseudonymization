@@ -129,7 +129,7 @@ class KfaarPipeline:
             for e, idx in zip(embs, valid_idx):
                 real_emb[idx] = e
 
-        # 2. Projection (single-frame target per window)
+        # 2. Projection
         key_t = key.to(device)
         if self._projector_is_lstm:
             k_in = key_t.view(1, 1, -1).expand(1, seq_len, -1)
@@ -145,33 +145,57 @@ class KfaarPipeline:
         
         images = None
         swapped_images = None
+        
         if self.stylegan is not None:
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
             det_input = img
+            
             if use_face_swapper:
                 if self.face_swapper is None and not self._warned_face_swapper:
                     logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
                     self._warned_face_swapper = True
                 elif self.face_swapper is not None:
-                    swapped = self.face_swapper.swap(img, frames_t[center_idx])
+                    
+                    # --- PIPELINE ADAPTATION: Align StyleGAN Output First ---
+                    stylegan_dets = self.detector.detect(img)
+                    if stylegan_dets:
+                        stylegan_top = max(stylegan_dets, key=lambda d: d.score)
+                        aligned_stylegan = self.aligner.align(img, stylegan_top).to(device)
+                    else:
+                        aligned_stylegan = img # Fallback to unaligned blob if GAN is untrained
+                    
+                    target_aligned = aligned_faces[center_idx]
+                    
+                    # Ensure the target frame actually had a face before swapping
+                    if target_aligned.numel() > 0:
+                        swapped = self.face_swapper.swap(aligned_stylegan, target_aligned)
+                    else:
+                        swapped = None
+
                     if swapped is not None:
                         det_input = swapped
                         swapped_images = swapped.unsqueeze(0)
+                        
+                        # --- BYPASS DETECTOR: Swap output is already an aligned crop ---
+                        v_embeddings[0] = self.embedder.embed([det_input], with_grad=True)[0]
+                        gen_mask[0] = True
                     elif not self._warned_face_swapper:
                         logger.warning("Face swapper failed to produce output; proceeding without swap.")
                         self._warned_face_swapper = True
 
-            dets = self.detector.detect(det_input)
-            if dets:
-                top = max(dets, key=lambda d: d.score)
-                aligned = self.aligner.align(det_input, top).to(device)
-                v_embeddings[0] = self.embedder.embed([aligned], with_grad=True)[0]
-                gen_mask[0] = True
-            else:
-                v_embeddings[0] = projected_z[0].sum() * 0.0
-                self.stats["gen_no_det"] += 1
+            # Standard detection logic ONLY runs if swapper is disabled or failed
+            if not (use_face_swapper and swapped_images is not None):
+                dets = self.detector.detect(det_input)
+                if dets:
+                    top = max(dets, key=lambda d: d.score)
+                    aligned = self.aligner.align(det_input, top).to(device)
+                    v_embeddings[0] = self.embedder.embed([aligned], with_grad=True)[0]
+                    gen_mask[0] = True
+                else:
+                    v_embeddings[0] = projected_z[0].sum() * 0.0
+                    self.stats["gen_no_det"] += 1
             
             self._maybe_save_generated(
                 images,
