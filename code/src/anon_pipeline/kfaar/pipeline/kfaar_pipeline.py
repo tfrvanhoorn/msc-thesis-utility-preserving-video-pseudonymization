@@ -111,13 +111,20 @@ class KfaarPipeline:
         aligned_faces = []
         real_emb = torch.zeros(seq_len, 512, device=device)
         
-        for frame in frames_t:
+        # --- TRACK THE ORIGINAL DETECTION ---
+        # We need to remember the bounding box of the target frame so we can paste it back later.
+        center_detection = None 
+        
+        for i, frame in enumerate(frames_t):
             dets = self.detector.detect(frame)
             if dets:
                 top = max(dets, key=lambda d: d.score)
                 aligned = self.aligner.align(frame, top).to(device)
                 aligned_faces.append(aligned)
                 input_mask.append(True)
+                
+                if i == center_idx:
+                    center_detection = top
             else:
                 aligned_faces.append(torch.empty(0))
                 input_mask.append(False)
@@ -158,34 +165,59 @@ class KfaarPipeline:
                     self._warned_face_swapper = True
                 elif self.face_swapper is not None:
                     
-                    # --- PIPELINE ADAPTATION: Align StyleGAN Output First ---
                     stylegan_dets = self.detector.detect(img)
                     if stylegan_dets:
                         stylegan_top = max(stylegan_dets, key=lambda d: d.score)
                         aligned_stylegan = self.aligner.align(img, stylegan_top).to(device)
                     else:
-                        aligned_stylegan = img # Fallback to unaligned blob if GAN is untrained
+                        aligned_stylegan = img 
                     
                     target_aligned = aligned_faces[center_idx]
                     
-                    # Ensure the target frame actually had a face before swapping
                     if target_aligned.numel() > 0:
                         swapped = self.face_swapper.swap(aligned_stylegan, target_aligned)
                     else:
                         swapped = None
 
                     if swapped is not None:
-                        det_input = swapped
-                        swapped_images = swapped.unsqueeze(0)
+                        # det_input stays as the cropped face so the embedder works perfectly
+                        det_input = swapped 
                         
-                        # --- BYPASS DETECTOR: Swap output is already an aligned crop ---
+                        # --- PASTE BACK INTO ORIGINAL CONTEXT ---
+                        # Start with a clean copy of the original full video frame
+                        swapped_full = frames_t[center_idx].clone()
+                        
+                        if center_detection is not None:
+                            bbox = center_detection.bbox.to(device)
+                            x1, y1, x2, y2 = bbox.round().long()
+                            h, w = swapped_full.shape[1], swapped_full.shape[2]
+                            
+                            x1, x2 = x1.clamp(0, w), x2.clamp(0, w)
+                            y1, y2 = y1.clamp(0, h), y2.clamp(0, h)
+                            
+                            crop_h, crop_w = (y2 - y1).item(), (x2 - x1).item()
+                            
+                            if crop_h > 0 and crop_w > 0:
+                                # Resize the swapped face crop to fit the bounding box
+                                swapped_resized = torch.nn.functional.interpolate(
+                                    swapped.unsqueeze(0), 
+                                    size=(crop_h, crop_w), 
+                                    mode="bilinear", 
+                                    align_corners=False
+                                ).squeeze(0)
+                                
+                                # Overwrite the pixels in the original frame!
+                                swapped_full[:, y1:y2, x1:x2] = swapped_resized
+
+                        # Save the full image to the hard drive
+                        swapped_images = swapped_full.unsqueeze(0)
+                        
                         v_embeddings[0] = self.embedder.embed([det_input], with_grad=True)[0]
                         gen_mask[0] = True
                     elif not self._warned_face_swapper:
                         logger.warning("Face swapper failed to produce output; proceeding without swap.")
                         self._warned_face_swapper = True
 
-            # Standard detection logic ONLY runs if swapper is disabled or failed
             if not (use_face_swapper and swapped_images is not None):
                 dets = self.detector.detect(det_input)
                 if dets:
@@ -213,7 +245,7 @@ class KfaarPipeline:
         valid_mask = input_mask_t & gen_mask_t
 
         return KfaarResult(
-            detections=[], # Simplified for training speed
+            detections=[], 
             aligned_faces=[aligned_faces[center_idx]],
             real_embeddings=real_emb[center_idx : center_idx + 1].detach(),
             projected_z=projected_z,
