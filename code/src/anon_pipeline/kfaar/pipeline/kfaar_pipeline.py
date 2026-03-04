@@ -418,6 +418,20 @@ class KfaarPipeline:
         t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
         return t.float().to(device)
 
+    def _epoch_image_dir(self) -> Optional[Path]:
+        if self._save_dir_images is None:
+            return None
+        if self._current_epoch <= 0:
+            return self._save_dir_images
+        return self._save_dir_images / f"epoch_{self._current_epoch:04d}"
+
+    def _epoch_video_dir(self) -> Optional[Path]:
+        if self._save_dir_videos is None:
+            return None
+        if self._current_epoch <= 0:
+            return self._save_dir_videos
+        return self._save_dir_videos / f"epoch_{self._current_epoch:04d}"
+
     def configure_saving(
         self,
         save_dir: Path,
@@ -445,9 +459,14 @@ class KfaarPipeline:
         """Reset save counters for a new epoch and prepare the epoch directory."""
         self._current_epoch = epoch
         self._saved_this_epoch = 0
-        # Evaluation uses single pass; no per-epoch subfolders for saves
         self._saving_active = self._save_enabled
         self._video_accumulators.clear()
+        images_dir = self._epoch_image_dir()
+        videos_dir = self._epoch_video_dir()
+        if images_dir is not None:
+            images_dir.mkdir(parents=True, exist_ok=True)
+        if videos_dir is not None and self._save_videos:
+            videos_dir.mkdir(parents=True, exist_ok=True)
 
     def disable_saving(self) -> None:
         self._saving_active = False
@@ -476,8 +495,8 @@ class KfaarPipeline:
             return
 
         mode = self._save_mode
-        save_images_dir = self._save_dir_images if self._save_dir_images is not None else None
-        save_videos_dir = self._save_dir_videos if self._save_videos and self._save_dir_videos is not None else None
+        save_images_dir = self._epoch_image_dir()
+        save_videos_dir = self._epoch_video_dir() if self._save_videos else None
         if save_images_dir is None and save_videos_dir is None:
             return
         if save_images_dir is not None:
@@ -541,7 +560,7 @@ class KfaarPipeline:
         """Flush accumulated video frames into GIF files."""
         if not self._save_enabled or not self._save_videos:
             return
-        save_videos_dir = self._save_dir_videos if self._save_dir_videos is not None else None
+        save_videos_dir = self._epoch_video_dir()
         if save_videos_dir is None:
             return
         save_videos_dir.mkdir(parents=True, exist_ok=True)
