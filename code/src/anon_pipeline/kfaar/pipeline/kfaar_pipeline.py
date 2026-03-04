@@ -211,7 +211,7 @@ class KfaarPipeline:
 
                         # Save the full image to the hard drive
                         swapped_images = swapped_full.unsqueeze(0)
-                        swapped_images = swapped 
+                        # swapped_images = swapped 
                         
                         v_embeddings[0] = self.embedder.embed([det_input], with_grad=True)[0]
                         gen_mask[0] = True
