@@ -66,12 +66,15 @@ class KfaarPipeline:
         self.stats: Dict[str, int] = {"input_no_det": 0, "gen_no_det": 0, "discarded_batches": 0}
 
         # Transfer and Freeze
-        if hasattr(self.embedder, "to"): self.embedder.to(self.device)
+        if hasattr(self.embedder, "to"):
+            self.embedder.to(self.device)
         if self.stylegan is not None:
             self.stylegan.to(self.device)
             # Freeze StyleGAN weights but allow grad to flow through outputs
-            for p in self.stylegan.parameters():
-                p.requires_grad_(False)
+            base_g = getattr(self.stylegan, "_G", None)
+            if base_g is not None:
+                for p in base_g.parameters():
+                    p.requires_grad_(False)
         self.projector.to(self.device)
 
         # Generated face saving configuration
