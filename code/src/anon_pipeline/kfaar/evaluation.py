@@ -98,6 +98,18 @@ def parse_args() -> argparse.Namespace:
         choices=[224, 512],
         help="Input/output resolution for SimSwap",
     )
+    parser.add_argument(
+        "--simswap_detector_name",
+        type=str,
+        default="antelopev2",
+        help="Face detector name for SimSwap (e.g., antelopev2)",
+    )
+    parser.add_argument(
+        "--simswap_detector_root",
+        type=Path,
+        default=None,
+        help="Path to SimSwap face detector models root (defaults to simswap_root/insightface_func/models)",
+    )
 
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
@@ -228,6 +240,8 @@ def main() -> None:
             name=args.simswap_name,
             which_epoch=args.simswap_epoch,
             arcface_ckpt=arcface_ckpt,
+            detector_name=args.simswap_detector_name,
+            detector_root=args.simswap_detector_root,
             crop_size=args.simswap_crop_size,
             device=device,
         )
