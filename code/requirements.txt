@@ -14,8 +14,8 @@ av>=12.0
 # --- Modified Requirements (Version Downgrades) ---
 # numpy==1.24.4
 numpy==1.23.5  # Downgraded to prevent object array/compatibility issues with SimSwap/ONNX
-# insightface==0.7.3
-insightface==0.2.1  # Replaced with SimSwap-compatible version (v0.7.x breaks imports)
+insightface==0.7.3
+# insightface==0.2.1  # Replaced with SimSwap-compatible version (v0.7.x breaks imports)
 # opencv-python-headless==4.12.0.88
 opencv-python-headless==4.10.0.84 # Adjusted to a more stable version for Python 3.11/SimSwap
 
