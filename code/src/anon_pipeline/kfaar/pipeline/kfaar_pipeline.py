@@ -67,7 +67,11 @@ class KfaarPipeline:
 
         # Transfer and Freeze
         if hasattr(self.embedder, "to"): self.embedder.to(self.device)
-        if self.stylegan is not None: self.stylegan.to(self.device)
+        if self.stylegan is not None:
+            self.stylegan.to(self.device)
+            # Freeze StyleGAN weights but allow grad to flow through outputs
+            for p in self.stylegan.parameters():
+                p.requires_grad_(False)
         self.projector.to(self.device)
 
         # Generated face saving configuration

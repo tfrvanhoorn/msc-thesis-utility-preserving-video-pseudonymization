@@ -92,6 +92,9 @@ class SimSwapFaceSwapper:
         torch.cuda.set_device(self.device.index or 0)
         self.model = create_model(opt)
         self.model.eval()
+        # Freeze SimSwap weights but keep graph for input grads
+        for param in self.model.parameters():
+            param.requires_grad_(False)
 
         self.crop_size = int(crop_size)
 
@@ -158,8 +161,7 @@ class SimSwapFaceSwapper:
 
             # 4. Forward Pass through GAN
             img_att_unsqueeze = img_att_224.unsqueeze(0)
-            with torch.no_grad():
-                img_fake = self.model(img_id_norm, img_att_unsqueeze, latend_id, latend_id, True)
+            img_fake = self.model(img_id_norm, img_att_unsqueeze, latend_id, latend_id, True)
 
             # 5. Restore original target dimensions and return
             swapped_restored = self._restore_shape(img_fake.squeeze(0), tgt_pad, tgt_shape)
