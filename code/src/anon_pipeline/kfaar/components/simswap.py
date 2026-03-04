@@ -24,33 +24,37 @@ class SimSwapFaceSwapper:
         name: str,
         which_epoch: str,
         arcface_ckpt: Path,
-        crop_size: int = 224,
+        crop_size: int = 512,
         device: torch.device | str = "cuda:0",
-        **kwargs  # Catches legacy KFAAR args (like antelope_dir) so it doesn't crash
+        **kwargs  # Catches legacy KFAAR args
     ) -> None:
         if not torch.cuda.is_available():
             raise RuntimeError("SimSwap requires CUDA but torch.cuda.is_available() is False")
 
-        # Normalize device; SimSwap expects an explicit CUDA index
         self.device = torch.device(device)
         if self.device.type == "cuda" and self.device.index is None:
             self.device = torch.device("cuda:0")
             
-        # Ensure SimSwap code is on import path
         simswap_root = Path(simswap_root).resolve()
         if str(simswap_root) not in sys.path:
             sys.path.insert(0, str(simswap_root))
 
-        from models.fs_model import fsModel  # type: ignore
+        from models.models import create_model  # type: ignore
 
-        # Initialize SimSwap Model with EXACT TestOptions & BaseOptions defaults
+        # --- 512 MODEL AUTO-CONFIGURE ---
+        # If 512 is requested, force the model to look for the high-res weights
+        if int(crop_size) == 512:
+            name = '512'
+            which_epoch = '550000'
+
         opt = SimpleNamespace(
-            # --- Core / BaseOptions (Required for fsModel to not crash) ---
+            # --- Core / BaseOptions ---
             isTrain=False,
-            name=name,                             # Pipeline override
-            checkpoints_dir=str(checkpoints_dir),  # Pipeline override
-            which_epoch=str(which_epoch),          # Pipeline override
-            gpu_ids=[self.device.index or 0],      # Pipeline override
+            model='fs',                            
+            name=name,                             
+            checkpoints_dir=str(checkpoints_dir),  
+            which_epoch=str(which_epoch),          
+            gpu_ids=[self.device.index or 0],      
             verbose=False,
             resize_or_crop="none",
             load_pretrain="",
@@ -71,7 +75,7 @@ class SimSwapFaceSwapper:
             export_onnx=None,
             engine=None,
             onnx=None,
-            Arc_path=str(arcface_ckpt),            # Pipeline override
+            Arc_path=str(arcface_ckpt),            
             pic_a_path='G:/swap_data/ID/elon-musk-hero-image.jpeg',
             pic_b_path='./demo_file/multi_people.jpg',
             pic_specific_path='./crop_224/zrf.jpg',
@@ -82,12 +86,11 @@ class SimSwapFaceSwapper:
             id_thres=0.03,
             no_simswaplogo=False,
             use_mask=False,
-            crop_size=int(crop_size)               # Pipeline override (usually 224)
+            crop_size=int(crop_size)               
         )
 
         torch.cuda.set_device(self.device.index or 0)
-        self.model = fsModel()
-        self.model.initialize(opt)
+        self.model = create_model(opt)
         self.model.eval()
 
         self.crop_size = int(crop_size)
