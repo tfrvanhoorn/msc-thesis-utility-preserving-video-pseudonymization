@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
 
 import torch
@@ -9,6 +10,13 @@ current_file = Path(__file__).resolve()
 
 SRC_ROOT = current_file.parents[2] 
 PROJECT_ROOT = current_file.parents[3]
+
+# Silence PyTorch bilinear align_corners warning
+warnings.filterwarnings(
+    "ignore",
+    message="Default upsampling behavior when mode=bilinear is changed to align_corners=False since 0.4.0",
+    category=UserWarning,
+)
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))

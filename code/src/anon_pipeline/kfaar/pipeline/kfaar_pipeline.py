@@ -200,10 +200,10 @@ class KfaarPipeline:
                             if crop_h > 0 and crop_w > 0:
                                 # Resize the swapped face crop to fit the bounding box
                                 swapped_resized = torch.nn.functional.interpolate(
-                                    swapped.unsqueeze(0), 
-                                    size=(crop_h, crop_w), 
-                                    mode="bilinear", 
-                                    align_corners=False
+                                    swapped.unsqueeze(0),
+                                    size=(crop_h, crop_w),
+                                    mode="bilinear",
+                                    align_corners=False,
                                 ).squeeze(0)
                                 
                                 # Overwrite the pixels in the original frame!
