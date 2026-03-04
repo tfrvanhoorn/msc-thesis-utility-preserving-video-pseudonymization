@@ -39,7 +39,7 @@ class Face_detect_crop:
             if onnx_file.find('_selfgen_')>0:
                 #print('ignore:', onnx_file)
                 continue
-            model = model_zoo.get_model(onnx_file)
+            model = model_zoo.get_model(onnx_file, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
             if model.taskname not in self.models:
                 print('find model:', onnx_file, model.taskname)
                 self.models[model.taskname] = model
