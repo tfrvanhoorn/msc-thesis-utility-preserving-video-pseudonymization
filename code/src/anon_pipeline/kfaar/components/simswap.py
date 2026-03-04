@@ -105,72 +105,71 @@ class SimSwapFaceSwapper:
         return tensor.to(target_device)
 
     def swap(self, source_img: torch.Tensor, target_img: torch.Tensor) -> Optional[torch.Tensor]:
-        try:
-            from util.reverse2original import reverse2wholeimage # type: ignore
-            
-            # --- 1. Prepare Images ---
-            # Ensure tensors are [0, 1]
-            if source_img.min() < 0.0: source_img = (source_img + 1.0) / 2.0
-            if target_img.min() < 0.0: target_img = (target_img + 1.0) / 2.0
-            source_img = source_img.clamp(0.0, 1.0)
-            target_img = target_img.clamp(0.0, 1.0)
+        from util.reverse2original import reverse2wholeimage # type: ignore
+        
+        # --- 1. Prepare Images ---
+        # Ensure tensors are [0, 1]
+        if source_img.min() < 0.0: source_img = (source_img + 1.0) / 2.0
+        if target_img.min() < 0.0: target_img = (target_img + 1.0) / 2.0
+        source_img = source_img.clamp(0.0, 1.0)
+        target_img = target_img.clamp(0.0, 1.0)
 
-            src_bgr = self._tensor_to_bgr(source_img)
-            tgt_bgr = self._tensor_to_bgr(target_img)
+        src_bgr = self._tensor_to_bgr(source_img)
+        tgt_bgr = self._tensor_to_bgr(target_img)
 
-            # --- 2. Identity Extraction (Source) ---
-            img_a_align_crop_list, _ = self.app.get(src_bgr, self.crop_size)
-            if not img_a_align_crop_list:
-                # Fallback: if source is already an aligned StyleGAN output, use it directly
-                src_crop = cv2.resize(src_bgr, (self.crop_size, self.crop_size))
-            else:
-                src_crop = img_a_align_crop_list[0]
+        # --- 2. Identity Extraction (Source) ---
+        img_a_align_crop_list, _ = self.app.get(src_bgr, self.crop_size)
+        if not img_a_align_crop_list:
+            # Fallback: if source is already an aligned StyleGAN output, use it directly
+            src_crop = cv2.resize(src_bgr, (self.crop_size, self.crop_size))
+        else:
+            src_crop = img_a_align_crop_list[0]
 
-            img_a_pil = Image.fromarray(cv2.cvtColor(src_crop, cv2.COLOR_BGR2RGB))
-            img_id = self.transformer_Arcface(img_a_pil).unsqueeze(0).to(self.device)
+        img_a_pil = Image.fromarray(cv2.cvtColor(src_crop, cv2.COLOR_BGR2RGB))
+        img_id = self.transformer_Arcface(img_a_pil).unsqueeze(0).to(self.device)
 
-            img_id_downsample = F.interpolate(img_id, size=(112, 112))
-            latend_id = self.model.netArc(img_id_downsample)
-            latend_id = F.normalize(latend_id, p=2, dim=1)
+        img_id_downsample = F.interpolate(img_id, size=(112, 112))
+        latend_id = self.model.netArc(img_id_downsample)
+        latend_id = F.normalize(latend_id, p=2, dim=1)
 
-            # --- 3. Target Extraction and Swap ---
-            img_b_align_crop_list, b_mat_list = self.app.get(tgt_bgr, self.crop_size)
-            if not img_b_align_crop_list:
-                return None # No face found in target frame
+        # --- 3. Target Extraction and Swap ---
+        img_b_align_crop_list, b_mat_list = self.app.get(tgt_bgr, self.crop_size)
+        if not img_b_align_crop_list:
+            return None # No face found in target frame
 
-            swap_result_list = []
-            b_align_crop_tensor_list = []
+        swap_result_list = []
+        b_align_crop_tensor_list = []
 
-            for b_align_crop in img_b_align_crop_list:
-                crop_rgb = cv2.cvtColor(b_align_crop, cv2.COLOR_BGR2RGB)
-                b_align_crop_tensor = torch.from_numpy(crop_rgb).float().div(255)
-                b_align_crop_tensor = b_align_crop_tensor.permute(2, 0, 1).unsqueeze(0).to(self.device)
+        for b_align_crop in img_b_align_crop_list:
+            crop_rgb = cv2.cvtColor(b_align_crop, cv2.COLOR_BGR2RGB)
+            b_align_crop_tensor = torch.from_numpy(crop_rgb).float().div(255)
+            b_align_crop_tensor = b_align_crop_tensor.permute(2, 0, 1).unsqueeze(0).to(self.device)
 
-                swap_result = self.model(None, b_align_crop_tensor, latend_id, None, True)[0]
-                swap_result_list.append(swap_result)
-                b_align_crop_tensor_list.append(b_align_crop_tensor)
+            swap_result = self.model(None, b_align_crop_tensor, latend_id, None, True)[0]
+            swap_result_list.append(swap_result)
+            b_align_crop_tensor_list.append(b_align_crop_tensor)
 
-            # --- 4. Reverse Mapping ---
-            # reverse2wholeimage forces a save to disk. We use a temp file to bridge it back to memory.
-            # (In the future, editing reverse2wholeimage to just return the image is faster for training).
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_path = tmp.name
+        # --- 4. Reverse Mapping ---
+        # reverse2wholeimage forces a save to disk. We use a temp file to bridge it back to memory.
+        # (In the future, editing reverse2wholeimage to just return the image is faster for training).
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
 
-            reverse2wholeimage(
-                b_align_crop_tensor_list, swap_result_list, b_mat_list, self.crop_size,
-                tgt_bgr, self.logoclass, tmp_path, no_simswaplogo=True,
-                pasring_model=self.net, use_mask=self.use_mask, norm=self.spNorm
-            )
+        reverse2wholeimage(
+            b_align_crop_tensor_list, swap_result_list, b_mat_list, self.crop_size,
+            tgt_bgr, self.logoclass, tmp_path, no_simswaplogo=True,
+            pasring_model=self.net, use_mask=self.use_mask, norm=self.spNorm
+        )
 
-            result_bgr = cv2.imread(tmp_path)
-            os.remove(tmp_path)
+        result_bgr = cv2.imread(tmp_path)
+        os.remove(tmp_path)
 
-            if result_bgr is None:
-                return None
-
-            return self._bgr_to_tensor(result_bgr, target_img.device)
-
-        except Exception as e:
-            import logging
-            logging.error(f"FaceSwap failed: {e}")
+        if result_bgr is None:
             return None
+
+        return self._bgr_to_tensor(result_bgr, target_img.device)
+
+        # except Exception as e:
+        #     import logging
+        #     logging.error(f"FaceSwap failed: {e}")
+        #     return None
