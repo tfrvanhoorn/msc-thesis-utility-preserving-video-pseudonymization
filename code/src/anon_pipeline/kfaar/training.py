@@ -31,7 +31,12 @@ from anon_pipeline.kfaar.config import (
     SeedConfig,
 )
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline
-from anon_pipeline.kfaar.components import load_stylegan2, load_projector_state_dict, SimSwapFaceSwapper
+from anon_pipeline.kfaar.components import (
+    load_stylegan2,
+    load_projector_state_dict,
+    SimSwapFaceSwapper,
+    DiffusionFaceSwapper,
+)
 from anon_pipeline.shared.data.splits import build_train_test_loaders
 from anon_pipeline.shared.utils.logging import configure_logging
 
@@ -90,8 +95,29 @@ def parse_args():
     parser.add_argument("--save_generated_dir", type=Path, default=None, help="Directory to store generated face images (defaults to output_dir/generated_faces)")
     parser.add_argument("--save_generated_max_per_epoch", type=int, default=100, help="Maximum number of generated samples to store per epoch (set <=0 for no limit)")
 
-    # Face swapping via SimSwap
-    parser.add_argument("--use_face_swapper", action="store_true", help="Enable SimSwap face swapping during training")
+    # Face swapping selector (visual-only by default)
+    parser.add_argument(
+        "--face_swapper",
+        type=str,
+        default="none",
+        choices=["none", "simswap", "diffusion"],
+        help="Choose face swapper backend (none=disabled, simswap, diffusion)",
+    )
+    parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping (overridden by face_swapper != none)")
+    parser.add_argument(
+        "--swap_for_visuals_only",
+        action="store_true",
+        help="Use swapped faces only for visualization; compute losses on StyleGAN outputs",
+    )
+    parser.add_argument(
+        "--swap_for_loss",
+        dest="swap_for_visuals_only",
+        action="store_false",
+        help="Use swapped faces as loss inputs (old behavior)",
+    )
+    parser.set_defaults(swap_for_visuals_only=True)
+
+    # SimSwap options
     parser.add_argument("--simswap_root", type=Path, default=PROJECT_ROOT / "external_libraries" / "SimSwap", help="Path to SimSwap repository root")
     parser.add_argument("--simswap_checkpoints_dir", type=Path, default=None, help="Path to SimSwap checkpoints directory (defaults to simswap_root/checkpoints)")
     parser.add_argument("--simswap_name", type=str, default="people", help="SimSwap experiment name (subfolder in checkpoints_dir)")
@@ -102,6 +128,13 @@ def parse_args():
     parser.add_argument("--simswap_detector_name", type=str, default="antelopev2", help="Face detector name for SimSwap (e.g., antelopev2)")
     parser.add_argument("--simswap_detector_root", type=Path, default=None, help="Path to SimSwap face detector models root (defaults to simswap_root/insightface_func/models)")
 
+    # Diffusion swapper options
+    parser.add_argument("--diffusion_base_model", type=str, default="runwayml/stable-diffusion-inpainting", help="Diffusion inpainting base model")
+    parser.add_argument("--diffusion_ip_adapter_id", type=str, default="h94/IP-Adapter", help="IP-Adapter repo id")
+    parser.add_argument("--diffusion_ip_adapter_weight", type=str, default="ip-adapter-plus-face_sd15.bin", help="IP-Adapter weight file name")
+    parser.add_argument("--diffusion_inference_steps", type=int, default=25, help="Diffusion inference steps")
+    parser.add_argument("--diffusion_ip_adapter_scale", type=float, default=0.7, help="IP-Adapter guidance scale")
+
     return parser.parse_args()
 
 def main():
@@ -109,21 +142,33 @@ def main():
     configure_logging()
     device = torch.device(args.device)
     face_swapper = None
-    if args.use_face_swapper:
-        simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
-        arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
-        face_swapper = SimSwapFaceSwapper(
-            simswap_root=args.simswap_root,
-            checkpoints_dir=simswap_ckpt_dir,
-            name=args.simswap_name,
-            which_epoch=args.simswap_epoch,
-            arcface_ckpt=arcface_ckpt,
-            parsing_ckpt=args.simswap_parsing_ckpt,
-            detector_name=args.simswap_detector_name,
-            detector_root=args.simswap_detector_root,
-            crop_size=args.simswap_crop_size,
-            device=device,
-        )
+    swapper_choice = (args.face_swapper or "none").lower()
+    use_swapper_requested = args.use_face_swapper or swapper_choice != "none"
+    if use_swapper_requested:
+        if swapper_choice == "simswap" or swapper_choice == "none":
+            simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
+            arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
+            face_swapper = SimSwapFaceSwapper(
+                simswap_root=args.simswap_root,
+                checkpoints_dir=simswap_ckpt_dir,
+                name=args.simswap_name,
+                which_epoch=args.simswap_epoch,
+                arcface_ckpt=arcface_ckpt,
+                parsing_ckpt=args.simswap_parsing_ckpt,
+                detector_name=args.simswap_detector_name,
+                detector_root=args.simswap_detector_root,
+                crop_size=args.simswap_crop_size,
+                device=device,
+            )
+        elif swapper_choice == "diffusion":
+            face_swapper = DiffusionFaceSwapper(
+                base_model_id=args.diffusion_base_model,
+                ip_adapter_id=args.diffusion_ip_adapter_id,
+                ip_adapter_weight=args.diffusion_ip_adapter_weight,
+                inference_steps=args.diffusion_inference_steps,
+                ip_adapter_scale=args.diffusion_ip_adapter_scale,
+                device=device,
+            )
     
     # 1. Setup Configurations
     data_options: dict[str, object] = {}
@@ -205,6 +250,8 @@ def main():
     save_max = None if args.save_generated_max_per_epoch is not None and args.save_generated_max_per_epoch <= 0 else args.save_generated_max_per_epoch
 
     # 4. Initialize and Run Trainer
+    use_swapper_flag = face_swapper is not None
+
     trainer = KfaarTrainer(
         pipeline=pipeline,
         train_loader=train_loader,
@@ -228,7 +275,8 @@ def main():
         save_generated_dir=save_dir,
         save_generated_mode=args.save_generated_mode,
         save_generated_max_per_epoch=save_max,
-        use_face_swapper=args.use_face_swapper,
+        use_face_swapper=use_swapper_flag,
+        swap_for_visuals_only=args.swap_for_visuals_only,
     )
 
     logging.info("Starting training loop...")

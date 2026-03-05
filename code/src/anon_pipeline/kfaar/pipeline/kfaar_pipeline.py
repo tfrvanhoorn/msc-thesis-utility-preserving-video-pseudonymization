@@ -107,6 +107,7 @@ class KfaarPipeline:
         batch_index: Optional[int] = None,
         sample_context: Optional[str] = None,
         use_face_swapper: bool = False,
+        swap_for_visuals_only: bool = True,
     ) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
@@ -164,78 +165,64 @@ class KfaarPipeline:
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
-            det_input = img
-            
+            det_input_embed: Optional[torch.Tensor] = None
+
+            # Detect and align the StyleGAN output once; reuse for embedding
+            stylegan_dets = self.detector.detect(img)
+            stylegan_detected = bool(stylegan_dets)
+            aligned_stylegan = None
+            if stylegan_detected:
+                stylegan_top = max(stylegan_dets, key=lambda d: d.score)
+                aligned_stylegan = self.aligner.align(img, stylegan_top).to(device)
+
             if use_face_swapper:
                 if self.face_swapper is None and not self._warned_face_swapper:
                     logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
                     self._warned_face_swapper = True
                 elif self.face_swapper is not None:
-                    
-                    stylegan_dets = self.detector.detect(img)
-                    if stylegan_dets:
-                        stylegan_top = max(stylegan_dets, key=lambda d: d.score)
-                        aligned_stylegan = self.aligner.align(img, stylegan_top).to(device)
-                    else:
-                        aligned_stylegan = img 
-                    
                     target_aligned = aligned_faces[center_idx]
-                    
-                    if target_aligned.numel() > 0:
+                    swapped = None
+                    if target_aligned.numel() > 0 and aligned_stylegan is not None:
                         swapped = self.face_swapper.swap(aligned_stylegan, target_aligned)
-                    else:
-                        swapped = None
 
                     if swapped is not None:
-                        # det_input stays as the cropped face so the embedder works perfectly
-                        det_input = swapped 
-                        
-                        # --- PASTE BACK INTO ORIGINAL CONTEXT ---
-                        # Start with a clean copy of the original full video frame
+                        det_input_embed = aligned_stylegan if swap_for_visuals_only else swapped
+
+                        # Paste the swapped crop back into the original frame for visualization
                         swapped_full = frames_t[center_idx].clone()
-                        
                         if center_detection is not None:
                             bbox = center_detection.bbox.to(device)
                             x1, y1, x2, y2 = bbox.round().long()
                             h, w = swapped_full.shape[1], swapped_full.shape[2]
-                            
+
                             x1, x2 = x1.clamp(0, w), x2.clamp(0, w)
                             y1, y2 = y1.clamp(0, h), y2.clamp(0, h)
-                            
+
                             crop_h, crop_w = (y2 - y1).item(), (x2 - x1).item()
-                            
+
                             if crop_h > 0 and crop_w > 0:
-                                # Resize the swapped face crop to fit the bounding box
                                 swapped_resized = torch.nn.functional.interpolate(
                                     swapped.unsqueeze(0),
                                     size=(crop_h, crop_w),
                                     mode="bilinear",
                                     align_corners=False,
                                 ).squeeze(0)
-                                
-                                # Overwrite the pixels in the original frame!
                                 swapped_full[:, y1:y2, x1:x2] = swapped_resized
 
-                        # Save the full image to the hard drive
                         swapped_images = swapped_full.unsqueeze(0)
-                        # swapped_images = swapped 
-                        
-                        v_embeddings[0] = self.embedder.embed([det_input], with_grad=True)[0]
-                        gen_mask[0] = True
                     elif not self._warned_face_swapper:
                         logger.warning("Face swapper failed to produce output; proceeding without swap.")
                         self._warned_face_swapper = True
 
-            if not (use_face_swapper and swapped_images is not None):
-                dets = self.detector.detect(det_input)
-                if dets:
-                    top = max(dets, key=lambda d: d.score)
-                    aligned = self.aligner.align(det_input, top).to(device)
-                    v_embeddings[0] = self.embedder.embed([aligned], with_grad=True)[0]
-                    gen_mask[0] = True
-                else:
-                    v_embeddings[0] = projected_z[0].sum() * 0.0
-                    self.stats["gen_no_det"] += 1
+            if det_input_embed is None and stylegan_detected:
+                det_input_embed = aligned_stylegan
+
+            if det_input_embed is not None:
+                v_embeddings[0] = self.embedder.embed([det_input_embed], with_grad=True)[0]
+                gen_mask[0] = True
+            else:
+                v_embeddings[0] = projected_z[0].sum() * 0.0
+                self.stats["gen_no_det"] += 1
             
             self._maybe_save_generated(
                 images,
@@ -272,6 +259,7 @@ class KfaarPipeline:
         batch_index: Optional[int] = None,
         sample_context: Optional[str] = None,
         use_face_swapper: bool = False,
+        swap_for_visuals_only: bool = True,
     ) -> KfaarResult:
         with torch.no_grad():
             return self.forward(
@@ -282,6 +270,7 @@ class KfaarPipeline:
                 batch_index=batch_index,
                 sample_context=sample_context,
                 use_face_swapper=use_face_swapper,
+                swap_for_visuals_only=swap_for_visuals_only,
             )
 
     def hpvg_train_step(
@@ -293,6 +282,7 @@ class KfaarPipeline:
         key_2,
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
+        swap_for_visuals_only: bool = True,
         **kwargs,
     ) -> torch.Tensor:
         self.optimizer.zero_grad(set_to_none=True)
@@ -306,6 +296,7 @@ class KfaarPipeline:
             key_2,
             batch_index=batch_index,
             use_face_swapper=use_face_swapper,
+            swap_for_visuals_only=swap_for_visuals_only,
             **kwargs,
         )
         
@@ -328,6 +319,7 @@ class KfaarPipeline:
         margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0,
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
+        swap_for_visuals_only: bool = True,
     ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         
         device = self.device
@@ -348,6 +340,7 @@ class KfaarPipeline:
                 key_tag="k1",
                 batch_index=batch_index,
                 use_face_swapper=use_face_swapper,
+                swap_for_visuals_only=swap_for_visuals_only,
             )
             res2 = self.forward(
                 frames[b, :seq_lens_list[b]],
@@ -356,6 +349,7 @@ class KfaarPipeline:
                 key_tag="k2",
                 batch_index=batch_index,
                 use_face_swapper=use_face_swapper,
+                swap_for_visuals_only=swap_for_visuals_only,
             )
 
             proj_norm_terms.append(res1.projected_z.pow(2).mean())
