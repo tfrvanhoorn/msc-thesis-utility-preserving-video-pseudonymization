@@ -182,36 +182,46 @@ class KfaarPipeline:
                     logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
                     self._warned_face_swapper = True
                 elif self.face_swapper is not None:
-                    target_aligned = aligned_faces[center_idx]
+                    
+                    # === SMART ROUTING ===
+                    # If it's the diffusion swapper, give it the full frame so it can inverse-warp perfectly.
+                    # Otherwise, give it the KFAAR crop for legacy swappers.
+                    is_diffusion = type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+                    target_to_swap = frames_t[center_idx] if is_diffusion else aligned_faces[center_idx]
+                    
                     swapped = None
-                    if target_aligned.numel() > 0 and aligned_stylegan is not None:
-                        swapped = self.face_swapper.swap(aligned_stylegan, target_aligned)
+                    if target_to_swap.numel() > 0 and aligned_stylegan is not None:
+                        swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
 
                     if swapped is not None:
                         det_input_embed = aligned_stylegan if swap_for_visuals_only else swapped
 
-                        # Paste the swapped crop back into the original frame for visualization
-                        swapped_full = frames_t[center_idx].clone()
-                        if center_detection is not None:
-                            bbox = center_detection.bbox.to(device)
-                            x1, y1, x2, y2 = bbox.round().long()
-                            h, w = swapped_full.shape[1], swapped_full.shape[2]
+                        if is_diffusion:
+                            # DiffusionFaceSwapper natively returns the seamlessly blended full frame
+                            swapped_images = swapped.unsqueeze(0)
+                        else:
+                            # Legacy naive paste-back for other swappers that return tight crops
+                            swapped_full = frames_t[center_idx].clone()
+                            if center_detection is not None:
+                                bbox = center_detection.bbox.to(device)
+                                x1, y1, x2, y2 = bbox.round().long()
+                                h, w = swapped_full.shape[1], swapped_full.shape[2]
 
-                            x1, x2 = x1.clamp(0, w), x2.clamp(0, w)
-                            y1, y2 = y1.clamp(0, h), y2.clamp(0, h)
+                                x1, x2 = x1.clamp(0, w), x2.clamp(0, w)
+                                y1, y2 = y1.clamp(0, h), y2.clamp(0, h)
 
-                            crop_h, crop_w = (y2 - y1).item(), (x2 - x1).item()
+                                crop_h, crop_w = (y2 - y1).item(), (x2 - x1).item()
 
-                            if crop_h > 0 and crop_w > 0:
-                                swapped_resized = torch.nn.functional.interpolate(
-                                    swapped.unsqueeze(0),
-                                    size=(crop_h, crop_w),
-                                    mode="bilinear",
-                                    align_corners=False,
-                                ).squeeze(0)
-                                swapped_full[:, y1:y2, x1:x2] = swapped_resized
+                                if crop_h > 0 and crop_w > 0:
+                                    swapped_resized = torch.nn.functional.interpolate(
+                                        swapped.unsqueeze(0),
+                                        size=(crop_h, crop_w),
+                                        mode="bilinear",
+                                        align_corners=False,
+                                    ).squeeze(0)
+                                    swapped_full[:, y1:y2, x1:x2] = swapped_resized
 
-                        swapped_images = swapped_full.unsqueeze(0)
+                            swapped_images = swapped_full.unsqueeze(0)
                     elif not self._warned_face_swapper:
                         logger.warning("Face swapper failed to produce output; proceeding without swap.")
                         self._warned_face_swapper = True
