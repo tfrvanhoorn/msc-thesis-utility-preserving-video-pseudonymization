@@ -416,6 +416,8 @@ class DiffusionFaceSwapper:
                     num_inference_steps=self.inference_steps,
                     generator=generator,
                     guidance_scale=self.guidance_scale,
+                    # === ADD THIS LINE ===
+                    controlnet_conditioning_scale=1.0, 
                 ).images[0]
 
                 # --- Compositing & Resizing ---
