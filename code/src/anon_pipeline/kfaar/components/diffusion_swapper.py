@@ -362,12 +362,6 @@ class DiffusionFaceSwapper:
                     source_aligned = (source_aligned + 1.0) / 2.0
                 if target_aligned.min() < 0.0:
                     target_aligned = (target_aligned + 1.0) / 2.0
-        try:
-            with torch.no_grad():
-                if source_aligned.min() < 0.0:
-                    source_aligned = (source_aligned + 1.0) / 2.0
-                if target_aligned.min() < 0.0:
-                    target_aligned = (target_aligned + 1.0) / 2.0
 
                 source_aligned = source_aligned.clamp(0.0, 1.0)
                 target_aligned = target_aligned.clamp(0.0, 1.0)
