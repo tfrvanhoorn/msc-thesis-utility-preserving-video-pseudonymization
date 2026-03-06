@@ -362,7 +362,15 @@ class DiffusionFaceSwapper:
                     source_aligned = (source_aligned + 1.0) / 2.0
                 if target_aligned.min() < 0.0:
                     target_aligned = (target_aligned + 1.0) / 2.0
+        try:
+            with torch.no_grad():
+                if source_aligned.min() < 0.0:
+                    source_aligned = (source_aligned + 1.0) / 2.0
+                if target_aligned.min() < 0.0:
+                    target_aligned = (target_aligned + 1.0) / 2.0
 
+                source_aligned = source_aligned.clamp(0.0, 1.0)
+                target_aligned = target_aligned.clamp(0.0, 1.0)
                 source_aligned = source_aligned.clamp(0.0, 1.0)
                 target_aligned = target_aligned.clamp(0.0, 1.0)
 
@@ -370,10 +378,17 @@ class DiffusionFaceSwapper:
 
                 source_pil = self._tensor_to_pil(source_aligned)
                 target_pil = self._tensor_to_pil(target_aligned)
+                source_pil = self._tensor_to_pil(source_aligned)
+                target_pil = self._tensor_to_pil(target_aligned)
 
                 src = self._prepare_aligned_face(source_pil)
                 tar = self._prepare_aligned_face(target_pil)
+                src = self._prepare_aligned_face(source_pil)
+                tar = self._prepare_aligned_face(target_pil)
 
+                image_src_crop256 = src["image_256"]
+                images_src = src["image_512"]
+                clip_input_src_tensors = src["clip"]
                 image_src_crop256 = src["image_256"]
                 images_src = src["image_512"]
                 clip_input_src_tensors = src["clip"]
@@ -389,7 +404,19 @@ class DiffusionFaceSwapper:
                 gt_d3d_coeff = self.net_d3dfr(image_tar_crop256)
                 gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
                 gt_pts68 = self.bfm_facemodel.get_lm68(gt_d3d_coeff)
+                # --- 3D Landmark & Expression Transfer ---
+                src_d3d_coeff = self.net_d3dfr(image_src_crop256)
+                gt_d3d_coeff = self.net_d3dfr(image_tar_crop256)
+                gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
+                gt_pts68 = self.bfm_facemodel.get_lm68(gt_d3d_coeff)
 
+                im_pts70 = self._draw_pts70_batch(
+                    gt_pts68,
+                    gt_d3d_coeff[:, 257:],
+                    image_tar_warpmat256,
+                    self.test_image_size,
+                    return_pt=True,
+                ).to(images_tar)
                 im_pts70 = self._draw_pts70_batch(
                     gt_pts68,
                     gt_d3d_coeff[:, 257:],
@@ -401,7 +428,13 @@ class DiffusionFaceSwapper:
                 # --- Occlusion-Aware Target Masking ---
                 face_masks_tar, blend_mask = self._build_swap_mask(images_tar)
                 controlnet_image_swap = (im_pts70 * face_masks_tar + images_tar * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
+                # --- Occlusion-Aware Target Masking ---
+                face_masks_tar, blend_mask = self._build_swap_mask(images_tar)
+                controlnet_image_swap = (im_pts70 * face_masks_tar + images_tar * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
 
+                # --- Embeddings ---
+                faceid = self.net_arcface(F.interpolate(image_src_crop256, [128, 128], mode="bilinear", align_corners=False))
+                encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
                 # --- Embeddings ---
                 faceid = self.net_arcface(F.interpolate(image_src_crop256, [128, 128], mode="bilinear", align_corners=False))
                 encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
@@ -411,7 +444,26 @@ class DiffusionFaceSwapper:
                 
                 tar_last_hidden = self.net_vision_encoder(clip_input_tar_tensors).last_hidden_state
                 controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
+                src_last_hidden = self.net_vision_encoder(clip_input_src_tensors).last_hidden_state
+                _ = self.net_image2token(src_last_hidden).to(dtype=self.weight_dtype)
+                
+                tar_last_hidden = self.net_vision_encoder(clip_input_tar_tensors).last_hidden_state
+                controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
 
+                # --- Diffusion Generation ---
+                self._set_seed(self.seed)
+                generator = torch.Generator(device=self.device).manual_seed(self.seed)
+                image = self.pipe(
+                    prompt_embeds=encoder_hidden_states_src,
+                    negative_prompt_embeds=self.empty_prompt_token,
+                    controlnet_prompt_embeds=controlnet_encoder_hidden_states_tar,
+                    controlnet_negative_prompt_embeds=self.empty_prompt_token,
+                    image=controlnet_image_swap,
+                    num_inference_steps=self.inference_steps,
+                    generator=generator,
+                    guidance_scale=self.guidance_scale,
+                    controlnet_conditioning_scale=1.0, 
+                ).images[0]
                 # --- Diffusion Generation ---
                 self._set_seed(self.seed)
                 generator = torch.Generator(device=self.device).manual_seed(self.seed)
