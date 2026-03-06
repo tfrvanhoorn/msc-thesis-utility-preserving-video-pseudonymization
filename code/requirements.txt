@@ -1,9 +1,9 @@
-# --- Original Requirements (Kept) ---
+# --- Core Base Requirements ---
 pyyaml>=6.0
 pillow>=9.5.0
 stringzilla==3.11.3
 onnxruntime-gpu==1.14.1
-pandas
+pandas<2.1.0          # Pinned: pandas>=2.1.0 requires Python 3.9+
 typing_extensions>=4.7.1
 facenet-pytorch==2.4.1
 ninja==1.11.1.4
@@ -16,21 +16,22 @@ accelerate==0.28.0
 huggingface-hub==0.22.2
 
 # --- Modified Requirements (Version Downgrades) ---
-# numpy==1.24.4
-numpy==1.23.5  # Downgraded to prevent object array/compatibility issues with SimSwap/ONNX
+numpy==1.23.5         # Downgraded for SimSwap/ONNX object array compatibility
 insightface==0.7.3
-# insightface==0.2.1  # Replaced with SimSwap-compatible version (v0.7.x breaks imports)
-# opencv-python-headless==4.12.0.88
-opencv-python-headless==4.10.0.84 # Adjusted to a more stable version for Python 3.11/SimSwap
+opencv-python-headless==4.10.0.84
 
 # --- Added Requirements (Specific to SimSwap) ---
 moviepy==1.0.3        # Required for video frame management
 imageio-ffmpeg        # Backend for moviepy
-onnx                  # Required for the face detector modules
+onnx==1.14.1          # Pinned to match onnxruntime-gpu version
 timm==0.5.4           # Dependency for the SimSwap model architecture
 tqdm                  # Progress bar for long swap operations
+
+# --- fastai & Face-Adapter Requirements ---
 fastai                # Required by Face-Adapter pipeline module import
-matplotlib            # Required by Face-Adapter landmark drawing utilities
+spacy<3.8.0           # Pinned: prevents NumPy 2.0 build crash in blis dependency
+scipy<1.11.0          # Pinned: scipy>=1.11.0 requires Python 3.9+
+matplotlib<3.8.0      # Pinned: matplotlib>=3.8.0 requires Python 3.9+
 einops                # Face-Adapter dependency
 safetensors           # Face-Adapter dependency
 omegaconf             # Face-Adapter dependency

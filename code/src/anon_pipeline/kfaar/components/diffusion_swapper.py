@@ -179,6 +179,13 @@ class DiffusionFaceSwapper:
                 )
             )
 
+            # === NEW: Load the 19-class parsing model for occlusion-aware target masking ===
+            model_parsing = importlib.import_module("third_party.model_parsing")
+            self.net_seg_parsing = model_parsing.get_face_parsing(
+                str(self.checkpoint_dir / "third_party" / "79999_iter.pth")
+            ).eval().to(self.device)
+            # ===============================================================================
+
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             self.app = FaceAnalysis(name=detector_name, root=str(self.checkpoint_dir / "third_party"), providers=providers)
             self.app.prepare(ctx_id=self.device.index or 0, det_size=(detector_size, detector_size))
@@ -264,6 +271,43 @@ class DiffusionFaceSwapper:
             "warp_mat_256": warp_mat_256.reshape((1, 2, 3)),
             "pil_512": image_crop512_pil,
         }
+    
+    def _build_swap_mask(self, images_tar: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generates occlusion-aware face mask and blend mask using the 19-class parser."""
+        # 19 Classes: (0, 'background'), (1, 'skin'), (2, 'l_brow'), (3, 'r_brow'), (4, 'l_eye'), (5, 'r_eye'),
+        # (6, 'eye_g'), (7, 'l_ear'), (8, 'r_ear'), (9, 'ear_r'), (10, 'nose'), (11, 'mouth'), (12, 'u_lip'), 
+        # (13, 'l_lip'), (14, 'neck'), (15, 'neck_l'), (16, 'cloth'), (17, 'hair'), (18, 'hat')
+        
+        seg_pred = self.net_seg_parsing(images_tar)[0]
+        masks_tar = torch.argmax(
+            F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode='bilinear', align_corners=False), 
+            dim=1, keepdim=True
+        ) 
+
+        # Build base face mask (skin, brows, eyes, nose, mouth) minus glasses
+        mask_0_6 = (masks_tar > 0) & (masks_tar < 7)
+        mask_9_14 = (masks_tar > 9) & (masks_tar < 14)
+        face_masks_tar = torch.logical_or(mask_0_6, mask_9_14).float() - (masks_tar == 6).float()
+        
+        # Build extended face mask including ears, minus earrings and glasses
+        mask_0_14 = (masks_tar > 0) & (masks_tar < 14)
+        face_masks_tar_withear = mask_0_14.float() - (masks_tar == 9).float() - (masks_tar == 6).float()
+        
+        # Build occlusion mask (glasses, earrings, necklace, hat)
+        occ_mask = ((masks_tar == 6) | (masks_tar == 9) | (masks_tar == 15) | (masks_tar == 18)).float() 
+
+        # Expand mask and apply occlusions
+        face_masks_tar = torch.max(face_masks_tar_withear, F.max_pool2d(face_masks_tar, kernel_size=65, stride=1, padding=32))
+        face_masks_tar = face_masks_tar * (1 - occ_mask)
+        face_masks_tar = F.max_pool2d(face_masks_tar, kernel_size=5, stride=1, padding=2)
+        
+        # Generate the blurred blend mask for final compositing
+        face_masks_tar_pad = F.pad(face_masks_tar, (16, 16, 16, 16), "constant", 0)
+        blend_mask = F.max_pool2d(face_masks_tar_pad, kernel_size=17, stride=1, padding=8)
+        blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
+        blend_mask = blend_mask[:, :, 16:528, 16:528]
+
+        return face_masks_tar, blend_mask
 
     def _build_blend_mask(self, face_mask: torch.Tensor) -> torch.Tensor:
         face_masks_tar_pad = F.pad(face_mask, (16, 16, 16, 16), "constant", 0)
@@ -299,6 +343,7 @@ class DiffusionFaceSwapper:
                 clip_input_tar_tensors = tar["clip"]
                 image_tar_warpmat256 = tar["warp_mat_256"]
 
+                # --- 3D Landmark & Expression Transfer ---
                 src_d3d_coeff = self.net_d3dfr(image_src_crop256)
                 gt_d3d_coeff = self.net_d3dfr(image_tar_crop256)
                 gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
@@ -312,18 +357,21 @@ class DiffusionFaceSwapper:
                     return_pt=True,
                 ).to(images_tar)
 
-                face_masks_tar = (self.net_seg_res18(torch.cat([images_src, im_pts70], dim=1)) > 0.5).float()
-                blend_mask = self._build_blend_mask(face_masks_tar)
+                # --- NEW: Occlusion-Aware Target Masking ---
+                face_masks_tar, blend_mask = self._build_swap_mask(images_tar)
                 controlnet_image_swap = (im_pts70 * face_masks_tar + images_tar * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
 
+                # --- Embeddings ---
                 faceid = self.net_arcface(F.interpolate(image_src_crop256, [128, 128], mode="bilinear", align_corners=False))
                 encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
 
                 src_last_hidden = self.net_vision_encoder(clip_input_src_tensors).last_hidden_state
-                _ = self.net_image2token(src_last_hidden).to(dtype=self.weight_dtype)
+                _ = self.net_image2token(src_last_hidden).to(dtype=self.weight_dtype) # (Original repo computes this but doesn't use it in swap)
+                
                 tar_last_hidden = self.net_vision_encoder(clip_input_tar_tensors).last_hidden_state
                 controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
 
+                # --- Diffusion Generation ---
                 self._set_seed(self.seed)
                 generator = torch.Generator(device=self.device).manual_seed(self.seed)
                 image = self.pipe(
@@ -337,6 +385,7 @@ class DiffusionFaceSwapper:
                     guidance_scale=self.guidance_scale,
                 ).images[0]
 
+                # --- Compositing & Resizing ---
                 swap_res_tensor = self.pil2tensor(image).view(1, 3, self.test_image_size, self.test_image_size).to(images_tar)
                 swap_res_tensor = swap_res_tensor * blend_mask + images_tar * (1 - blend_mask)
                 swapped = swap_res_tensor[0].add(1.0).div(2.0).clamp(0.0, 1.0)
