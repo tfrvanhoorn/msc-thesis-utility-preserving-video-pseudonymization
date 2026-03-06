@@ -32,10 +32,10 @@ fastai                # Required by Face-Adapter pipeline module import
 spacy<3.8.0           # Pinned: prevents NumPy 2.0 build crash in blis dependency
 scipy<1.11.0          # Pinned: scipy>=1.11.0 requires Python 3.9+
 matplotlib<3.8.0      # Pinned: matplotlib>=3.8.0 requires Python 3.9+
-einops                # Face-Adapter dependency
-safetensors           # Face-Adapter dependency
-omegaconf             # Face-Adapter dependency
-peft                  # Face-Adapter dependency
+einops==0.7.0         # Pinned: Stable version for Spring 2024 PyTorch ecosystems
+safetensors==0.4.2    # Pinned: Compatible with huggingface-hub==0.22.2 and transformers==4.38.2
+omegaconf==2.3.0      # Pinned: Standard stable version for Stable Diffusion pipelines
+peft==0.10.0          # Pinned: Compatible with huggingface-hub==0.22.2
 
 # --- Core PyTorch (Uncomment if needed, or keep your local install) ---
 # torch==1.8.1
