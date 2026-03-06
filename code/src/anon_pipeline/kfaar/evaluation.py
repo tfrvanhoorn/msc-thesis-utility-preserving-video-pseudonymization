@@ -146,11 +146,22 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Diffusion swapper options
-    parser.add_argument("--diffusion_base_model", type=str, default="runwayml/stable-diffusion-inpainting", help="Diffusion inpainting base model")
-    parser.add_argument("--diffusion_ip_adapter_id", type=str, default="h94/IP-Adapter", help="IP-Adapter repo id")
-    parser.add_argument("--diffusion_ip_adapter_weight", type=str, default="ip-adapter-plus-face_sd15.bin", help="IP-Adapter weight file name")
-    parser.add_argument("--diffusion_inference_steps", type=int, default=25, help="Diffusion inference steps")
-    parser.add_argument("--diffusion_ip_adapter_scale", type=float, default=0.7, help="IP-Adapter guidance scale")
+    parser.add_argument("--faceadapter_root", type=Path, default=PROJECT_ROOT / "external_libraries" / "Face-Adapter", help="Path to Face-Adapter repository root")
+    parser.add_argument("--faceadapter_checkpoint_dir", type=Path, default=None, help="Path to FaceAdapter checkpoints (defaults to faceadapter_root/checkpoints)")
+    parser.add_argument("--faceadapter_base_model", type=str, default="runwayml/stable-diffusion-v1-5", help="Base Stable Diffusion model for FaceAdapter")
+    parser.add_argument("--faceadapter_cache_dir", type=Path, default=None, help="Cache directory for HF model files (optional)")
+    parser.add_argument("--faceadapter_use_cache", action="store_true", help="Use local-only cached HF model files for FaceAdapter")
+    parser.add_argument("--faceadapter_inference_steps", type=int, default=25, help="FaceAdapter diffusion inference steps")
+    parser.add_argument("--faceadapter_guidance_scale", type=float, default=5.0, help="FaceAdapter guidance scale")
+    parser.add_argument("--faceadapter_crop_ratio", type=float, default=0.81, help="Face crop ratio used by FaceAdapter")
+    parser.add_argument("--faceadapter_seed", type=int, default=0, help="Fixed random seed for deterministic FaceAdapter inference")
+
+    # Deprecated diffusion aliases kept for backward compatibility
+    parser.add_argument("--diffusion_base_model", type=str, default=None, help="[Deprecated] Alias for --faceadapter_base_model")
+    parser.add_argument("--diffusion_ip_adapter_id", type=str, default=None, help="[Deprecated] Unused for FaceAdapter backend")
+    parser.add_argument("--diffusion_ip_adapter_weight", type=str, default=None, help="[Deprecated] Unused for FaceAdapter backend")
+    parser.add_argument("--diffusion_inference_steps", type=int, default=None, help="[Deprecated] Alias for --faceadapter_inference_steps")
+    parser.add_argument("--diffusion_ip_adapter_scale", type=float, default=None, help="[Deprecated] Alias for --faceadapter_guidance_scale")
 
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
@@ -290,12 +301,21 @@ def main() -> None:
                 device=device,
             )
         elif swapper_choice == "diffusion":
+            faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
+            faceadapter_base_model = args.diffusion_base_model or args.faceadapter_base_model
+            faceadapter_steps = args.diffusion_inference_steps if args.diffusion_inference_steps is not None else args.faceadapter_inference_steps
+            faceadapter_guidance = args.diffusion_ip_adapter_scale if args.diffusion_ip_adapter_scale is not None else args.faceadapter_guidance_scale
+
             face_swapper = DiffusionFaceSwapper(
-                base_model_id=args.diffusion_base_model,
-                ip_adapter_id=args.diffusion_ip_adapter_id,
-                ip_adapter_weight=args.diffusion_ip_adapter_weight,
-                inference_steps=args.diffusion_inference_steps,
-                ip_adapter_scale=args.diffusion_ip_adapter_scale,
+                faceadapter_root=args.faceadapter_root,
+                checkpoint_dir=faceadapter_ckpt_dir,
+                base_model_id=faceadapter_base_model,
+                cache_dir=args.faceadapter_cache_dir,
+                use_cache=args.faceadapter_use_cache,
+                inference_steps=faceadapter_steps,
+                guidance_scale=faceadapter_guidance,
+                crop_ratio=args.faceadapter_crop_ratio,
+                seed=args.faceadapter_seed,
                 device=device,
             )
 

@@ -29,6 +29,12 @@ imageio-ffmpeg        # Backend for moviepy
 onnx                  # Required for the face detector modules
 timm==0.5.4           # Dependency for the SimSwap model architecture
 tqdm                  # Progress bar for long swap operations
+fastai                # Required by Face-Adapter pipeline module import
+matplotlib            # Required by Face-Adapter landmark drawing utilities
+einops                # Face-Adapter dependency
+safetensors           # Face-Adapter dependency
+omegaconf             # Face-Adapter dependency
+peft                  # Face-Adapter dependency
 
 # --- Core PyTorch (Uncomment if needed, or keep your local install) ---
 # torch==1.8.1
