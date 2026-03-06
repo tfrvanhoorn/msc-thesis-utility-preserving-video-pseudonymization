@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Sequence
@@ -91,6 +92,7 @@ class KfaarPipeline:
         self._current_epoch = 0
         self.truncation_psi = truncation_psi
         if self._save_enabled:
+            self._clear_dir(self._save_dir)
             self._save_dir.mkdir(parents=True, exist_ok=True)
             if self._save_dir_images is not None:
                 self._save_dir_images.mkdir(parents=True, exist_ok=True)
@@ -433,6 +435,17 @@ class KfaarPipeline:
             return self._save_dir_videos
         return self._save_dir_videos / f"epoch_{self._current_epoch:04d}"
 
+    @staticmethod
+    def _clear_dir(path: Path) -> None:
+        """Remove all contents of a directory without deleting the directory itself."""
+        if not path.exists():
+            return
+        for child in path.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
     def configure_saving(
         self,
         save_dir: Path,
@@ -447,6 +460,7 @@ class KfaarPipeline:
         self._save_dir = Path(save_dir)
         self._save_dir_images = self._save_dir / "images"
         self._save_dir_videos = self._save_dir / "videos"
+        self._clear_dir(self._save_dir)
         self._save_dir.mkdir(parents=True, exist_ok=True)
         self._save_dir_images.mkdir(parents=True, exist_ok=True)
         if save_videos:
