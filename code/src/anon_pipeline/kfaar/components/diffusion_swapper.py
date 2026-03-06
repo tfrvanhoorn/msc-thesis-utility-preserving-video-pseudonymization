@@ -289,18 +289,19 @@ class DiffusionFaceSwapper:
             bbox = dets[0:4].reshape((2, 2))
             bbox_pts4 = ds.get_box_lm4p(bbox)
 
-        # Map the input crop to a canonical 512x512 space
+        # Map crop to Face-Adapter 512x512 space
         warp_mat_crop = ds.transformation_from_points(bbox_pts4, ds.mean_box_lm4p_512)
         image_crop512 = cv2.warpAffine(image_np, warp_mat_crop, (self.test_image_size, self.test_image_size), flags=cv2.INTER_LINEAR)
         image_crop512_pil = Image.fromarray(image_crop512)
 
-        # Second alignment for the 256x256 ID/Structure extractors
+        # Map 512x512 to 256x256 for feature extractors
         face_info_512 = self._detect_face_info(image_crop512)
         pts5 = face_info_512["kps"]
         warp_mat_256 = ds.get_affine_transform(pts5, ds.mean_face_lm5p_256)
         image_crop256 = cv2.warpAffine(image_crop512, warp_mat_256, (256, 256), flags=cv2.INTER_LINEAR)
         image_crop256_pil = Image.fromarray(image_crop256)
 
+        # Standardizing normalization: self.pil2tensor usually maps to [-1, 1]
         image_256_t = self.pil2tensor(image_crop256_pil).view(1, 3, 256, 256).to(self.device)
         image_512_t = self.pil2tensor(image_crop512_pil).view(1, 3, self.test_image_size, self.test_image_size).to(self.device)
         clip_t = self.clip_image_processor(images=image_crop512_pil, return_tensors="pt").pixel_values.view(-1, 3, 224, 224).to(self.device)
@@ -360,16 +361,15 @@ class DiffusionFaceSwapper:
     def swap(self, source_aligned: torch.Tensor, target_aligned: torch.Tensor) -> torch.Tensor | None:
         try:
             with torch.no_grad():
-                # Normalize inputs to [0, 1] for PIL conversion
-                if source_aligned.min() < 0.0:
-                    source_aligned = (source_aligned + 1.0) / 2.0
-                if target_aligned.min() < 0.0:
+                # Step 1: Ensure input tensors are [0, 1] for PIL conversion
+                # We assume KFAAR sends [0, 1] or [-1, 1]
+                if target_aligned.min() < -0.1:
                     target_aligned = (target_aligned + 1.0) / 2.0
-
-                source_aligned = source_aligned.clamp(0.0, 1.0)
+                if source_aligned.min() < -0.1:
+                    source_aligned = (source_aligned + 1.0) / 2.0
+                
                 target_aligned = target_aligned.clamp(0.0, 1.0)
-
-                # Store original crop dimensions
+                source_aligned = source_aligned.clamp(0.0, 1.0)
                 _, h, w = target_aligned.shape
 
                 source_pil = self._tensor_to_pil(source_aligned)
@@ -378,45 +378,32 @@ class DiffusionFaceSwapper:
                 src = self._prepare_aligned_face(source_pil)
                 tar = self._prepare_aligned_face(target_pil)
 
-                image_src_crop256 = src["image_256"]
-                images_src = src["image_512"]
-                clip_input_src_tensors = src["clip"]
-
-                image_tar_crop256 = tar["image_256"]
-                images_tar = tar["image_512"]
-                clip_input_tar_tensors = tar["clip"]
-                image_tar_warpmat256 = tar["warp_mat_256"]
-                warp_mat_crop_512 = tar["warp_mat_512"]
-
                 # --- 3D Landmark & Expression Transfer ---
-                src_d3d_coeff = self.net_d3dfr(image_src_crop256)
-                gt_d3d_coeff = self.net_d3dfr(image_tar_crop256)
+                src_d3d_coeff = self.net_d3dfr(src["image_256"])
+                gt_d3d_coeff = self.net_d3dfr(tar["image_256"])
                 gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
                 gt_pts68 = self.bfm_facemodel.get_lm68(gt_d3d_coeff)
 
                 im_pts70 = self._draw_pts70_batch(
-                    gt_pts68,
-                    gt_d3d_coeff[:, 257:],
-                    image_tar_warpmat256,
-                    self.test_image_size,
-                    return_pt=True,
-                ).to(images_tar)
+                    gt_pts68, gt_d3d_coeff[:, 257:], tar["warp_mat_256"],
+                    self.test_image_size, return_pt=True
+                ).to(tar["image_512"])
 
-                # --- Face Masking & ControlNet Image ---
-                face_masks_tar, blend_mask = self._build_swap_mask(images_tar)
-                controlnet_image_swap = (im_pts70 * face_masks_tar + images_tar * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
+                # --- Diffusion Generation ---
+                face_masks_tar, blend_mask = self._build_swap_mask(tar["image_512"])
+                controlnet_image_swap = (im_pts70 * face_masks_tar + tar["image_512"] * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
 
-                # --- Embeddings ---
-                faceid = self.net_arcface(F.interpolate(image_src_crop256, [128, 128], mode="bilinear", align_corners=False))
+                faceid = self.net_arcface(F.interpolate(src["image_256"], [128, 128], mode="bilinear", align_corners=False))
                 encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
                 
-                tar_last_hidden = self.net_vision_encoder(clip_input_tar_tensors).last_hidden_state
+                tar_last_hidden = self.net_vision_encoder(tar["clip"]).last_hidden_state
                 controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
 
-                # --- Diffusion Inference ---
                 self._set_seed(self.seed)
                 generator = torch.Generator(device=self.device).manual_seed(self.seed)
-                image = self.pipe(
+                
+                # Generation results in a PIL image
+                gen_pil = self.pipe(
                     prompt_embeds=encoder_hidden_states_src,
                     negative_prompt_embeds=self.empty_prompt_token,
                     controlnet_prompt_embeds=controlnet_encoder_hidden_states_tar,
@@ -428,41 +415,37 @@ class DiffusionFaceSwapper:
                     controlnet_conditioning_scale=1.0,
                 ).images[0]
 
-                # --- Seamless Inverse Warping (The Alignment Fix) ---
-                # 1. Composite in canonical 512 space
-                swap_res_tensor = self.pil2tensor(image).view(1, 3, 512, 512).to(images_tar)
-                swap_res_tensor = swap_res_tensor * blend_mask + images_tar * (1 - blend_mask)
+                # --- Color & Alignment Correction ---
+                # Convert Gen PIL to [0, 255] numpy
+                gen_np = np.array(gen_pil.convert("RGB"))
                 
-                # 2. Convert to numpy for OpenCV transformation
-                swapped_512_np = (swap_res_tensor[0].clamp(-1, 1) * 0.5 + 0.5).mul(255).cpu().numpy().transpose(1, 2, 0).astype(np.uint8)
-                blend_mask_np = blend_mask[0, 0].cpu().numpy()
-                orig_crop_np = np.array(target_pil)
+                # Convert Images_tar (normalized [-1, 1]) back to [0, 255]
+                tar_512_np = (tar["image_512"][0].cpu().numpy().transpose(1, 2, 0) * 127.5 + 127.5).clip(0, 255).astype(np.uint8)
+                blend_mask_np = blend_mask[0, 0].cpu().numpy()[:, :, np.newaxis]
 
-                # 3. Project 512x512 result back into original crop coordinates (Inverse Warp)
+                # Composite in 512x512 space
+                composite_512 = (gen_np * blend_mask_np + tar_512_np * (1 - blend_mask_np)).astype(np.uint8)
+
+                # Inverse Warp back to KFAAR crop coordinates
+                orig_crop_np = np.array(target_pil) # [0, 255]
                 inv_face = cv2.warpAffine(
-                    swapped_512_np, 
-                    warp_mat_crop_512, 
-                    (w, h), 
+                    composite_512, tar["warp_mat_512"], (w, h), 
                     flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, 
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=(0, 0, 0)
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0)
                 )
                 
                 inv_mask = cv2.warpAffine(
-                    blend_mask_np, 
-                    warp_mat_crop_512, 
-                    (w, h), 
+                    blend_mask_np.squeeze(), tar["warp_mat_512"], (w, h), 
                     flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, 
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0.0
-                )
-                inv_mask = np.expand_dims(inv_mask, axis=2)
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+                )[:, :, np.newaxis]
 
-                # 4. Final blend back onto original crop background
-                final_np = inv_face * inv_mask + orig_crop_np * (1.0 - inv_mask)
-                final_tensor = self.pil2tensor(Image.fromarray(final_np.astype(np.uint8)))
+                # Final blend with original background to remove edge artifacts
+                final_np = (inv_face * inv_mask + orig_crop_np * (1 - inv_mask)).astype(np.uint8)
+                
+                # Convert back to [0, 1] tensor for KFAAR
+                final_tensor = torch.from_numpy(final_np.transpose(2, 0, 1)).float().div(255.0)
 
-                # Return as CHW [0, 1] tensor
                 return final_tensor.to(target_aligned.device)
 
         except Exception as e:
