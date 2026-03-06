@@ -223,7 +223,40 @@ class DiffusionFaceSwapper:
         )[-1]
 
     def _detect_face_info(self, image_rgb: np.ndarray) -> dict:
-        face_info = self.app.get(cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
+        bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        face_info = self.app.get(bgr)
+        
+        # If standard detection fails, the image is likely a tight crop.
+        # We temporarily pad it to give the detector "context".
+        if not face_info:
+            h, w = bgr.shape[:2]
+            # Pad by 50% on all sides
+            pad_h, pad_w = int(h * 0.5), int(w * 0.5)
+            padded_bgr = cv2.copyMakeBorder(
+                bgr, pad_h, pad_h, pad_w, pad_w, 
+                cv2.BORDER_CONSTANT, value=(128, 128, 128)
+            )
+            
+            face_info = self.app.get(padded_bgr)
+            
+            if not face_info:
+                # If it STILL fails, the tensor is truly invalid/empty
+                raise RuntimeError("No face detected even after padding.")
+                
+            largest_face = self._largest_face(face_info)
+            
+            # Shift the bounding box coordinates back to the unpadded image space
+            largest_face["bbox"][0] -= pad_w
+            largest_face["bbox"][1] -= pad_h
+            largest_face["bbox"][2] -= pad_w
+            largest_face["bbox"][3] -= pad_h
+            
+            # Shift the 5 facial landmarks back to the unpadded image space
+            largest_face["kps"][:, 0] -= pad_w
+            largest_face["kps"][:, 1] -= pad_h
+            
+            return largest_face
+
         return self._largest_face(face_info)
 
     def _tensor_to_pil(self, tensor: torch.Tensor) -> Image.Image:
