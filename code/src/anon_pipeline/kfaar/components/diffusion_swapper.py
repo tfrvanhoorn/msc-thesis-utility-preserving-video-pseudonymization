@@ -94,6 +94,12 @@ class DiffusionFaceSwapper:
             StableDiffusionFaceAdapterPipeline = face_adapter_pipeline_mod.StableDiffusionFaceAdapterPipeline
             draw_pts70_batch = face_adapter_pipeline_mod.draw_pts70_batch
 
+            # === ADD THIS TO FIX THE TYPE-CHECKING CRASH ===
+            # Override the validation method at the class level to prevent the 
+            # outdated positional arguments from hitting Diffusers 0.27.2
+            StableDiffusionFaceAdapterPipeline.check_inputs = lambda *args, **kwargs: None
+            # ===============================================
+
             self._set_seed = set_seed
             self._datasets_faceswap = datasets_faceswap
             self._draw_pts70_batch = draw_pts70_batch
