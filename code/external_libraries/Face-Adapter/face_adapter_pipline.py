@@ -641,17 +641,17 @@ class StableDiffusionFaceAdapterPipeline2(StableDiffusionControlNetPipeline):
             ]
 
         # 1. Check inputs. Raise error if not correct
-        # self.check_inputs(
-        #     prompt,
-        #     image,
-        #     callback_steps,
-        #     negative_prompt,
-        #     prompt_embeds,
-        #     negative_prompt_embeds,
-        #     controlnet_conditioning_scale,
-        #     control_guidance_start,
-        #     control_guidance_end,
-        # )
+        self.check_inputs(
+            prompt,
+            image,
+            callback_steps,
+            negative_prompt,
+            prompt_embeds,
+            negative_prompt_embeds,
+            controlnet_conditioning_scale,
+            control_guidance_start,
+            control_guidance_end,
+        )
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
