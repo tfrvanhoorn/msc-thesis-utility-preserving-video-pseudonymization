@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -48,6 +49,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained KFAAR projector")
 
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to a trained projector checkpoint (.pt)")
+
+    # Hugging Face cache location
+    parser.add_argument(
+        "--hf_cache_dir",
+        type=Path,
+        default=None,
+        help="Directory to store Hugging Face caches (HF_HOME / transformers / datasets / diffusers)",
+    )
 
     # Path Arguments
     parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
@@ -269,6 +278,14 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
 def main() -> None:
     args = parse_args()
     configure_logging()
+    if args.hf_cache_dir is not None:
+        cache_dir = Path(args.hf_cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = str(cache_dir)
+        os.environ["HF_HUB_CACHE"] = str(cache_dir)
+        os.environ["TRANSFORMERS_CACHE"] = str(cache_dir)
+        os.environ["HF_DATASETS_CACHE"] = str(cache_dir)
+        os.environ["DIFFUSERS_CACHE"] = str(cache_dir)
     device = torch.device(args.device)
 
     face_swapper = None

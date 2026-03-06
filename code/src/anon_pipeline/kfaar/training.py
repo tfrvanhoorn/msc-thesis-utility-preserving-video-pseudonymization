@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -86,6 +87,14 @@ def parse_args():
     parser.add_argument("--resume_ckpt", type=Path, default=None, help="Path to a checkpoint (.pt) to resume from")
     parser.add_argument("--start_epoch", type=int, default=None, help="Epoch index to start from (overrides checkpoint epoch)")
 
+    # Hugging Face cache location
+    parser.add_argument(
+        "--hf_cache_dir",
+        type=Path,
+        default=None,
+        help="Directory to store Hugging Face caches (HF_HOME / transformers / datasets / diffusers)",
+    )
+
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
 
@@ -140,6 +149,14 @@ def parse_args():
 def main():
     args = parse_args()
     configure_logging()
+    if args.hf_cache_dir is not None:
+        cache_dir = Path(args.hf_cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = str(cache_dir)
+        os.environ["HF_HUB_CACHE"] = str(cache_dir)
+        os.environ["TRANSFORMERS_CACHE"] = str(cache_dir)
+        os.environ["HF_DATASETS_CACHE"] = str(cache_dir)
+        os.environ["DIFFUSERS_CACHE"] = str(cache_dir)
     device = torch.device(args.device)
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
