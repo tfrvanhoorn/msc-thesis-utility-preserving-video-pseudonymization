@@ -185,7 +185,7 @@ class DiffusionFaceSwapper:
                 )
             )
 
-            # === NEW: Load the 19-class parsing model for occlusion-aware target masking ===
+            # === Load the 19-class parsing model for occlusion-aware target masking ===
             model_parsing = importlib.import_module("third_party.model_parsing")
             self.net_seg_parsing = model_parsing.get_face_parsing(
                 str(self.checkpoint_dir / "third_party" / "79999_iter.pth")

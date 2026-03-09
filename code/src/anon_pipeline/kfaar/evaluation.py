@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "simswap", "diffusion"],
         help="Choose face swapper backend for visualization (none=disabled)",
     )
-    parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping")
+    parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping (overridden by face_swapper != none)")
     parser.add_argument(
         "--swap_for_visuals_only",
         action="store_true",
@@ -124,6 +124,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to ArcFace checkpoint used by SimSwap (defaults to simswap_root/arcface_model/arcface_checkpoint.tar)",
+    )
+    parser.add_argument(
+        "--simswap_parsing_ckpt",
+        type=Path,
+        default=None,
+        help="Path to face parsing checkpoint for SimSwap masking (optional)",
     )
     parser.add_argument(
         "--simswap_crop_size",
@@ -295,6 +301,7 @@ def main() -> None:
                 name=args.simswap_name,
                 which_epoch=args.simswap_epoch,
                 arcface_ckpt=arcface_ckpt,
+                parsing_ckpt=args.simswap_parsing_ckpt,
                 detector_name=args.simswap_detector_name,
                 detector_root=args.simswap_detector_root,
                 crop_size=args.simswap_crop_size,
