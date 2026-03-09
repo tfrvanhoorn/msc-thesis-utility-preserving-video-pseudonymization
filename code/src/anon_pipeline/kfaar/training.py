@@ -45,7 +45,7 @@ def parse_args():
 
     # Path Arguments
     parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
-    parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video"], help="Dataset type to use")
+    parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video", "video_folder"], help="Dataset type to use")
     parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
     parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "train_results", help="Directory to save checkpoints")
@@ -75,11 +75,11 @@ def parse_args():
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--window_size", type=int, default=16, help="Window size for voxceleb_video sequences")
-    parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for voxceleb_video")
-    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for voxceleb_video (defaults to window_size*frame_stride)")
-    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows to sample per video for voxceleb_video")
-    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (voxceleb)")
+    parser.add_argument("--window_size", type=int, default=16, help="Window size for video datasets")
+    parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for video datasets")
+    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for video datasets (defaults to window_size*frame_stride)")
+    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows to sample per source video for video datasets")
+    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
     # Resuming
@@ -194,7 +194,7 @@ def main():
     data_options: dict[str, object] = {}
     if args.max_samples_per_identity is not None:
         data_options["max_samples_per_identity"] = args.max_samples_per_identity
-    if args.dataset_type == "voxceleb_video":
+    if args.dataset_type in {"voxceleb_video", "video_folder"}:
         data_options.update(
             {
                 "max_videos_per_identity": args.max_samples_per_identity,

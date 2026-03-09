@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         default="celeba",
-        choices=["celeba", "image_folder", "voxceleb_video"],
+        choices=["celeba", "image_folder", "voxceleb_video", "video_folder"],
         help="Dataset type to use",
     )
     parser.add_argument(
@@ -184,14 +184,14 @@ def parse_args() -> argparse.Namespace:
 
     # Dataset & Split
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (voxceleb_video)")
+    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (video datasets)")
     parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max video files sampled per YouTube ID (voxceleb_video)")
     parser.add_argument("--min_youtube_id_per_identity", type=int, default=None, help="Require at least this many YouTube IDs per identity (voxceleb_video)")
-    parser.add_argument("--window_size", type=int, default=16, help="Window size (frames) for voxceleb_video sequences")
+    parser.add_argument("--window_size", type=int, default=16, help="Window size (frames) for video datasets")
     parser.add_argument("--frame_stride", type=int, default=1, help="Stride between frames inside a window")
     parser.add_argument("--window_step", type=int, default=None, help="Step between window starts (defaults to window_size*frame_stride)")
-    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (voxceleb_video)")
-    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (voxceleb)")
+    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (video datasets)")
+    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting and key sampling")
 
     # Identity batching
@@ -333,9 +333,9 @@ def main() -> None:
     }
     if args.max_samples_per_identity is not None:
         data_options["max_samples_per_identity"] = args.max_samples_per_identity
-        if args.dataset_type == "voxceleb_video":
+        if args.dataset_type in {"voxceleb_video", "video_folder"}:
             data_options["max_videos_per_identity"] = args.max_samples_per_identity
-    if args.dataset_type == "voxceleb_video":
+    if args.dataset_type in {"voxceleb_video", "video_folder"}:
         data_options.update(
             {
                 "window_size": args.window_size,
@@ -384,7 +384,7 @@ def main() -> None:
         samples_per_identity=args.batch_videos_per_identity,
         shuffle=False,
         num_workers=args.num_workers,
-        group_by_video=cfg.data.dataset_type.lower() == "voxceleb_video",
+        group_by_video=cfg.data.dataset_type.lower() in {"voxceleb_video", "video_folder"},
     )
 
     logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)

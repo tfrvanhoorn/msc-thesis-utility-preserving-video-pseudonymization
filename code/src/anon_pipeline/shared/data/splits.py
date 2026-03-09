@@ -49,6 +49,18 @@ def list_identities(config: SupportsDataConfig) -> List[str]:
             return []
         return sorted([p.name for p in base.iterdir() if p.is_dir()])
 
+    if dataset_type == "video_folder":
+        if not config.dataset_path.exists():
+            return []
+        identities: set[str] = set()
+        for path in config.dataset_path.glob("*.mp4"):
+            if not path.is_file():
+                continue
+            stem = path.stem
+            identity = stem.split("_", 1)[0] if "_" in stem else stem
+            identities.add(identity)
+        return sorted(identities)
+
     raise ValueError(f"Unsupported dataset type '{config.dataset_type}' for identity listing")
 
 
@@ -108,7 +120,7 @@ def build_dataloader_for_identities(
     if max_samples_per_identity is not None:
         options = dict(config.options or {})
         options["max_samples_per_identity"] = max_samples_per_identity
-        if config.dataset_type.lower() == "voxceleb_video":
+        if config.dataset_type.lower() in {"voxceleb_video", "video_folder"}:
             options.setdefault("max_videos_per_identity", max_samples_per_identity)
 
         class _ConfigProxy:

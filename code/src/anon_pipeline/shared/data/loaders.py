@@ -26,6 +26,7 @@ class SupportsDataConfig(_Protocol):
     options: Optional[Dict[str, Any]]
 
 DEFAULT_IMAGE_PATTERNS: List[str] = ["*.jpg", "*.jpeg", "*.png"]
+DEFAULT_VIDEO_FOLDER_PATTERNS: List[str] = ["*.mp4"]
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,96 @@ class CelebADataset(IterableDataset):
         return entries
 
 
+class VideoFolderDataset(IterableDataset):
+    """Load video windows from a flat folder of video files.
+
+    Identity is derived from the file stem prefix before the first underscore.
+    Example: ``id123_clip01.mp4`` -> identity ``id123``.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        identities: Sequence[str] | None = None,
+        patterns: Sequence[str] | None = None,
+        max_videos_per_identity: int | None = None,
+        window_size: int = 16,
+        frame_stride: int = 1,
+        window_step: int | None = None,
+        max_windows_per_video: int | None = None,
+        shuffle: bool = False,
+    ) -> None:
+        self.root = root
+        self.identities = set(str(identity) for identity in identities) if identities else None
+        self.patterns = list(patterns) if patterns else list(DEFAULT_VIDEO_FOLDER_PATTERNS)
+        self.max_videos_per_identity = max_videos_per_identity
+        self.window_size = window_size
+        self.frame_stride = frame_stride
+        self.window_step = window_step if window_step is not None else window_size * frame_stride
+        self.max_windows_per_video = max_windows_per_video
+        self.shuffle = shuffle
+        if self.window_size <= 0:
+            raise ValueError("window_size must be positive")
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be positive")
+        if self.window_step <= 0:
+            raise ValueError("window_step must be positive")
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        video_records = self._collect_video_records()
+        per_identity_seen: dict[str, int] = defaultdict(int)
+
+        for identity, video_path in video_records:
+            if self.max_videos_per_identity and per_identity_seen[identity] >= self.max_videos_per_identity:
+                continue
+            per_identity_seen[identity] += 1
+
+            total_frames = get_video_frame_count(video_path)
+            usable_start_limit = total_frames - (self.window_size - 1) * self.frame_stride
+            if usable_start_limit <= 0:
+                continue
+
+            windows_from_video = 0
+            for start in range(0, max(0, usable_start_limit), self.window_step):
+                window = load_video_window(
+                    video_path,
+                    start,
+                    self.window_size,
+                    frame_stride=self.frame_stride,
+                )
+                if window is None:
+                    continue
+
+                frames = torch.from_numpy(window).permute(0, 3, 1, 2).float() / 255.0
+                yield {
+                    "frames": frames,
+                    "identity": identity,
+                    "context": video_path.stem,
+                    "source": str(video_path.name),
+                }
+
+                windows_from_video += 1
+                if self.max_windows_per_video and windows_from_video >= self.max_windows_per_video:
+                    break
+
+    def _collect_video_records(self) -> list[tuple[str, Path]]:
+        records: list[tuple[str, Path]] = []
+        for pattern in self.patterns:
+            for path in self.root.glob(pattern):
+                if not path.is_file():
+                    continue
+                identity = _video_folder_identity_from_path(path)
+                if self.identities is not None and identity not in self.identities:
+                    continue
+                records.append((identity, path))
+
+        if self.shuffle:
+            random.shuffle(records)
+        else:
+            records.sort(key=lambda item: str(item[1]))
+        return records
+
+
 def build_dataset(config: SupportsDataConfig) -> Iterable:
     dataset_type = config.dataset_type.lower()
     builder = _DATASET_BUILDERS.get(dataset_type)
@@ -217,6 +308,24 @@ def _build_voxceleb_video_dataset(config: SupportsDataConfig) -> VoxCelebVideoDa
     )
 
 
+def _build_video_folder_dataset(config: SupportsDataConfig) -> VideoFolderDataset:
+    options = config.options or {}
+    max_videos = _as_optional_int(options.get("max_videos_per_identity"))
+    if max_videos is None:
+        max_videos = _as_optional_int(options.get("max_samples_per_identity"))
+    return VideoFolderDataset(
+        root=config.dataset_path,
+        identities=_normalize_identities(options.get("identities")),
+        patterns=options.get("patterns") or DEFAULT_VIDEO_FOLDER_PATTERNS,
+        max_videos_per_identity=max_videos,
+        window_size=_as_optional_int(options.get("window_size")) or 16,
+        frame_stride=_as_optional_int(options.get("frame_stride")) or 1,
+        window_step=_as_optional_int(options.get("window_step")),
+        max_windows_per_video=_as_optional_int(options.get("max_windows_per_video")),
+        shuffle=bool(options.get("shuffle", False)),
+    )
+
+
 def _normalize_identities(raw: Sequence[Any] | str | int | None) -> Sequence[str] | None:
     if raw is None:
         return None
@@ -237,6 +346,7 @@ _DATASET_BUILDERS: Dict[str, Callable[[SupportsDataConfig], Iterable]] = {
     "image_folder": _build_image_folder_dataset,
     "celeba": _build_celeba_dataset,
     "voxceleb_video": _build_voxceleb_video_dataset,
+    "video_folder": _build_video_folder_dataset,
 }
 
 
@@ -295,6 +405,34 @@ def _build_identity_sample_index(config: SupportsDataConfig, identities: Sequenc
                 max_videos_per_identity,
                 max_videos_per_youtube_id,
                 min_youtube_id_per_identity,
+                max_windows_per_video,
+            )
+            if refs:
+                index[str(identity)] = refs
+        return index
+
+    if dataset_type == "video_folder":
+        window_size = _as_optional_int(options.get("window_size")) or 16
+        frame_stride = _as_optional_int(options.get("frame_stride")) or 1
+        window_step = options.get("window_step")
+        if window_step is None:
+            window_step = window_size * frame_stride
+        window_step = int(window_step)
+        patterns = options.get("patterns") or DEFAULT_VIDEO_FOLDER_PATTERNS
+        max_windows_per_video = _as_optional_int(options.get("max_windows_per_video"))
+        max_videos_per_identity = _as_optional_int(options.get("max_videos_per_identity"))
+        if max_videos_per_identity is None:
+            max_videos_per_identity = _as_optional_int(options.get("max_samples_per_identity"))
+
+        for identity in identities:
+            refs = _collect_video_folder_windows_for_identity(
+                config.dataset_path,
+                str(identity),
+                patterns,
+                window_size,
+                frame_stride,
+                window_step,
+                max_videos_per_identity,
                 max_windows_per_video,
             )
             if refs:
@@ -394,6 +532,58 @@ def _collect_voxceleb_windows_for_identity(
         if max_videos_per_identity and videos_seen >= max_videos_per_identity:
             return refs
     return refs
+
+
+def _collect_video_folder_windows_for_identity(
+    base_dir: Path,
+    identity: str,
+    patterns: Sequence[str],
+    window_size: int,
+    frame_stride: int,
+    window_step: int,
+    max_videos_per_identity: int | None,
+    max_windows_per_video: int | None,
+) -> list[SampleReference]:
+    video_candidates: list[Path] = []
+    for pattern in patterns:
+        for path in base_dir.glob(pattern):
+            if path.is_file() and _video_folder_identity_from_path(path) == identity:
+                video_candidates.append(path)
+    video_candidates = sorted(video_candidates)
+    if max_videos_per_identity:
+        video_candidates = video_candidates[:max_videos_per_identity]
+
+    refs: list[SampleReference] = []
+    for video_path in video_candidates:
+        total_frames = get_video_frame_count(video_path)
+        usable_start_limit = total_frames - (window_size - 1) * frame_stride
+        if usable_start_limit <= 0:
+            continue
+        windows_from_video = 0
+        for start in range(0, max(0, usable_start_limit), window_step):
+            refs.append(
+                SampleReference(
+                    identity=identity,
+                    path=video_path,
+                    kind="video_window",
+                    start=start,
+                    window_size=window_size,
+                    frame_stride=frame_stride,
+                    context=video_path.stem,
+                    source=str(video_path.name),
+                )
+            )
+            windows_from_video += 1
+            if max_windows_per_video and windows_from_video >= max_windows_per_video:
+                break
+    return refs
+
+
+def _video_folder_identity_from_path(path: Path) -> str:
+    stem = path.stem
+    if "_" not in stem:
+        return stem
+    return stem.split("_", 1)[0]
 
 
 def _load_image_tensor(path: Path) -> torch.Tensor | None:
