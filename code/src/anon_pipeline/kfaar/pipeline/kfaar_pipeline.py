@@ -562,7 +562,6 @@ class KfaarPipeline:
                 stylegan_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
                 if save_images_dir is not None:
                     vutils.save_image(stylegan_img, save_images_dir / f"{base}_stylegan.png")
-                    vutils.save_image(stylegan_img, save_images_dir / f"{base}_gen.png")
 
                 swapped_img = None
                 if swapped_images is not None and idx < swapped_images.shape[0]:
