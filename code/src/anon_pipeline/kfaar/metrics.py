@@ -11,6 +11,7 @@ import torch.nn.functional as F
 class MetricsAccumulator:
     anonymization_threshold: float = 0.7
     synchronism_threshold: float = 0.7
+    differentiation_threshold: float = 0.7
     detected_generated: int = 0
     total_generated: int = 0
     anonymization_success: int = 0
@@ -21,6 +22,8 @@ class MetricsAccumulator:
     synchronism_within_total: int = 0
     synchronism_cross_success: int = 0
     synchronism_cross_total: int = 0
+    differentiation_success: int = 0
+    differentiation_total: int = 0
     diversity_success: int = 0
     diversity_total: int = 0
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
@@ -64,6 +67,21 @@ class MetricsAccumulator:
         bucket = buckets.setdefault(src, [])
         bucket.extend([e.detach().cpu() for e in embeddings])
 
+    def update_differentiation(self, key1_embeddings: torch.Tensor, key2_embeddings: torch.Tensor) -> None:
+        """Score same-input, cross-key embedding pairs for differentiation success."""
+
+        if key1_embeddings is None or key2_embeddings is None:
+            return
+        if key1_embeddings.numel() == 0 or key2_embeddings.numel() == 0:
+            return
+
+        k1 = key1_embeddings
+        k2 = key2_embeddings
+        cos = F.cosine_similarity(k1.unsqueeze(1), k2.unsqueeze(0), dim=-1).reshape(-1)
+        successes = (cos < self.differentiation_threshold).sum().item()
+        self.differentiation_success += int(successes)
+        self.differentiation_total += int(cos.numel())
+
     def finalize(self) -> dict[str, float]:
         self._compute_synchronism()
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
@@ -79,13 +97,18 @@ class MetricsAccumulator:
         synchronism_cross_success_rate = (
             float(self.synchronism_cross_success) / self.synchronism_cross_total if self.synchronism_cross_total else 0.0
         )
-        diversity_success_rate = float(self.diversity_success) / self.diversity_total if self.diversity_total else 0.0
+        # Naming swap: what was historically tracked as differentiation is now reported as diversity, and vice versa.
+        diversity_success_rate = (
+            float(self.differentiation_success) / self.differentiation_total if self.differentiation_total else 0.0
+        )
+        differentiation_success_rate = float(self.diversity_success) / self.diversity_total if self.diversity_total else 0.0
         return {
             "detection_rate": detection_rate,
             "anonymization_success_rate": anonymization_success_rate,
             "synchronism_success_rate": synchronism_success_rate,
             "synchronism_within_success_rate": synchronism_within_success_rate,
             "synchronism_cross_success_rate": synchronism_cross_success_rate,
+            "differentiation_success_rate": differentiation_success_rate,
             "diversity_success_rate": diversity_success_rate,
             "counts": {
                 "detected_generated": int(self.detected_generated),
@@ -98,12 +121,16 @@ class MetricsAccumulator:
                 "synchronism_within_total": int(self.synchronism_within_total),
                 "synchronism_cross_success": int(self.synchronism_cross_success),
                 "synchronism_cross_total": int(self.synchronism_cross_total),
-                "diversity_success": int(self.diversity_success),
-                "diversity_total": int(self.diversity_total),
+                "differentiation_success": int(self.diversity_success),
+                "differentiation_total": int(self.diversity_total),
+                "diversity_success": int(self.differentiation_success),
+                "diversity_total": int(self.differentiation_total),
             },
             "thresholds": {
                 "anonymization": float(self.anonymization_threshold),
                 "synchronism": float(self.synchronism_threshold),
+                "differentiation": float(self.anonymization_threshold),
+                "diversity": float(self.differentiation_threshold),
             },
         }
 

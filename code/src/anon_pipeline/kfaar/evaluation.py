@@ -181,6 +181,14 @@ def parse_args() -> argparse.Namespace:
     # Evaluation thresholds
     parser.add_argument("--ano_threshold", type=float, default=0.7, help="Cosine similarity threshold for anonymization success")
     parser.add_argument("--syn_threshold", type=float, default=0.7, help="Cosine similarity threshold for synchronism success")
+    parser.add_argument(
+        "--div_threshold",
+        "--dif_threshold",
+        dest="div_threshold",
+        type=float,
+        default=0.7,
+        help="Cosine similarity threshold for diversity success (deprecated alias: --dif_threshold)",
+    )
 
     # Dataset & Split
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
@@ -415,21 +423,22 @@ def main() -> None:
     if hasattr(pipeline.embedder, "eval"):
         pipeline.embedder.eval()
 
-    metrics = MetricsAccumulator(anonymization_threshold=args.ano_threshold, synchronism_threshold=args.syn_threshold)
+    metrics = MetricsAccumulator(
+        anonymization_threshold=args.ano_threshold,
+        synchronism_threshold=args.syn_threshold,
+        differentiation_threshold=args.div_threshold,
+    )
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
-    identity_keys: dict[int, torch.Tensor] = {}
-
-    def _key_for(label: int) -> torch.Tensor:
-        if label not in identity_keys:
-            identity_keys[label] = torch.randn(args.key_dim, generator=rng, device=device)
-        return identity_keys[label]
 
     total_samples = 0
     with torch.no_grad():
         for batch in test_loader:
             batch_div_embeddings: list[torch.Tensor] = []
             batch_div_labels: list[int] = []
+            # Use two random keys shared across the batch for differentiation evaluation.
+            batch_key_1 = torch.randn(args.key_dim, generator=rng, device=device)
+            batch_key_2 = torch.randn(args.key_dim, generator=rng, device=device)
 
             frames, labels, seq_lens, contexts, sources = _extract_batch(batch)
             frames = frames.to(device)
@@ -441,7 +450,6 @@ def main() -> None:
                 seq_len = int(seq_lens[idx].item())
                 sample_frames = frames[idx, :seq_len]
                 label = int(labels[idx].item())
-                key = _key_for(label)
 
                 sample_context = None
                 if contexts is not None and idx < len(contexts):
@@ -452,19 +460,34 @@ def main() -> None:
                     source_id = sources[idx]
 
                 forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
-                res = forward_fn(
+                res1 = forward_fn(
                     sample_frames,
-                    key,
+                    batch_key_1,
+                    sample_label=label,
+                    sample_context=sample_context,
+                    use_face_swapper=use_swapper,
+                    swap_for_visuals_only=args.swap_for_visuals_only,
+                )
+                res2 = forward_fn(
+                    sample_frames,
+                    batch_key_2,
                     sample_label=label,
                     sample_context=sample_context,
                     use_face_swapper=use_swapper,
                     swap_for_visuals_only=args.swap_for_visuals_only,
                 )
 
-                metrics.update_detection(res.gen_mask)
-                metrics.update_anonymization(res.real_embeddings, res.virtual_embeddings, res.valid_mask)
+                # Keep existing metrics based on a single branch for comparability.
+                metrics.update_detection(res1.gen_mask)
+                metrics.update_anonymization(res1.real_embeddings, res1.virtual_embeddings, res1.valid_mask)
 
-                valid_virtual = res.virtual_embeddings[res.valid_mask]
+                pair_mask = res1.valid_mask & res2.valid_mask
+                if pair_mask.any():
+                    pair_v1 = res1.virtual_embeddings[pair_mask]
+                    pair_v2 = res2.virtual_embeddings[pair_mask]
+                    metrics.update_differentiation(pair_v1, pair_v2)
+
+                valid_virtual = res1.virtual_embeddings[res1.valid_mask]
                 if valid_virtual.numel() > 0:
                     metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
 
@@ -484,12 +507,13 @@ def main() -> None:
 
     summary = metrics.finalize()
     logging.info(
-        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | syn_within=%.4f | syn_cross=%.4f | diversity_success=%.4f | samples=%d",
+        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | syn_within=%.4f | syn_cross=%.4f | differentiation_success=%.4f | diversity_success=%.4f | samples=%d",
         summary["detection_rate"],
         summary["anonymization_success_rate"],
         summary["synchronism_success_rate"],
         summary["synchronism_within_success_rate"],
         summary["synchronism_cross_success_rate"],
+        summary.get("differentiation_success_rate", 0.0),
         summary.get("diversity_success_rate", 0.0),
         total_samples,
     )
