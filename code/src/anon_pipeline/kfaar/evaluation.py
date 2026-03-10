@@ -45,9 +45,11 @@ from anon_pipeline.shared.data.splits import build_dataloader_for_identities, li
 from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
 
 
-def _log_json(event: str, **payload: Any) -> None:
-    record = {"event": event, **payload}
-    logging.info(json.dumps(record, sort_keys=True, default=str))
+def _log_pipe(category: str, **fields: Any) -> None:
+    parts = [category]
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+    logging.info(" | ".join(parts))
 
 
 def parse_args() -> argparse.Namespace:
@@ -327,17 +329,15 @@ def main() -> None:
             args.diff_threshold = args.diff_threshold_legacy
             logging.warning("--dif_threshold is deprecated; please use --diff_threshold")
 
-    _log_json(
+    _log_pipe(
         "evaluation_start",
         checkpoint=str(args.checkpoint),
         dataset_type=args.dataset_type,
         compute_auc_eer=bool(args.compute_auc_eer),
-        thresholds={
-            "anonymization": float(args.ano_threshold),
-            "synchronism": float(args.syn_threshold),
-            "diversity": float(args.div_threshold),
-            "differentiation": float(args.diff_threshold),
-        },
+        anonymization_threshold=float(args.ano_threshold),
+        synchronism_threshold=float(args.syn_threshold),
+        diversity_threshold=float(args.div_threshold),
+        differentiation_threshold=float(args.diff_threshold),
     )
 
     face_swapper = None
@@ -565,19 +565,67 @@ def main() -> None:
         batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
 
     summary = metrics.finalize()
-    _log_json(
-        "evaluation_metrics_summary",
+    _log_pipe(
+        "evaluation_summary",
         checkpoint=str(args.checkpoint),
         dataset_type=args.dataset_type,
         total_samples=total_samples,
         batch_processing_seconds=batch_processing_seconds,
-        metrics={
-            "detection_rate": summary["detection_rate"],
-            "anonymization": summary["anonymization"],
-            "synchronism": summary["synchronism"],
-            "diversity": summary["diversity"],
-            "differentiation": summary["differentiation"],
-        },
+        detection_rate=summary["detection_rate"],
+    )
+    _log_pipe(
+        "metric_anonymization",
+        success_rate=summary["anonymization"]["success_rate"],
+        threshold=summary["anonymization"]["threshold"],
+        auc=summary["anonymization"]["auc"],
+        eer=summary["anonymization"]["eer"],
+        eer_threshold=summary["anonymization"]["eer_threshold"],
+        success=summary["anonymization"]["counts"]["success"],
+        total=summary["anonymization"]["counts"]["total"],
+    )
+    _log_pipe(
+        "metric_synchronism_total",
+        success_rate=summary["synchronism_total"]["success_rate"],
+        threshold=summary["synchronism_total"]["threshold"],
+        auc=summary["synchronism_total"]["auc"],
+        eer=summary["synchronism_total"]["eer"],
+        eer_threshold=summary["synchronism_total"]["eer_threshold"],
+        success=summary["synchronism_total"]["counts"]["success"],
+        total=summary["synchronism_total"]["counts"]["total"],
+    )
+    _log_pipe(
+        "metric_synchronism_within",
+        success_rate=summary["synchronism_within"]["success_rate"],
+        threshold=summary["synchronism_within"]["threshold"],
+        success=summary["synchronism_within"]["counts"]["success"],
+        total=summary["synchronism_within"]["counts"]["total"],
+    )
+    _log_pipe(
+        "metric_synchronism_cross",
+        success_rate=summary["synchronism_cross"]["success_rate"],
+        threshold=summary["synchronism_cross"]["threshold"],
+        success=summary["synchronism_cross"]["counts"]["success"],
+        total=summary["synchronism_cross"]["counts"]["total"],
+    )
+    _log_pipe(
+        "metric_diversity",
+        success_rate=summary["diversity"]["success_rate"],
+        threshold=summary["diversity"]["threshold"],
+        auc=summary["diversity"]["auc"],
+        eer=summary["diversity"]["eer"],
+        eer_threshold=summary["diversity"]["eer_threshold"],
+        success=summary["diversity"]["counts"]["success"],
+        total=summary["diversity"]["counts"]["total"],
+    )
+    _log_pipe(
+        "metric_differentiation",
+        success_rate=summary["differentiation"]["success_rate"],
+        threshold=summary["differentiation"]["threshold"],
+        auc=summary["differentiation"]["auc"],
+        eer=summary["differentiation"]["eer"],
+        eer_threshold=summary["differentiation"]["eer_threshold"],
+        success=summary["differentiation"]["counts"]["success"],
+        total=summary["differentiation"]["counts"]["total"],
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -602,7 +650,7 @@ def main() -> None:
             f,
             indent=2,
         )
-    _log_json(
+    _log_pipe(
         "evaluation_report_saved",
         path=str(report_path),
         checkpoint=str(args.checkpoint),

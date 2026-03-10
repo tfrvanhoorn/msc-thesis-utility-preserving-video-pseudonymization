@@ -140,7 +140,7 @@ class MetricsAccumulator:
 
         auc_eer = self._compute_auc_eer() if self.compute_auc_eer else {
             "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
-            "synchronism": {"auc": None, "eer": None, "eer_threshold": None},
+            "synchronism_total": {"auc": None, "eer": None, "eer_threshold": None},
             "diversity": {"auc": None, "eer": None, "eer_threshold": None},
             "differentiation": {"auc": None, "eer": None, "eer_threshold": None},
         }
@@ -164,19 +164,37 @@ class MetricsAccumulator:
                     "total": int(self.anonymization_total),
                 },
             },
-            "synchronism": {
+            "synchronism_total": {
                 "success_rate": synchronism_success_rate,
                 "threshold": float(self.synchronism_threshold),
-                "auc": auc_eer["synchronism"]["auc"],
-                "eer": auc_eer["synchronism"]["eer"],
-                "eer_threshold": auc_eer["synchronism"]["eer_threshold"],
+                "auc": auc_eer["synchronism_total"]["auc"],
+                "eer": auc_eer["synchronism_total"]["eer"],
+                "eer_threshold": auc_eer["synchronism_total"]["eer_threshold"],
                 "counts": {
                     "success": int(self.synchronism_success),
                     "total": int(self.synchronism_total),
-                    "within_success": int(self.synchronism_within_success),
-                    "within_total": int(self.synchronism_within_total),
-                    "cross_success": int(self.synchronism_cross_success),
-                    "cross_total": int(self.synchronism_cross_total),
+                },
+            },
+            "synchronism_within": {
+                "success_rate": synchronism_within_success_rate,
+                "threshold": float(self.synchronism_threshold),
+                "auc": None,
+                "eer": None,
+                "eer_threshold": None,
+                "counts": {
+                    "success": int(self.synchronism_within_success),
+                    "total": int(self.synchronism_within_total),
+                },
+            },
+            "synchronism_cross": {
+                "success_rate": synchronism_cross_success_rate,
+                "threshold": float(self.synchronism_threshold),
+                "auc": None,
+                "eer": None,
+                "eer_threshold": None,
+                "counts": {
+                    "success": int(self.synchronism_cross_success),
+                    "total": int(self.synchronism_cross_total),
                 },
             },
             "diversity": {
@@ -219,7 +237,9 @@ class MetricsAccumulator:
             },
             "thresholds": {
                 "anonymization": float(self.anonymization_threshold),
-                "synchronism": float(self.synchronism_threshold),
+                "synchronism_total": float(self.synchronism_threshold),
+                "synchronism_within": float(self.synchronism_threshold),
+                "synchronism_cross": float(self.synchronism_threshold),
                 "diversity": float(self.diversity_threshold),
                 "differentiation": float(self.differentiation_threshold),
             },
@@ -231,7 +251,7 @@ class MetricsAccumulator:
 
         return {
             "anonymization": self._compute_metric_auc_eer(self._anonymization_scores, similar_pool, positive_when_lower=True),
-            "synchronism": self._compute_metric_auc_eer(self._synchronism_scores, dissimilar_pool, positive_when_lower=False),
+            "synchronism_total": self._compute_metric_auc_eer(self._synchronism_scores, dissimilar_pool, positive_when_lower=False),
             "diversity": self._compute_metric_auc_eer(self._diversity_scores, similar_pool, positive_when_lower=True),
             "differentiation": self._compute_metric_auc_eer(self._differentiation_scores, similar_pool, positive_when_lower=True),
         }
