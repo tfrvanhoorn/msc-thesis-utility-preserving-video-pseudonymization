@@ -180,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     # Dataset options
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
     parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (video_folder)")
-    parser.add_argument("--window_size", type=int, default=16, help="Window size (frames) for video datasets")
+    parser.add_argument("--window_size", type=int, default=1, help="Window size (frames) for video datasets")
     parser.add_argument("--frame_stride", type=int, default=1, help="Stride between frames inside a window")
     parser.add_argument("--window_step", type=int, default=None, help="Step between window starts (defaults to window_size*frame_stride)")
     parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (video datasets)")
