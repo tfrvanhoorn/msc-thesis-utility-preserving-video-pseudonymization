@@ -28,6 +28,10 @@ class MetricsAccumulator:
     differentiation_total: int = 0
     diversity_success: int = 0
     diversity_total: int = 0
+    geometric_head_posture_error_sum: float = 0.0
+    geometric_facial_expression_error_sum: float = 0.0
+    geometric_pairs_valid: int = 0
+    geometric_pairs_invalid: int = 0
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
     _anonymization_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _synchronism_total_scores: List[float] = field(default_factory=list, init=False, repr=False)
@@ -130,6 +134,19 @@ class MetricsAccumulator:
         if self.compute_auc_eer:
             self._differentiation_scores.extend(cos.detach().cpu().tolist())
 
+    def update_geometric_utility(
+        self,
+        head_posture_error: float | None,
+        facial_expression_error: float | None,
+    ) -> None:
+        if head_posture_error is None or facial_expression_error is None:
+            self.geometric_pairs_invalid += 1
+            return
+
+        self.geometric_head_posture_error_sum += float(head_posture_error)
+        self.geometric_facial_expression_error_sum += float(facial_expression_error)
+        self.geometric_pairs_valid += 1
+
     def finalize(self) -> dict[str, Any]:
         self._compute_synchronism()
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
@@ -139,6 +156,16 @@ class MetricsAccumulator:
         synchronism_cross_success_rate = float(self.synchronism_cross_success) / self.synchronism_cross_total if self.synchronism_cross_total else 0.0
         diversity_success_rate = float(self.diversity_success) / self.diversity_total if self.diversity_total else 0.0
         differentiation_success_rate = float(self.differentiation_success) / self.differentiation_total if self.differentiation_total else 0.0
+        geometric_head_posture_error = (
+            self.geometric_head_posture_error_sum / float(self.geometric_pairs_valid)
+            if self.geometric_pairs_valid
+            else None
+        )
+        geometric_facial_expression_error = (
+            self.geometric_facial_expression_error_sum / float(self.geometric_pairs_valid)
+            if self.geometric_pairs_valid
+            else None
+        )
 
         auc_eer = self._compute_auc_eer() if self.compute_auc_eer else {
             "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
@@ -157,6 +184,8 @@ class MetricsAccumulator:
             "synchronism_cross_success_rate": synchronism_cross_success_rate,
             "differentiation_success_rate": differentiation_success_rate,
             "diversity_success_rate": diversity_success_rate,
+            "head_posture_error": geometric_head_posture_error,
+            "facial_expression_error": geometric_facial_expression_error,
             "anonymization": {
                 "success_rate": anonymization_success_rate,
                 "threshold": float(self.anonymization_threshold),
@@ -223,6 +252,14 @@ class MetricsAccumulator:
                     "total": int(self.differentiation_total),
                 },
             },
+            "geometric_utility": {
+                "head_posture_error": geometric_head_posture_error,
+                "facial_expression_error": geometric_facial_expression_error,
+                "counts": {
+                    "valid_pairs": int(self.geometric_pairs_valid),
+                    "invalid_pairs": int(self.geometric_pairs_invalid),
+                },
+            },
             "counts": {
                 "detected_generated": int(self.detected_generated),
                 "total_generated": int(self.total_generated),
@@ -238,6 +275,8 @@ class MetricsAccumulator:
                 "differentiation_total": int(self.differentiation_total),
                 "diversity_success": int(self.diversity_success),
                 "diversity_total": int(self.diversity_total),
+                "geometric_pairs_valid": int(self.geometric_pairs_valid),
+                "geometric_pairs_invalid": int(self.geometric_pairs_invalid),
             },
             "thresholds": {
                 "anonymization": float(self.anonymization_threshold),

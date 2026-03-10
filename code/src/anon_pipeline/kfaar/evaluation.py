@@ -9,6 +9,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 current_file = Path(__file__).resolve()
@@ -34,6 +35,7 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
     SeedConfig,
 )
 from anon_pipeline.kfaar.metrics import MetricsAccumulator  # noqa: E402
+from anon_pipeline.kfaar.geometric_metrics import GeometricUtilityEvaluator  # noqa: E402
 from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline  # noqa: E402
 from anon_pipeline.kfaar.components import (
     load_stylegan2,
@@ -50,6 +52,17 @@ def _log_pipe(category: str, **fields: Any) -> None:
     for key, value in fields.items():
         parts.append(f"{key}={value}")
     logging.info(" | ".join(parts))
+
+
+def _to_uint8_rgb_image(image: torch.Tensor) -> np.ndarray:
+    if image.dim() != 3:
+        raise ValueError(f"Expected CHW tensor image, got shape {tuple(image.shape)}")
+    chw = image.detach().to("cpu")
+    if chw.dtype != torch.float32:
+        chw = chw.float()
+    chw = chw.clamp(0.0, 1.0)
+    hwc = chw.permute(1, 2, 0).numpy()
+    return (hwc * 255.0).round().astype(np.uint8)
 
 
 def parse_args() -> argparse.Namespace:
@@ -476,86 +489,116 @@ def main() -> None:
     )
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
+    geometric_evaluator = GeometricUtilityEvaluator()
 
     total_samples = 0
     batch_processing_start_time: float | None = None
     batch_processing_end_time: float | None = None
-    with torch.no_grad():
-        for batch in test_loader:
-            if batch_processing_start_time is None:
-                batch_processing_start_time = time.perf_counter()
+    try:
+        with torch.no_grad():
+            for batch in test_loader:
+                if batch_processing_start_time is None:
+                    batch_processing_start_time = time.perf_counter()
 
-            batch_diff_embeddings: list[torch.Tensor] = []
-            batch_diff_labels: list[int] = []
-            # Use two random keys shared across the batch.
-            # key1 branch is used for differentiation (different identities, same key).
-            # key1/key2 pair is used for diversity (same identity, different keys).
-            batch_key_1 = torch.randn(args.key_dim, generator=rng, device=device)
-            batch_key_2 = torch.randn(args.key_dim, generator=rng, device=device)
+                batch_diff_embeddings: list[torch.Tensor] = []
+                batch_diff_labels: list[int] = []
+                # Use two random keys shared across the batch.
+                # key1 branch is used for differentiation (different identities, same key).
+                # key1/key2 pair is used for diversity (same identity, different keys).
+                batch_key_1 = torch.randn(args.key_dim, generator=rng, device=device)
+                batch_key_2 = torch.randn(args.key_dim, generator=rng, device=device)
 
-            frames, labels, seq_lens, contexts, sources = _extract_batch(batch)
-            frames = frames.to(device)
-            labels = labels.to(device)
-            seq_lens = seq_lens.to(device)
+                frames, labels, seq_lens, contexts, sources = _extract_batch(batch)
+                frames = frames.to(device)
+                labels = labels.to(device)
+                seq_lens = seq_lens.to(device)
 
-            batch_size = frames.shape[0]
-            for idx in range(batch_size):
-                seq_len = int(seq_lens[idx].item())
-                sample_frames = frames[idx, :seq_len]
-                label = int(labels[idx].item())
+                batch_size = frames.shape[0]
+                for idx in range(batch_size):
+                    seq_len = int(seq_lens[idx].item())
+                    sample_frames = frames[idx, :seq_len]
+                    label = int(labels[idx].item())
 
-                sample_context = None
-                if contexts is not None and idx < len(contexts):
-                    sample_context = contexts[idx]
+                    sample_context = None
+                    if contexts is not None and idx < len(contexts):
+                        sample_context = contexts[idx]
 
-                source_id = None
-                if sources is not None and idx < len(sources):
-                    source_id = sources[idx]
+                    source_id = None
+                    if sources is not None and idx < len(sources):
+                        source_id = sources[idx]
 
-                forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
-                res1 = forward_fn(
-                    sample_frames,
-                    batch_key_1,
-                    sample_label=label,
-                    sample_context=sample_context,
-                    use_face_swapper=use_swapper,
-                    swap_for_visuals_only=args.swap_for_visuals_only,
-                )
-                res2 = forward_fn(
-                    sample_frames,
-                    batch_key_2,
-                    sample_label=label,
-                    sample_context=sample_context,
-                    use_face_swapper=use_swapper,
-                    swap_for_visuals_only=args.swap_for_visuals_only,
-                )
+                    forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
+                    res1 = forward_fn(
+                        sample_frames,
+                        batch_key_1,
+                        sample_label=label,
+                        sample_context=sample_context,
+                        use_face_swapper=use_swapper,
+                        swap_for_visuals_only=args.swap_for_visuals_only,
+                        return_frame_pairs=True,
+                    )
+                    res2 = forward_fn(
+                        sample_frames,
+                        batch_key_2,
+                        sample_label=label,
+                        sample_context=sample_context,
+                        use_face_swapper=use_swapper,
+                        swap_for_visuals_only=args.swap_for_visuals_only,
+                        return_frame_pairs=True,
+                    )
 
-                # Keep existing metrics based on a single branch for comparability.
-                metrics.update_detection(res1.gen_mask)
-                metrics.update_anonymization(res1.real_embeddings, res1.virtual_embeddings, res1.valid_mask)
+                    pair_count = min(len(res1.input_face_frames), len(res1.generated_face_frames), len(res2.generated_face_frames))
+                    for frame_idx in range(pair_count):
+                        input_face = res1.input_face_frames[frame_idx]
+                        gen_face_key1 = res1.generated_face_frames[frame_idx]
+                        gen_face_key2 = res2.generated_face_frames[frame_idx]
 
-                pair_mask = res1.valid_mask & res2.valid_mask
-                if pair_mask.any():
-                    pair_v1 = res1.virtual_embeddings[pair_mask]
-                    pair_v2 = res2.virtual_embeddings[pair_mask]
-                    metrics.update_diversity(pair_v1, pair_v2)
+                        if input_face.numel() == 0 or gen_face_key1.numel() == 0:
+                            metrics.update_geometric_utility(None, None)
+                        else:
+                            errs_key1 = geometric_evaluator.compute_pair_errors(
+                                _to_uint8_rgb_image(input_face),
+                                _to_uint8_rgb_image(gen_face_key1),
+                            )
+                            metrics.update_geometric_utility(errs_key1.head_posture_error, errs_key1.facial_expression_error)
 
-                valid_virtual = res1.virtual_embeddings[res1.valid_mask]
-                if valid_virtual.numel() > 0:
-                    metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
+                        if input_face.numel() == 0 or gen_face_key2.numel() == 0:
+                            metrics.update_geometric_utility(None, None)
+                        else:
+                            errs_key2 = geometric_evaluator.compute_pair_errors(
+                                _to_uint8_rgb_image(input_face),
+                                _to_uint8_rgb_image(gen_face_key2),
+                            )
+                            metrics.update_geometric_utility(errs_key2.head_posture_error, errs_key2.facial_expression_error)
 
-                    # Collect valid virtual embeddings for differentiation scoring across identities in the batch
-                    batch_diff_embeddings.append(valid_virtual.detach())
-                    batch_diff_labels.extend([label] * valid_virtual.shape[0])
+                    # Keep existing metrics based on a single branch for comparability.
+                    metrics.update_detection(res1.gen_mask)
+                    metrics.update_anonymization(res1.real_embeddings, res1.virtual_embeddings, res1.valid_mask)
 
-                total_samples += 1
+                    pair_mask = res1.valid_mask & res2.valid_mask
+                    if pair_mask.any():
+                        pair_v1 = res1.virtual_embeddings[pair_mask]
+                        pair_v2 = res2.virtual_embeddings[pair_mask]
+                        metrics.update_diversity(pair_v1, pair_v2)
 
-            if batch_diff_embeddings:
-                diff_embeds = torch.cat(batch_diff_embeddings, dim=0)
-                diff_labels = torch.as_tensor(batch_diff_labels, device=diff_embeds.device, dtype=torch.long)
-                metrics.update_differentiation(diff_embeds, diff_labels)
+                    valid_virtual = res1.virtual_embeddings[res1.valid_mask]
+                    if valid_virtual.numel() > 0:
+                        metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
 
-            batch_processing_end_time = time.perf_counter()
+                        # Collect valid virtual embeddings for differentiation scoring across identities in the batch
+                        batch_diff_embeddings.append(valid_virtual.detach())
+                        batch_diff_labels.extend([label] * valid_virtual.shape[0])
+
+                    total_samples += 1
+
+                if batch_diff_embeddings:
+                    diff_embeds = torch.cat(batch_diff_embeddings, dim=0)
+                    diff_labels = torch.as_tensor(batch_diff_labels, device=diff_embeds.device, dtype=torch.long)
+                    metrics.update_differentiation(diff_embeds, diff_labels)
+
+                batch_processing_end_time = time.perf_counter()
+    finally:
+        geometric_evaluator.close()
 
     if hasattr(pipeline, "finalize_saving"):
         pipeline.finalize_saving()
@@ -632,6 +675,13 @@ def main() -> None:
         eer_threshold=summary["differentiation"]["eer_threshold"],
         success=summary["differentiation"]["counts"]["success"],
         total=summary["differentiation"]["counts"]["total"],
+    )
+    _log_pipe(
+        "metric_geometric_utility",
+        head_posture_error=summary["geometric_utility"]["head_posture_error"],
+        facial_expression_error=summary["geometric_utility"]["facial_expression_error"],
+        valid_pairs=summary["geometric_utility"]["counts"]["valid_pairs"],
+        invalid_pairs=summary["geometric_utility"]["counts"]["invalid_pairs"],
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

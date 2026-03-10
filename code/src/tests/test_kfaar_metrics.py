@@ -39,6 +39,9 @@ def test_metrics_semantics_are_coherent() -> None:
     sync_embeds_src_b = torch.tensor([[0.0, 1.0]])
     metrics.add_synchronism_embeddings(7, sync_embeds_src_a, source_id="a")
     metrics.add_synchronism_embeddings(7, sync_embeds_src_b, source_id="b")
+    metrics.update_geometric_utility(2.0, 4.0)
+    metrics.update_geometric_utility(6.0, 8.0)
+    metrics.update_geometric_utility(None, None)
 
     summary = metrics.finalize()
 
@@ -47,6 +50,10 @@ def test_metrics_semantics_are_coherent() -> None:
     assert summary["differentiation_success_rate"] == 1.0
     assert summary["thresholds"]["diversity"] == 0.7
     assert summary["thresholds"]["differentiation"] == 0.7
+    assert summary["geometric_utility"]["head_posture_error"] == 4.0
+    assert summary["geometric_utility"]["facial_expression_error"] == 6.0
+    assert summary["geometric_utility"]["counts"]["valid_pairs"] == 2
+    assert summary["geometric_utility"]["counts"]["invalid_pairs"] == 1
 
 
 def test_auc_eer_is_reported_when_enabled() -> None:

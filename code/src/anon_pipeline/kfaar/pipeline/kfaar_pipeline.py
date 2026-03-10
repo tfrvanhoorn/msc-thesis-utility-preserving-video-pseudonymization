@@ -34,6 +34,8 @@ class KfaarResult:
     virtual_embeddings: torch.Tensor
     valid_mask: torch.Tensor # Mask where both input AND gen-output had faces
     gen_mask: torch.Tensor   # Mask where generated output had a detected face
+    input_face_frames: Sequence[torch.Tensor]
+    generated_face_frames: Sequence[torch.Tensor]
 
 class KfaarPipeline:
     def __init__(
@@ -110,6 +112,7 @@ class KfaarPipeline:
         sample_context: Optional[str] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
+        return_frame_pairs: bool = False,
     ) -> KfaarResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
@@ -162,8 +165,31 @@ class KfaarPipeline:
         
         images = None
         swapped_images = None
+        frame_pair_inputs: list[torch.Tensor] = []
+        frame_pair_generated: list[torch.Tensor] = []
         
         if self.stylegan is not None:
+            projected_seq = None
+            if return_frame_pairs:
+                if self._projector_is_lstm:
+                    k_in = key_t.view(1, 1, -1).expand(1, seq_len, -1)
+                    projected_seq = self.projector.project(real_emb.unsqueeze(0), k_in)[0]
+                else:
+                    key_seq = key_t.view(1, -1).expand(seq_len, -1)
+                    projected_seq = self.projector.project(real_emb, key_seq)
+
+                for frame_idx in range(seq_len):
+                    aligned_input = aligned_faces[frame_idx]
+                    if aligned_input.numel() == 0 or projected_seq is None:
+                        frame_pair_inputs.append(torch.empty(0, device=device))
+                        frame_pair_generated.append(torch.empty(0, device=device))
+                        continue
+                    z_i = projected_seq[frame_idx : frame_idx + 1]
+                    w_i = self.stylegan.map(z_i, truncation_psi=self.truncation_psi)
+                    img_i = self.stylegan.synthesize(w_i, noise_mode="const")[0].clamp(-1, 1).add(1).div(2.0)
+                    frame_pair_inputs.append(aligned_input.detach())
+                    frame_pair_generated.append(img_i.detach())
+
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
@@ -259,6 +285,8 @@ class KfaarPipeline:
             virtual_embeddings=v_embeddings,
             valid_mask=valid_mask,
             gen_mask=gen_mask_t,
+            input_face_frames=frame_pair_inputs,
+            generated_face_frames=frame_pair_generated,
         )
 
     def forward_eval(
@@ -272,6 +300,7 @@ class KfaarPipeline:
         sample_context: Optional[str] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
+        return_frame_pairs: bool = False,
     ) -> KfaarResult:
         with torch.no_grad():
             return self.forward(
@@ -283,6 +312,7 @@ class KfaarPipeline:
                 sample_context=sample_context,
                 use_face_swapper=use_face_swapper,
                 swap_for_visuals_only=swap_for_visuals_only,
+                return_frame_pairs=return_frame_pairs,
             )
 
     def hpvg_train_step(
