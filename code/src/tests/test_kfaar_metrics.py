@@ -77,11 +77,15 @@ def test_auc_eer_is_reported_when_enabled() -> None:
 
     summary = metrics.finalize()
 
-    for metric_name in ["anonymization", "synchronism_total", "diversity", "differentiation"]:
+    for metric_name in [
+        "anonymization",
+        "synchronism_total",
+        "synchronism_within",
+        "synchronism_cross",
+        "diversity",
+        "differentiation",
+    ]:
         metric = summary[metric_name]
         assert metric["auc"] is not None
         assert metric["eer"] is not None
         assert metric["eer_threshold"] is not None
-
-    assert "synchronism_within" in summary
-    assert "synchronism_cross" in summary

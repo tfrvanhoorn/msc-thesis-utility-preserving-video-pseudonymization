@@ -30,7 +30,9 @@ class MetricsAccumulator:
     diversity_total: int = 0
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
     _anonymization_scores: List[float] = field(default_factory=list, init=False, repr=False)
-    _synchronism_scores: List[float] = field(default_factory=list, init=False, repr=False)
+    _synchronism_total_scores: List[float] = field(default_factory=list, init=False, repr=False)
+    _synchronism_within_scores: List[float] = field(default_factory=list, init=False, repr=False)
+    _synchronism_cross_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _diversity_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _differentiation_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _synchronism_computed: bool = field(default=False, init=False, repr=False)
@@ -141,6 +143,8 @@ class MetricsAccumulator:
         auc_eer = self._compute_auc_eer() if self.compute_auc_eer else {
             "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
             "synchronism_total": {"auc": None, "eer": None, "eer_threshold": None},
+            "synchronism_within": {"auc": None, "eer": None, "eer_threshold": None},
+            "synchronism_cross": {"auc": None, "eer": None, "eer_threshold": None},
             "diversity": {"auc": None, "eer": None, "eer_threshold": None},
             "differentiation": {"auc": None, "eer": None, "eer_threshold": None},
         }
@@ -178,9 +182,9 @@ class MetricsAccumulator:
             "synchronism_within": {
                 "success_rate": synchronism_within_success_rate,
                 "threshold": float(self.synchronism_threshold),
-                "auc": None,
-                "eer": None,
-                "eer_threshold": None,
+                "auc": auc_eer["synchronism_within"]["auc"],
+                "eer": auc_eer["synchronism_within"]["eer"],
+                "eer_threshold": auc_eer["synchronism_within"]["eer_threshold"],
                 "counts": {
                     "success": int(self.synchronism_within_success),
                     "total": int(self.synchronism_within_total),
@@ -189,9 +193,9 @@ class MetricsAccumulator:
             "synchronism_cross": {
                 "success_rate": synchronism_cross_success_rate,
                 "threshold": float(self.synchronism_threshold),
-                "auc": None,
-                "eer": None,
-                "eer_threshold": None,
+                "auc": auc_eer["synchronism_cross"]["auc"],
+                "eer": auc_eer["synchronism_cross"]["eer"],
+                "eer_threshold": auc_eer["synchronism_cross"]["eer_threshold"],
                 "counts": {
                     "success": int(self.synchronism_cross_success),
                     "total": int(self.synchronism_cross_total),
@@ -246,12 +250,14 @@ class MetricsAccumulator:
         }
 
     def _compute_auc_eer(self) -> Dict[str, Dict[str, float | None]]:
-        similar_pool = list(self._synchronism_scores)
+        similar_pool = list(self._synchronism_total_scores) + list(self._synchronism_within_scores) + list(self._synchronism_cross_scores)
         dissimilar_pool = list(self._anonymization_scores) + list(self._diversity_scores) + list(self._differentiation_scores)
 
         return {
             "anonymization": self._compute_metric_auc_eer(self._anonymization_scores, similar_pool, positive_when_lower=True),
-            "synchronism_total": self._compute_metric_auc_eer(self._synchronism_scores, dissimilar_pool, positive_when_lower=False),
+            "synchronism_total": self._compute_metric_auc_eer(self._synchronism_total_scores, dissimilar_pool, positive_when_lower=False),
+            "synchronism_within": self._compute_metric_auc_eer(self._synchronism_within_scores, dissimilar_pool, positive_when_lower=False),
+            "synchronism_cross": self._compute_metric_auc_eer(self._synchronism_cross_scores, dissimilar_pool, positive_when_lower=False),
             "diversity": self._compute_metric_auc_eer(self._diversity_scores, similar_pool, positive_when_lower=True),
             "differentiation": self._compute_metric_auc_eer(self._differentiation_scores, similar_pool, positive_when_lower=True),
         }
@@ -344,7 +350,7 @@ class MetricsAccumulator:
                     self.synchronism_success += int(successes_all)
                     self.synchronism_total += int(cos_all.numel())
                     if self.compute_auc_eer:
-                        self._synchronism_scores.extend(cos_all.detach().cpu().tolist())
+                        self._synchronism_total_scores.extend(cos_all.detach().cpu().tolist())
 
             # Within-source
             for embeds in embeds_by_source.values():
@@ -360,6 +366,8 @@ class MetricsAccumulator:
                 successes = (cos >= self.synchronism_threshold).sum().item()
                 self.synchronism_within_success += int(successes)
                 self.synchronism_within_total += int(cos.numel())
+                if self.compute_auc_eer:
+                    self._synchronism_within_scores.extend(cos.detach().cpu().tolist())
 
             # Cross-source (different videos for the same identity)
             source_keys = list(embeds_by_source.keys())
@@ -376,5 +384,7 @@ class MetricsAccumulator:
                         successes = (cos >= self.synchronism_threshold).sum().item()
                         self.synchronism_cross_success += int(successes)
                         self.synchronism_cross_total += int(cos.numel())
+                        if self.compute_auc_eer:
+                            self._synchronism_cross_scores.extend(cos.detach().cpu().tolist())
 
         self._synchronism_computed = True

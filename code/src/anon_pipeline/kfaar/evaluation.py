@@ -597,6 +597,9 @@ def main() -> None:
         "metric_synchronism_within",
         success_rate=summary["synchronism_within"]["success_rate"],
         threshold=summary["synchronism_within"]["threshold"],
+        auc=summary["synchronism_within"]["auc"],
+        eer=summary["synchronism_within"]["eer"],
+        eer_threshold=summary["synchronism_within"]["eer_threshold"],
         success=summary["synchronism_within"]["counts"]["success"],
         total=summary["synchronism_within"]["counts"]["total"],
     )
@@ -604,6 +607,9 @@ def main() -> None:
         "metric_synchronism_cross",
         success_rate=summary["synchronism_cross"]["success_rate"],
         threshold=summary["synchronism_cross"]["threshold"],
+        auc=summary["synchronism_cross"]["auc"],
+        eer=summary["synchronism_cross"]["eer"],
+        eer_threshold=summary["synchronism_cross"]["eer_threshold"],
         success=summary["synchronism_cross"]["counts"]["success"],
         total=summary["synchronism_cross"]["counts"]["total"],
     )
