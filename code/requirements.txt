@@ -19,7 +19,7 @@ huggingface-hub==0.22.2
 numpy==1.23.5         # Downgraded for SimSwap/ONNX object array compatibility
 insightface==0.7.3
 opencv-python-headless==4.10.0.84
-mediapipe==0.10.11
+mediapipe==0.10.8
 
 # --- Added Requirements (Specific to SimSwap) ---
 moviepy==1.0.3        # Required for video frame management
