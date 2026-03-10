@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,11 @@ from anon_pipeline.kfaar.components import (
 )  # noqa: E402
 from anon_pipeline.shared.data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
 from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
+
+
+def _log_json(event: str, **payload: Any) -> None:
+    record = {"event": event, **payload}
+    logging.info(json.dumps(record, sort_keys=True, default=str))
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,11 +189,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--syn_threshold", type=float, default=0.7, help="Cosine similarity threshold for synchronism success")
     parser.add_argument(
         "--div_threshold",
-        "--dif_threshold",
         dest="div_threshold",
         type=float,
         default=0.7,
-        help="Cosine similarity threshold for diversity success (deprecated alias: --dif_threshold)",
+        help="Cosine similarity threshold for diversity success (same identity, different keys)",
+    )
+    parser.add_argument(
+        "--diff_threshold",
+        dest="diff_threshold",
+        type=float,
+        default=0.7,
+        help="Cosine similarity threshold for differentiation success (different identities, same key)",
+    )
+    parser.add_argument(
+        "--dif_threshold",
+        dest="diff_threshold_legacy",
+        type=float,
+        default=None,
+        help="[Deprecated] Legacy alias for --diff_threshold",
+    )
+    parser.add_argument(
+        "--compute_auc_eer",
+        action="store_true",
+        help="Compute AUC/EER for anonymization, synchronism(all), diversity, and differentiation",
     )
 
     # Dataset & Split
@@ -295,6 +319,26 @@ def main() -> None:
     args = parse_args()
     configure_logging()
     device = torch.device(args.device)
+
+    if args.diff_threshold_legacy is not None:
+        if args.diff_threshold != 0.7 and args.diff_threshold != args.diff_threshold_legacy:
+            logging.warning("Ignoring --dif_threshold because --diff_threshold was explicitly provided")
+        else:
+            args.diff_threshold = args.diff_threshold_legacy
+            logging.warning("--dif_threshold is deprecated; please use --diff_threshold")
+
+    _log_json(
+        "evaluation_start",
+        checkpoint=str(args.checkpoint),
+        dataset_type=args.dataset_type,
+        compute_auc_eer=bool(args.compute_auc_eer),
+        thresholds={
+            "anonymization": float(args.ano_threshold),
+            "synchronism": float(args.syn_threshold),
+            "diversity": float(args.div_threshold),
+            "differentiation": float(args.diff_threshold),
+        },
+    )
 
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
@@ -426,17 +470,26 @@ def main() -> None:
     metrics = MetricsAccumulator(
         anonymization_threshold=args.ano_threshold,
         synchronism_threshold=args.syn_threshold,
-        differentiation_threshold=args.div_threshold,
+        diversity_threshold=args.div_threshold,
+        differentiation_threshold=args.diff_threshold,
+        compute_auc_eer=args.compute_auc_eer,
     )
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
 
     total_samples = 0
+    batch_processing_start_time: float | None = None
+    batch_processing_end_time: float | None = None
     with torch.no_grad():
         for batch in test_loader:
-            batch_div_embeddings: list[torch.Tensor] = []
-            batch_div_labels: list[int] = []
-            # Use two random keys shared across the batch for differentiation evaluation.
+            if batch_processing_start_time is None:
+                batch_processing_start_time = time.perf_counter()
+
+            batch_diff_embeddings: list[torch.Tensor] = []
+            batch_diff_labels: list[int] = []
+            # Use two random keys shared across the batch.
+            # key1 branch is used for differentiation (different identities, same key).
+            # key1/key2 pair is used for diversity (same identity, different keys).
             batch_key_1 = torch.randn(args.key_dim, generator=rng, device=device)
             batch_key_2 = torch.randn(args.key_dim, generator=rng, device=device)
 
@@ -485,37 +538,46 @@ def main() -> None:
                 if pair_mask.any():
                     pair_v1 = res1.virtual_embeddings[pair_mask]
                     pair_v2 = res2.virtual_embeddings[pair_mask]
-                    metrics.update_differentiation(pair_v1, pair_v2)
+                    metrics.update_diversity(pair_v1, pair_v2)
 
                 valid_virtual = res1.virtual_embeddings[res1.valid_mask]
                 if valid_virtual.numel() > 0:
                     metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
 
-                    # Collect valid virtual embeddings for diversity scoring across identities in the batch
-                    batch_div_embeddings.append(valid_virtual.detach())
-                    batch_div_labels.extend([label] * valid_virtual.shape[0])
+                    # Collect valid virtual embeddings for differentiation scoring across identities in the batch
+                    batch_diff_embeddings.append(valid_virtual.detach())
+                    batch_diff_labels.extend([label] * valid_virtual.shape[0])
 
                 total_samples += 1
 
-            if batch_div_embeddings:
-                div_embeds = torch.cat(batch_div_embeddings, dim=0)
-                div_labels = torch.as_tensor(batch_div_labels, device=div_embeds.device, dtype=torch.long)
-                metrics.update_diversity(div_embeds, div_labels)
+            if batch_diff_embeddings:
+                diff_embeds = torch.cat(batch_diff_embeddings, dim=0)
+                diff_labels = torch.as_tensor(batch_diff_labels, device=diff_embeds.device, dtype=torch.long)
+                metrics.update_differentiation(diff_embeds, diff_labels)
+
+            batch_processing_end_time = time.perf_counter()
 
     if hasattr(pipeline, "finalize_saving"):
         pipeline.finalize_saving()
 
+    batch_processing_seconds = 0.0
+    if batch_processing_start_time is not None and batch_processing_end_time is not None:
+        batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
+
     summary = metrics.finalize()
-    logging.info(
-        "Evaluation complete | detection_rate=%.4f | anonymization_success=%.4f | synchronism_success=%.4f | syn_within=%.4f | syn_cross=%.4f | differentiation_success=%.4f | diversity_success=%.4f | samples=%d",
-        summary["detection_rate"],
-        summary["anonymization_success_rate"],
-        summary["synchronism_success_rate"],
-        summary["synchronism_within_success_rate"],
-        summary["synchronism_cross_success_rate"],
-        summary.get("differentiation_success_rate", 0.0),
-        summary.get("diversity_success_rate", 0.0),
-        total_samples,
+    _log_json(
+        "evaluation_metrics_summary",
+        checkpoint=str(args.checkpoint),
+        dataset_type=args.dataset_type,
+        total_samples=total_samples,
+        batch_processing_seconds=batch_processing_seconds,
+        metrics={
+            "detection_rate": summary["detection_rate"],
+            "anonymization": summary["anonymization"],
+            "synchronism": summary["synchronism"],
+            "diversity": summary["diversity"],
+            "differentiation": summary["differentiation"],
+        },
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -529,6 +591,9 @@ def main() -> None:
                 "seed": args.seed,
                 "metrics": summary,
                 "total_samples": total_samples,
+                "timing": {
+                    "batch_processing_seconds": batch_processing_seconds,
+                },
                 "settings": serialized_args,
                 "identities": {
                     "all": all_identities,
@@ -537,7 +602,13 @@ def main() -> None:
             f,
             indent=2,
         )
-    logging.info("Saved evaluation report to %s", report_path)
+    _log_json(
+        "evaluation_report_saved",
+        path=str(report_path),
+        checkpoint=str(args.checkpoint),
+        dataset_type=args.dataset_type,
+        batch_processing_seconds=batch_processing_seconds,
+    )
 
 
 if __name__ == "__main__":
