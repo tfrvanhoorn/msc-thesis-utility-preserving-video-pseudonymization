@@ -399,7 +399,6 @@ def main() -> None:
         max_per_epoch=None,
         save_videos=save_videos,
     )
-    pipeline.begin_epoch(1)
 
     all_identities = list_identities(cfg.data)
     if args.max_identities is not None:

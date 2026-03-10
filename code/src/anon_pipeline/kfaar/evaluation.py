@@ -407,8 +407,6 @@ def main() -> None:
             max_per_epoch=save_max,
             save_videos=args.save_videos,
         )
-        if hasattr(pipeline, "begin_epoch"):
-            pipeline.begin_epoch(1)
 
     logging.info("Loading checkpoint %s", args.checkpoint)
     ckpt = torch.load(args.checkpoint, map_location=device)
