@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import torch
 
 from ..components import (
@@ -23,6 +26,7 @@ def build_kfaar_pipeline(
     face_swapper: object | None = None,
 ) -> KfaarPipeline:
     target_device = _resolve_device(config, device)
+    eyeglasses_boundary = _load_eyeglasses_boundary(config, target_device)
 
     detector = MTCNNDetector(
         image_size=config.detector.image_size,
@@ -72,6 +76,52 @@ def build_kfaar_pipeline(
         device=target_device,
         truncation_psi=truncation_psi,
         face_swapper=face_swapper,
+        remove_eyeglasses=config.eyeglasses_boundary.enabled,
+        eyeglasses_boundary=eyeglasses_boundary,
+        eyeglasses_removal_scale=config.eyeglasses_boundary.removal_scale,
+    )
+
+
+def _load_eyeglasses_boundary(config: PipelineConfig, device: torch.device) -> torch.Tensor | None:
+    boundary_cfg = config.eyeglasses_boundary
+    if not boundary_cfg.enabled:
+        return None
+    if boundary_cfg.boundary_path is None:
+        raise ValueError("Eyeglasses removal is enabled but no boundary path was provided")
+
+    boundary_path = Path(boundary_cfg.boundary_path)
+    if boundary_path.suffix.lower() != ".npy":
+        raise ValueError(f"Unsupported boundary format '{boundary_path.suffix}'. Expected a .npy file")
+    if not boundary_path.exists():
+        raise FileNotFoundError(f"Eyeglasses boundary file not found: {boundary_path}")
+
+    boundary_np = np.load(boundary_path)
+    if not isinstance(boundary_np, np.ndarray):
+        raise TypeError(f"Expected NumPy array from boundary file, got {type(boundary_np)}")
+
+    boundary = torch.from_numpy(boundary_np).float().to(device)
+    boundary = _normalize_eyeglasses_boundary_shape(boundary)
+    return boundary
+
+
+def _normalize_eyeglasses_boundary_shape(boundary: torch.Tensor) -> torch.Tensor:
+    # InterfaceGAN boundaries can come as (512,), (1, 512), or (1, 1, 512).
+    if boundary.ndim == 1:
+        if boundary.shape[0] != 512:
+            raise ValueError(f"Expected boundary shape (512,), got {tuple(boundary.shape)}")
+        return boundary.unsqueeze(0)
+
+    if boundary.ndim == 2:
+        if boundary.shape[1] != 512 or boundary.shape[0] != 1:
+            raise ValueError(f"Expected boundary shape (1, 512), got {tuple(boundary.shape)}")
+        return boundary
+
+    if boundary.ndim == 3 and boundary.shape[0] == 1 and boundary.shape[1] == 1 and boundary.shape[2] == 512:
+        return boundary.view(1, 512)
+
+    raise ValueError(
+        "Unsupported eyeglasses boundary shape "
+        f"{tuple(boundary.shape)}. Expected (512,), (1, 512), or (1, 1, 512)."
     )
 
 

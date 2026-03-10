@@ -52,6 +52,9 @@ class KfaarPipeline:
         save_max_per_epoch: Optional[int] = None,
         truncation_psi: float = 0.5,
         face_swapper: object | None = None,
+        remove_eyeglasses: bool = False,
+        eyeglasses_boundary: Optional[torch.Tensor] = None,
+        eyeglasses_removal_scale: float = 1.0,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -62,6 +65,9 @@ class KfaarPipeline:
         self.device = device or next(projector.parameters()).device
         self._projector_is_lstm = isinstance(projector, ProjectorLSTM)
         self._warned_face_swapper = False
+        self._remove_eyeglasses = bool(remove_eyeglasses)
+        self._eyeglasses_boundary = eyeglasses_boundary
+        self._eyeglasses_removal_scale = float(eyeglasses_removal_scale)
         
         # Optimizer Setup
         self.optimizer = torch.optim.Adam(self.projector.parameters(), lr=1e-4)
@@ -186,11 +192,13 @@ class KfaarPipeline:
                         continue
                     z_i = projected_seq[frame_idx : frame_idx + 1]
                     w_i = self.stylegan.map(z_i, truncation_psi=self.truncation_psi)
+                    w_i = self._apply_eyeglasses_removal(w_i)
                     img_i = self.stylegan.synthesize(w_i, noise_mode="const")[0].clamp(-1, 1).add(1).div(2.0)
                     frame_pair_inputs.append(aligned_input.detach())
                     frame_pair_generated.append(img_i.detach())
 
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
+                w = self._apply_eyeglasses_removal(w)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
             det_input_embed: Optional[torch.Tensor] = None
@@ -288,6 +296,24 @@ class KfaarPipeline:
             input_face_frames=frame_pair_inputs,
             generated_face_frames=frame_pair_generated,
         )
+
+    def _apply_eyeglasses_removal(self, w: torch.Tensor) -> torch.Tensor:
+        if not self._remove_eyeglasses:
+            return w
+        if self._eyeglasses_boundary is None:
+            raise RuntimeError("Eyeglasses removal enabled but no boundary tensor is configured")
+        if self._eyeglasses_removal_scale == 0.0:
+            return w
+
+        boundary = self._eyeglasses_boundary.to(device=w.device, dtype=w.dtype)
+        if boundary.ndim != 2 or boundary.shape[1] != w.shape[1]:
+            raise ValueError(
+                "Eyeglasses boundary shape mismatch. "
+                f"Expected (1, {w.shape[1]}), got {tuple(boundary.shape)}"
+            )
+
+        # Move away from the eyeglasses direction in W-space.
+        return w - (self._eyeglasses_removal_scale * boundary)
 
     def forward_eval(
         self,

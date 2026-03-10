@@ -58,12 +58,20 @@ class ProjectorConfig:
 
 
 @dataclass
+class EyeglassesBoundaryConfig:
+    enabled: bool = False
+    boundary_path: Optional[Path] = None
+    removal_scale: float = 1.0
+
+
+@dataclass
 class PipelineConfig:
     data: DataConfig
     detector: DetectorConfig
     embedding: EmbeddingConfig
     seed: SeedConfig
     projector: ProjectorConfig = field(default_factory=ProjectorConfig)
+    eyeglasses_boundary: EyeglassesBoundaryConfig = field(default_factory=EyeglassesBoundaryConfig)
 
     @staticmethod
     def _require(mapping: Mapping[str, Any], key: str) -> Any:
@@ -78,6 +86,7 @@ class PipelineConfig:
         embedding_cfg = cls._require(payload, "embedding")
         seed_cfg = cls._require(payload, "seed")
         projector_cfg = payload.get("projector", {})
+        eyeglasses_cfg = payload.get("eyeglasses_boundary", {})
 
         def _path_or_none(value: Optional[str]) -> Optional[Path]:
             return Path(value) if value else None
@@ -101,6 +110,12 @@ class PipelineConfig:
             lstm_bidirectional=bool(projector_cfg.get("lstm_bidirectional", True)),
         )
 
+        eyeglasses_boundary = EyeglassesBoundaryConfig(
+            enabled=bool(eyeglasses_cfg.get("enabled", False)),
+            boundary_path=_path_or_none(eyeglasses_cfg.get("boundary_path")),
+            removal_scale=float(eyeglasses_cfg.get("removal_scale", 1.0)),
+        )
+
         return cls(
             data=DataConfig(
                 dataset_path=Path(cls._require(data_cfg, "dataset_path")),
@@ -117,4 +132,5 @@ class PipelineConfig:
             embedding=EmbeddingConfig(**embedding_kwargs),
             seed=SeedConfig(**seed_cfg),
             projector=projector,
+            eyeglasses_boundary=eyeglasses_boundary,
         )

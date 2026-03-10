@@ -30,6 +30,7 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
     DataConfig,
     DetectorConfig,
     EmbeddingConfig,
+    EyeglassesBoundaryConfig,
     PipelineConfig,
     ProjectorConfig,
     SeedConfig,
@@ -86,6 +87,9 @@ def parse_args() -> argparse.Namespace:
         help="Path to StyleGAN2 .pkl checkpoint",
     )
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
+    parser.add_argument("--remove_eyeglasses", action="store_true", help="Push StyleGAN away from generating eyeglasses in W-space")
+    parser.add_argument("--eyeglasses_boundary_path", type=Path, default=None, help="Path to InterfaceGAN eyeglasses boundary (.npy) in W-space")
+    parser.add_argument("--eyeglasses_removal_scale", type=float, default=1.0, help="Scale factor used in W-space eyeglasses removal: w = w - scale * boundary")
     parser.add_argument(
         "--output_dir",
         type=Path,
@@ -433,6 +437,11 @@ def main() -> None:
         embedding=embedding_cfg,
         seed=SeedConfig(secret_key="master_thesis_secret"),
         projector=projector_cfg,
+        eyeglasses_boundary=EyeglassesBoundaryConfig(
+            enabled=args.remove_eyeglasses,
+            boundary_path=args.eyeglasses_boundary_path,
+            removal_scale=args.eyeglasses_removal_scale,
+        ),
     )
 
     logging.info("Building data loader for evaluation (all identities)...")
