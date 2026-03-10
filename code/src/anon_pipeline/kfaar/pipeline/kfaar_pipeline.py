@@ -306,11 +306,25 @@ class KfaarPipeline:
             return w
 
         boundary = self._eyeglasses_boundary.to(device=w.device, dtype=w.dtype)
-        if boundary.ndim != 2 or boundary.shape[1] != w.shape[1]:
-            raise ValueError(
-                "Eyeglasses boundary shape mismatch. "
-                f"Expected (1, {w.shape[1]}), got {tuple(boundary.shape)}"
-            )
+
+        if w.ndim == 2:
+            # W-space: (batch, 512)
+            if boundary.ndim != 2 or boundary.shape[1] != w.shape[1]:
+                raise ValueError(
+                    "Eyeglasses boundary shape mismatch for W-space. "
+                    f"Expected (?, {w.shape[1]}), got {tuple(boundary.shape)}"
+                )
+        elif w.ndim == 3:
+            # W+-space: (batch, num_ws, 512)
+            if boundary.ndim == 2 and boundary.shape[1] == w.shape[2]:
+                boundary = boundary.unsqueeze(1)
+            if boundary.ndim != 3 or boundary.shape[2] != w.shape[2] or boundary.shape[1] not in (1, w.shape[1]):
+                raise ValueError(
+                    "Eyeglasses boundary shape mismatch for W+-space. "
+                    f"Expected (?, 1|{w.shape[1]}, {w.shape[2]}), got {tuple(boundary.shape)}"
+                )
+        else:
+            raise ValueError(f"Unsupported latent shape for eyeglasses removal: {tuple(w.shape)}")
 
         # Move away from the eyeglasses direction in W-space.
         return w - (self._eyeglasses_removal_scale * boundary)
