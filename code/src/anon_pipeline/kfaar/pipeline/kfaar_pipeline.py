@@ -198,7 +198,7 @@ class KfaarPipeline:
                     frame_pair_generated.append(img_i.detach())
 
             w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
-                w = self._apply_eyeglasses_removal(w)
+            w = self._apply_eyeglasses_removal(w)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
             det_input_embed: Optional[torch.Tensor] = None
