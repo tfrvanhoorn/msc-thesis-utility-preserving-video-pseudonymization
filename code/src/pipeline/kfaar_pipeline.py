@@ -20,6 +20,8 @@ from losses import (
     synchronism_loss,
     diversity_loss,
     differentiation_loss,
+    eyeglasses_boundary_regularization_loss,
+    pose_boundary_regularization_loss,
     total_hpvg_loss,
 )
 
@@ -36,6 +38,7 @@ class KfaarResult:
     gen_mask: torch.Tensor   # Mask where generated output had a detected face
     input_face_frames: Sequence[torch.Tensor]
     generated_face_frames: Sequence[torch.Tensor]
+    w_pre_boundary: Optional[torch.Tensor] = None
 
 class KfaarPipeline:
     def __init__(
@@ -55,6 +58,15 @@ class KfaarPipeline:
         remove_eyeglasses: bool = False,
         eyeglasses_boundary: Optional[torch.Tensor] = None,
         eyeglasses_removal_scale: float = 1.0,
+        remove_pose: bool = False,
+        pose_boundary: Optional[torch.Tensor] = None,
+        pose_removal_scale: float = 1.0,
+        eyeglasses_reg_enabled: bool = False,
+        eyeglasses_reg_weight: float = 0.0,
+        eyeglasses_reg_margin: float = 0.0,
+        pose_reg_enabled: bool = False,
+        pose_reg_weight: float = 0.0,
+        pose_reg_margin: float = 0.0,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -68,6 +80,15 @@ class KfaarPipeline:
         self._remove_eyeglasses = bool(remove_eyeglasses)
         self._eyeglasses_boundary = eyeglasses_boundary
         self._eyeglasses_removal_scale = float(eyeglasses_removal_scale)
+        self._remove_pose = bool(remove_pose)
+        self._pose_boundary = pose_boundary
+        self._pose_removal_scale = float(pose_removal_scale)
+        self._eyeglasses_reg_enabled = bool(eyeglasses_reg_enabled)
+        self._eyeglasses_reg_weight = float(eyeglasses_reg_weight)
+        self._eyeglasses_reg_margin = float(eyeglasses_reg_margin)
+        self._pose_reg_enabled = bool(pose_reg_enabled)
+        self._pose_reg_weight = float(pose_reg_weight)
+        self._pose_reg_margin = float(pose_reg_margin)
         
         # Optimizer Setup
         self.optimizer = torch.optim.Adam(self.projector.parameters(), lr=1e-4)
@@ -171,6 +192,7 @@ class KfaarPipeline:
         
         images = None
         swapped_images = None
+        w_pre_boundary = None
         frame_pair_inputs: list[torch.Tensor] = []
         frame_pair_generated: list[torch.Tensor] = []
         
@@ -193,12 +215,15 @@ class KfaarPipeline:
                     z_i = projected_seq[frame_idx : frame_idx + 1]
                     w_i = self.stylegan.map(z_i, truncation_psi=self.truncation_psi)
                     w_i = self._apply_eyeglasses_removal(w_i)
+                    w_i = self._apply_pose_removal(w_i)
                     img_i = self.stylegan.synthesize(w_i, noise_mode="const")[0].clamp(-1, 1).add(1).div(2.0)
                     frame_pair_inputs.append(aligned_input.detach())
                     frame_pair_generated.append(img_i.detach())
 
-            w = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
+            w_pre_boundary = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
+            w = w_pre_boundary
             w = self._apply_eyeglasses_removal(w)
+            w = self._apply_pose_removal(w)
             images = self.stylegan.synthesize(w, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
             det_input_embed: Optional[torch.Tensor] = None
@@ -295,6 +320,7 @@ class KfaarPipeline:
             gen_mask=gen_mask_t,
             input_face_frames=frame_pair_inputs,
             generated_face_frames=frame_pair_generated,
+            w_pre_boundary=w_pre_boundary,
         )
 
     def _apply_eyeglasses_removal(self, w: torch.Tensor) -> torch.Tensor:
@@ -305,13 +331,43 @@ class KfaarPipeline:
         if self._eyeglasses_removal_scale == 0.0:
             return w
 
-        boundary = self._eyeglasses_boundary.to(device=w.device, dtype=w.dtype)
+        return self._apply_boundary_removal(
+            w,
+            boundary=self._eyeglasses_boundary,
+            scale=self._eyeglasses_removal_scale,
+            boundary_name="eyeglasses",
+        )
+
+    def _apply_pose_removal(self, w: torch.Tensor) -> torch.Tensor:
+        if not self._remove_pose:
+            return w
+        if self._pose_boundary is None:
+            raise RuntimeError("Pose boundary removal enabled but no boundary tensor is configured")
+        if self._pose_removal_scale == 0.0:
+            return w
+
+        return self._apply_boundary_removal(
+            w,
+            boundary=self._pose_boundary,
+            scale=self._pose_removal_scale,
+            boundary_name="pose",
+        )
+
+    @staticmethod
+    def _apply_boundary_removal(
+        w: torch.Tensor,
+        *,
+        boundary: torch.Tensor,
+        scale: float,
+        boundary_name: str,
+    ) -> torch.Tensor:
+        boundary = boundary.to(device=w.device, dtype=w.dtype)
 
         if w.ndim == 2:
             # W-space: (batch, 512)
             if boundary.ndim != 2 or boundary.shape[1] != w.shape[1]:
                 raise ValueError(
-                    "Eyeglasses boundary shape mismatch for W-space. "
+                    f"{boundary_name.capitalize()} boundary shape mismatch for W-space. "
                     f"Expected (?, {w.shape[1]}), got {tuple(boundary.shape)}"
                 )
         elif w.ndim == 3:
@@ -320,14 +376,14 @@ class KfaarPipeline:
                 boundary = boundary.unsqueeze(1)
             if boundary.ndim != 3 or boundary.shape[2] != w.shape[2] or boundary.shape[1] not in (1, w.shape[1]):
                 raise ValueError(
-                    "Eyeglasses boundary shape mismatch for W+-space. "
+                    f"{boundary_name.capitalize()} boundary shape mismatch for W+-space. "
                     f"Expected (?, 1|{w.shape[1]}, {w.shape[2]}), got {tuple(boundary.shape)}"
                 )
         else:
-            raise ValueError(f"Unsupported latent shape for eyeglasses removal: {tuple(w.shape)}")
+            raise ValueError(f"Unsupported latent shape for {boundary_name} removal: {tuple(w.shape)}")
 
-        # Move away from the eyeglasses direction in W-space.
-        return w - (self._eyeglasses_removal_scale * boundary)
+        # Move away from the selected boundary direction in latent space.
+        return w - (float(scale) * boundary)
 
     def forward_eval(
         self,
@@ -399,6 +455,12 @@ class KfaarPipeline:
     def hpvg_loss_components(
         self, frames, labels, seq_lens, key_1, key_2,
         margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0,
+        use_eyeglasses_regularization: bool = False,
+        lambda_glasses: float = 0.0,
+        glasses_margin: float = 0.0,
+        use_pose_regularization: bool = False,
+        lambda_pose: float = 0.0,
+        pose_margin: float = 0.0,
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
@@ -409,6 +471,7 @@ class KfaarPipeline:
         seq_lens_list = [int(x) for x in (seq_lens.tolist() if torch.is_tensor(seq_lens) else seq_lens)]
 
         all_real, all_v1, all_v2, all_labels = [], [], [], []
+        all_w_pre = []
         proj_norm_terms = []
         nondet_faces = 0
         det_failures = 0
@@ -436,6 +499,10 @@ class KfaarPipeline:
 
             proj_norm_terms.append(res1.projected_z.pow(2).mean())
             proj_norm_terms.append(res2.projected_z.pow(2).mean())
+            if res1.w_pre_boundary is not None:
+                all_w_pre.append(res1.w_pre_boundary)
+            if res2.w_pre_boundary is not None:
+                all_w_pre.append(res2.w_pre_boundary)
             nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
             
             mask = res1.valid_mask & res2.valid_mask
@@ -450,13 +517,49 @@ class KfaarPipeline:
                 all_labels.extend([label_int] * int(mask.sum()))
 
         proj_norm = torch.stack(proj_norm_terms).mean() if proj_norm_terms else torch.tensor(0.0, device=device)
+        w_pre_cat = torch.cat(all_w_pre, dim=0) if all_w_pre else None
+
+        effective_glasses_reg = bool(use_eyeglasses_regularization) and self._eyeglasses_reg_enabled
+        effective_pose_reg = bool(use_pose_regularization) and self._pose_reg_enabled
+        lambda_glasses_eff = float(lambda_glasses) if use_eyeglasses_regularization else self._eyeglasses_reg_weight
+        lambda_pose_eff = float(lambda_pose) if use_pose_regularization else self._pose_reg_weight
+        glasses_margin_eff = float(glasses_margin) if use_eyeglasses_regularization else self._eyeglasses_reg_margin
+        pose_margin_eff = float(pose_margin) if use_pose_regularization else self._pose_reg_margin
+
+        glasses_reg = torch.tensor(0.0, device=device)
+        if (
+            effective_glasses_reg
+            and lambda_glasses_eff > 0.0
+            and self._eyeglasses_boundary is not None
+            and w_pre_cat is not None
+        ):
+            glasses_reg = eyeglasses_boundary_regularization_loss(
+                w_pre_cat,
+                self._eyeglasses_boundary,
+                margin=glasses_margin_eff,
+            )
+
+        pose_reg = torch.tensor(0.0, device=device)
+        if (
+            effective_pose_reg
+            and lambda_pose_eff > 0.0
+            and self._pose_boundary is not None
+            and w_pre_cat is not None
+        ):
+            pose_reg = pose_boundary_regularization_loss(
+                w_pre_cat,
+                self._pose_boundary,
+                margin=pose_margin_eff,
+            )
+
+        boundary_reg_total = (lambda_glasses_eff * glasses_reg) + (lambda_pose_eff * pose_reg)
 
         # --- VALIDATION GATE ---
         if not all_labels:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet
+            total = penalty_missing_pairs + penalty_nondet + boundary_reg_total
             return ano, syn, div, dif, total
 
         # Requirement: At least 2 identities AND each has at least 2 samples
@@ -468,7 +571,7 @@ class KfaarPipeline:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet
+            total = penalty_missing_pairs + penalty_nondet + boundary_reg_total
             return ano, syn, div, dif, total
 
         # Filter tensors for Synchronism/Differentiation
@@ -492,7 +595,7 @@ class KfaarPipeline:
         penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
 
         total = (lambda_ano * ano + lambda_syn * syn + 
-            lambda_div * div + lambda_dif * dif + penalty_nondet + penalty_missing_pairs)
+            lambda_div * div + lambda_dif * dif + penalty_nondet + penalty_missing_pairs + boundary_reg_total)
 
         return ano, syn, div, dif, total
 

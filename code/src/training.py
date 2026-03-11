@@ -26,10 +26,12 @@ if str(EXTERNAL_LIB_ROOT) not in sys.path:
 
 from trainer import KfaarTrainer
 from config import (
+    BoundaryRegularizationConfig,
     DataConfig,
     DetectorConfig,
     EmbeddingConfig,
     EyeglassesBoundaryConfig,
+    PoseBoundaryConfig,
     PipelineConfig,
     ProjectorConfig,
     SeedConfig,
@@ -52,9 +54,8 @@ def parse_args():
     parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video", "video_folder"], help="Dataset type to use")
     parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
-    parser.add_argument("--remove_eyeglasses", action="store_true", help="Push StyleGAN away from generating eyeglasses in W-space")
-    parser.add_argument("--eyeglasses_boundary_path", type=Path, default=None, help="Path to InterfaceGAN eyeglasses boundary (.npy) in W-space")
-    parser.add_argument("--eyeglasses_removal_scale", type=float, default=1.0, help="Scale factor used in W-space eyeglasses removal: w = w - scale * boundary")
+    parser.add_argument("--eyeglasses_boundary_path", type=Path, default=None, help="Path to InterfaceGAN eyeglasses boundary (.npy) used by eyeglasses regularization")
+    parser.add_argument("--pose_boundary_path", type=Path, default=None, help="Path to InterfaceGAN pose boundary (.npy) used by pose regularization")
     parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "train_results", help="Directory to save checkpoints")
 
     # Hyperparameters (Projector & Trainer)
@@ -77,6 +78,12 @@ def parse_args():
     parser.add_argument("--lambda_div", type=float, default=1.0, help="Weight for Diversity loss")
     parser.add_argument("--lambda_dif", type=float, default=1.0, help="Weight for Differentiation loss")
     parser.add_argument("--lambda_temp", type=float, default=0.0, help="Weight for temporal smoothness loss (LSTM + seq>1 only)")
+    parser.add_argument("--use_eyeglasses_regularization", action="store_true", help="Enable eyeglasses boundary regularization loss")
+    parser.add_argument("--lambda_glasses", type=float, default=0.0, help="Weight for eyeglasses boundary regularization loss")
+    parser.add_argument("--glasses_margin", type=float, default=3.0, help="Margin for eyeglasses regularization: ReLU(w dot n_glasses + margin)")
+    parser.add_argument("--use_pose_regularization", action="store_true", help="Enable pose boundary regularization loss")
+    parser.add_argument("--lambda_pose", type=float, default=0.0, help="Weight for pose boundary regularization loss")
+    parser.add_argument("--pose_margin", type=float, default=0.0, help="Margin for pose regularization: ReLU(abs(w dot n_pose) - margin)")
     parser.add_argument("--margin", type=float, default=0.5, help="Margin for triplet/cosine losses")
 
     # Dataset & Split
@@ -226,9 +233,24 @@ def main():
         seed=SeedConfig(secret_key="master_thesis_secret"), 
         projector=projector_cfg,
         eyeglasses_boundary=EyeglassesBoundaryConfig(
-            enabled=args.remove_eyeglasses,
+            enabled=args.use_eyeglasses_regularization,
             boundary_path=args.eyeglasses_boundary_path,
-            removal_scale=args.eyeglasses_removal_scale,
+            removal_scale=0.0,
+        ),
+        pose_boundary=PoseBoundaryConfig(
+            enabled=args.use_pose_regularization,
+            boundary_path=args.pose_boundary_path,
+            removal_scale=0.0,
+        ),
+        eyeglasses_regularization=BoundaryRegularizationConfig(
+            enabled=args.use_eyeglasses_regularization,
+            weight=args.lambda_glasses,
+            margin=args.glasses_margin,
+        ),
+        pose_regularization=BoundaryRegularizationConfig(
+            enabled=args.use_pose_regularization,
+            weight=args.lambda_pose,
+            margin=args.pose_margin,
         ),
     )
 
@@ -286,6 +308,12 @@ def main():
         lambda_div=args.lambda_div,
         lambda_dif=args.lambda_dif,
         lambda_temp=args.lambda_temp,
+        use_eyeglasses_regularization=args.use_eyeglasses_regularization,
+        lambda_glasses=args.lambda_glasses,
+        glasses_margin=args.glasses_margin,
+        use_pose_regularization=args.use_pose_regularization,
+        lambda_pose=args.lambda_pose,
+        pose_margin=args.pose_margin,
         batch_identities=args.batch_identities,
         samples_per_identity=args.batch_samples_per_identity,
         checkpoint_dir=args.output_dir,

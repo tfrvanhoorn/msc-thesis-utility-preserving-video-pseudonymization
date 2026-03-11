@@ -107,6 +107,73 @@ def temporal_smoothness_loss(
     return stacked
 
 
+def _flatten_latent_for_boundary_projection(w: torch.Tensor) -> torch.Tensor:
+    if w.ndim == 2:
+        return w
+    if w.ndim == 3:
+        return w.reshape(-1, w.shape[-1])
+    raise ValueError(f"Unsupported latent shape for boundary regularization: {tuple(w.shape)}")
+
+
+def _normalize_boundary_vector(boundary: torch.Tensor, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    b = boundary.to(device=device, dtype=dtype)
+    if b.ndim == 3 and b.shape[0] == 1 and b.shape[1] == 1:
+        b = b.view(1, b.shape[-1])
+    if b.ndim == 2 and b.shape[0] == 1:
+        return b.squeeze(0)
+    if b.ndim == 1:
+        return b
+    raise ValueError(f"Unsupported boundary shape for regularization: {tuple(boundary.shape)}")
+
+
+def eyeglasses_boundary_regularization_loss(
+    w: torch.Tensor,
+    boundary: torch.Tensor,
+    *,
+    margin: float,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    w_flat = _flatten_latent_for_boundary_projection(w)
+    b = _normalize_boundary_vector(boundary, device=w_flat.device, dtype=w_flat.dtype)
+    if w_flat.shape[-1] != b.shape[-1]:
+        raise ValueError(
+            "Eyeglasses boundary dimension mismatch. "
+            f"Latent dim={w_flat.shape[-1]} boundary dim={b.shape[-1]}"
+        )
+
+    proj = torch.matmul(w_flat, b)
+    values = F.relu(proj + float(margin))
+    if reduction == "sum":
+        return values.sum()
+    if reduction == "none":
+        return values
+    return values.mean()
+
+
+def pose_boundary_regularization_loss(
+    w: torch.Tensor,
+    boundary: torch.Tensor,
+    *,
+    margin: float,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    w_flat = _flatten_latent_for_boundary_projection(w)
+    b = _normalize_boundary_vector(boundary, device=w_flat.device, dtype=w_flat.dtype)
+    if w_flat.shape[-1] != b.shape[-1]:
+        raise ValueError(
+            "Pose boundary dimension mismatch. "
+            f"Latent dim={w_flat.shape[-1]} boundary dim={b.shape[-1]}"
+        )
+
+    proj = torch.matmul(w_flat, b)
+    values = F.relu(torch.abs(proj) - float(margin))
+    if reduction == "sum":
+        return values.sum()
+    if reduction == "none":
+        return values
+    return values.mean()
+
+
 def total_hpvg_loss(
     ano: torch.Tensor,
     syn: torch.Tensor,

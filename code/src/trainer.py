@@ -32,6 +32,12 @@ class KfaarTrainer:
         lambda_div: float = 1.0,
         lambda_dif: float = 1.0,
         lambda_temp: float = 0.0,
+        use_eyeglasses_regularization: bool = False,
+        lambda_glasses: float = 0.0,
+        glasses_margin: float = 0.0,
+        use_pose_regularization: bool = False,
+        lambda_pose: float = 0.0,
+        pose_margin: float = 0.0,
         batch_identities: int | None = None,
         samples_per_identity: int | None = None,
         checkpoint_dir: str | Path | None = None,
@@ -58,6 +64,12 @@ class KfaarTrainer:
         self.lambda_div = lambda_div
         self.lambda_dif = lambda_dif
         self.lambda_temp = lambda_temp
+        self.use_eyeglasses_regularization = use_eyeglasses_regularization
+        self.lambda_glasses = lambda_glasses
+        self.glasses_margin = glasses_margin
+        self.use_pose_regularization = use_pose_regularization
+        self.lambda_pose = lambda_pose
+        self.pose_margin = pose_margin
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
         self.start_epoch = start_epoch
@@ -153,6 +165,12 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
+                        use_eyeglasses_regularization=self.use_eyeglasses_regularization,
+                        lambda_glasses=self.lambda_glasses,
+                        glasses_margin=self.glasses_margin,
+                        use_pose_regularization=self.use_pose_regularization,
+                        lambda_pose=self.lambda_pose,
+                        pose_margin=self.pose_margin,
                     )
 
                     loss_value = float(loss.item())
@@ -211,6 +229,12 @@ class KfaarTrainer:
                 "lambda_syn": self.lambda_syn,
                 "lambda_div": self.lambda_div,
                 "lambda_dif": self.lambda_dif,
+                "use_eyeglasses_regularization": self.use_eyeglasses_regularization,
+                "lambda_glasses": self.lambda_glasses,
+                "glasses_margin": self.glasses_margin,
+                "use_pose_regularization": self.use_pose_regularization,
+                "lambda_pose": self.lambda_pose,
+                "pose_margin": self.pose_margin,
                 "batch_identities": self.batch_identities,
                 "samples_per_identity": self.samples_per_identity,
                 "device": str(self.device),
@@ -264,6 +288,12 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
+                        use_eyeglasses_regularization=self.use_eyeglasses_regularization,
+                        lambda_glasses=self.lambda_glasses,
+                        glasses_margin=self.glasses_margin,
+                        use_pose_regularization=self.use_pose_regularization,
+                        lambda_pose=self.lambda_pose,
+                        pose_margin=self.pose_margin,
                         use_face_swapper=self.use_face_swapper,
                         swap_for_visuals_only=self.swap_for_visuals_only,
                     )
