@@ -421,8 +421,9 @@ class KfaarPipeline:
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
+        return_components: bool = False,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         self.optimizer.zero_grad(set_to_none=True)
         
         # components will return None if criteria not met
@@ -440,17 +441,46 @@ class KfaarPipeline:
         
         if comps is None:
             self.stats["discarded_batches"] += 1
-            return torch.tensor(0.0, device=self.device)
+            zero = torch.tensor(0.0, device=self.device)
+            if return_components:
+                return zero, {
+                    "ano": zero,
+                    "syn": zero,
+                    "div": zero,
+                    "dif": zero,
+                    "glasses_reg": zero,
+                    "pose_reg": zero,
+                }
+            return zero
 
-        ano, syn, div, dif, total = comps
+        ano, syn, div, dif, glasses_reg, pose_reg, total = comps
         
         # Only backprop if total is linked to a grad_fn
         if total.requires_grad:
             total.backward()
             self.optimizer.step()
+            if return_components:
+                return total, {
+                    "ano": ano.detach(),
+                    "syn": syn.detach(),
+                    "div": div.detach(),
+                    "dif": dif.detach(),
+                    "glasses_reg": glasses_reg.detach(),
+                    "pose_reg": pose_reg.detach(),
+                }
             return total
         
-        return torch.tensor(0.0, device=self.device)
+        zero = torch.tensor(0.0, device=self.device)
+        if return_components:
+            return zero, {
+                "ano": ano.detach(),
+                "syn": syn.detach(),
+                "div": div.detach(),
+                "dif": dif.detach(),
+                "glasses_reg": glasses_reg.detach(),
+                "pose_reg": pose_reg.detach(),
+            }
+        return zero
 
     def hpvg_loss_components(
         self, frames, labels, seq_lens, key_1, key_2,
@@ -464,7 +494,17 @@ class KfaarPipeline:
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ) -> Optional[
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+    ]:
         
         device = self.device
         batch_size = frames.shape[0]
@@ -560,7 +600,7 @@ class KfaarPipeline:
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
             total = penalty_missing_pairs + penalty_nondet + boundary_reg_total
-            return ano, syn, div, dif, total
+            return ano, syn, div, dif, glasses_reg, pose_reg, total
 
         # Requirement: At least 2 identities AND each has at least 2 samples
         unique_labels, counts = np.unique(all_labels, return_counts=True)
@@ -572,7 +612,7 @@ class KfaarPipeline:
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
             total = penalty_missing_pairs + penalty_nondet + boundary_reg_total
-            return ano, syn, div, dif, total
+            return ano, syn, div, dif, glasses_reg, pose_reg, total
 
         # Filter tensors for Synchronism/Differentiation
         lab_t = torch.tensor(all_labels, device=device)
@@ -597,7 +637,7 @@ class KfaarPipeline:
         total = (lambda_ano * ano + lambda_syn * syn + 
             lambda_div * div + lambda_dif * dif + penalty_nondet + penalty_missing_pairs + boundary_reg_total)
 
-        return ano, syn, div, dif, total
+        return ano, syn, div, dif, glasses_reg, pose_reg, total
 
     @staticmethod
     def _to_sequence_tensor(frames, device):
