@@ -58,37 +58,12 @@ class ProjectorConfig:
 
 
 @dataclass
-class EyeglassesBoundaryConfig:
-    enabled: bool = False
-    boundary_path: Optional[Path] = None
-    removal_scale: float = 1.0
-
-
-@dataclass
-class BoundaryRegularizationConfig:
-    enabled: bool = False
-    weight: float = 0.0
-    margin: float = 0.0
-
-
-@dataclass
-class PoseBoundaryConfig:
-    enabled: bool = False
-    boundary_path: Optional[Path] = None
-    removal_scale: float = 1.0
-
-
-@dataclass
 class PipelineConfig:
     data: DataConfig
     detector: DetectorConfig
     embedding: EmbeddingConfig
     seed: SeedConfig
     projector: ProjectorConfig = field(default_factory=ProjectorConfig)
-    eyeglasses_boundary: EyeglassesBoundaryConfig = field(default_factory=EyeglassesBoundaryConfig)
-    pose_boundary: PoseBoundaryConfig = field(default_factory=PoseBoundaryConfig)
-    eyeglasses_regularization: BoundaryRegularizationConfig = field(default_factory=BoundaryRegularizationConfig)
-    pose_regularization: BoundaryRegularizationConfig = field(default_factory=BoundaryRegularizationConfig)
 
     @staticmethod
     def _require(mapping: Mapping[str, Any], key: str) -> Any:
@@ -103,10 +78,6 @@ class PipelineConfig:
         embedding_cfg = cls._require(payload, "embedding")
         seed_cfg = cls._require(payload, "seed")
         projector_cfg = payload.get("projector", {})
-        eyeglasses_cfg = payload.get("eyeglasses_boundary", {})
-        pose_cfg = payload.get("pose_boundary", {})
-        eyeglasses_reg_cfg = payload.get("eyeglasses_regularization", {})
-        pose_reg_cfg = payload.get("pose_regularization", {})
 
         def _path_or_none(value: Optional[str]) -> Optional[Path]:
             return Path(value) if value else None
@@ -130,30 +101,6 @@ class PipelineConfig:
             lstm_bidirectional=bool(projector_cfg.get("lstm_bidirectional", True)),
         )
 
-        eyeglasses_boundary = EyeglassesBoundaryConfig(
-            enabled=bool(eyeglasses_cfg.get("enabled", False)),
-            boundary_path=_path_or_none(eyeglasses_cfg.get("boundary_path")),
-            removal_scale=float(eyeglasses_cfg.get("removal_scale", 1.0)),
-        )
-
-        pose_boundary = PoseBoundaryConfig(
-            enabled=bool(pose_cfg.get("enabled", False)),
-            boundary_path=_path_or_none(pose_cfg.get("boundary_path")),
-            removal_scale=float(pose_cfg.get("removal_scale", 1.0)),
-        )
-
-        eyeglasses_regularization = BoundaryRegularizationConfig(
-            enabled=bool(eyeglasses_reg_cfg.get("enabled", False)),
-            weight=float(eyeglasses_reg_cfg.get("weight", 0.0)),
-            margin=float(eyeglasses_reg_cfg.get("margin", 0.0)),
-        )
-
-        pose_regularization = BoundaryRegularizationConfig(
-            enabled=bool(pose_reg_cfg.get("enabled", False)),
-            weight=float(pose_reg_cfg.get("weight", 0.0)),
-            margin=float(pose_reg_cfg.get("margin", 0.0)),
-        )
-
         return cls(
             data=DataConfig(
                 dataset_path=Path(cls._require(data_cfg, "dataset_path")),
@@ -170,8 +117,4 @@ class PipelineConfig:
             embedding=EmbeddingConfig(**embedding_kwargs),
             seed=SeedConfig(**seed_cfg),
             projector=projector,
-            eyeglasses_boundary=eyeglasses_boundary,
-            pose_boundary=pose_boundary,
-            eyeglasses_regularization=eyeglasses_regularization,
-            pose_regularization=pose_regularization,
         )
