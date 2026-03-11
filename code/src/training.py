@@ -8,8 +8,9 @@ import torch
 
 current_file = Path(__file__).resolve()
 
-SRC_ROOT = current_file.parents[2] 
-PROJECT_ROOT = current_file.parents[3]
+SRC_ROOT = current_file.parents[0]
+PROJECT_ROOT = current_file.parents[1]
+EXTERNAL_LIB_ROOT = PROJECT_ROOT / "external_libraries"
 
 # Silence PyTorch bilinear align_corners warning
 warnings.filterwarnings(
@@ -20,9 +21,11 @@ warnings.filterwarnings(
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+if str(EXTERNAL_LIB_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
-from anon_pipeline.kfaar import KfaarTrainer
-from anon_pipeline.kfaar.config import (
+from trainer import KfaarTrainer
+from config import (
     DataConfig,
     DetectorConfig,
     EmbeddingConfig,
@@ -31,15 +34,15 @@ from anon_pipeline.kfaar.config import (
     ProjectorConfig,
     SeedConfig,
 )
-from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline
-from anon_pipeline.kfaar.components import (
+from pipeline.factory import build_kfaar_pipeline
+from components import (
     load_stylegan2,
     load_projector_state_dict,
     SimSwapFaceSwapper,
     DiffusionFaceSwapper,
 )
-from anon_pipeline.shared.data.splits import build_train_test_loaders
-from anon_pipeline.shared.utils.logging import configure_logging
+from data.splits import build_train_test_loaders
+from utils.logging import configure_logging
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the KFAAR Projector for Face Pseudonymization")
@@ -47,12 +50,12 @@ def parse_args():
     # Path Arguments
     parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
     parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video", "video_folder"], help="Dataset type to use")
-    parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
+    parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
     parser.add_argument("--remove_eyeglasses", action="store_true", help="Push StyleGAN away from generating eyeglasses in W-space")
     parser.add_argument("--eyeglasses_boundary_path", type=Path, default=None, help="Path to InterfaceGAN eyeglasses boundary (.npy) in W-space")
     parser.add_argument("--eyeglasses_removal_scale", type=float, default=1.0, help="Scale factor used in W-space eyeglasses removal: w = w - scale * boundary")
-    parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "anon_pipeline" / "kfaar" / "train_results", help="Directory to save checkpoints")
+    parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "train_results", help="Directory to save checkpoints")
 
     # Hyperparameters (Projector & Trainer)
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")

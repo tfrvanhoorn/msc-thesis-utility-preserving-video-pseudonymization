@@ -11,8 +11,9 @@ from typing import Any
 import torch
 
 current_file = Path(__file__).resolve()
-SRC_ROOT = current_file.parents[2]
-PROJECT_ROOT = current_file.parents[3]
+SRC_ROOT = current_file.parents[0]
+PROJECT_ROOT = current_file.parents[1]
+EXTERNAL_LIB_ROOT = PROJECT_ROOT / "external_libraries"
 
 # Silence PyTorch bilinear align_corners warning
 warnings.filterwarnings(
@@ -23,8 +24,10 @@ warnings.filterwarnings(
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+if str(EXTERNAL_LIB_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
-from anon_pipeline.kfaar.config import (  # noqa: E402
+from config import (  # noqa: E402
     DataConfig,
     DetectorConfig,
     EmbeddingConfig,
@@ -33,15 +36,15 @@ from anon_pipeline.kfaar.config import (  # noqa: E402
     ProjectorConfig,
     SeedConfig,
 )
-from anon_pipeline.kfaar.pipeline.factory import build_kfaar_pipeline  # noqa: E402
-from anon_pipeline.kfaar.components import (  # noqa: E402
+from pipeline.factory import build_kfaar_pipeline  # noqa: E402
+from components import (  # noqa: E402
     load_stylegan2,
     load_projector_state_dict,
     SimSwapFaceSwapper,
     DiffusionFaceSwapper,
 )
-from anon_pipeline.shared.data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
-from anon_pipeline.shared.utils.logging import configure_logging  # noqa: E402
+from data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
+from utils.logging import configure_logging  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stylegan_ckpt",
         type=Path,
-        default=SRC_ROOT / "anon_pipeline" / "kfaar" / "models" / "stylegan2-celebahq-256x256.pkl",
+        default=SRC_ROOT / "models" / "stylegan2-celebahq-256x256.pkl",
         help="Path to StyleGAN2 .pkl checkpoint",
     )
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
@@ -71,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         type=Path,
-        default=SRC_ROOT / "anon_pipeline" / "kfaar" / "infer_results",
+        default=SRC_ROOT / "infer_results",
         help="Directory to save inference outputs/reports",
     )
 

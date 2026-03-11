@@ -5,17 +5,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ..components import (
+from components import (
     FacenetEmbedder,
     MTCNNDetector,
     SemanticAttributeEmbedder,
     ProjectorMLP,
     ProjectorLSTM,
 )
-from ..components.alignment import MTCNNAligner
-from ..config import PipelineConfig
+from components.alignment import MTCNNAligner
+from config import PipelineConfig
 from .kfaar_pipeline import KfaarPipeline
-from ..components import StyleGAN2Generator
+from components import StyleGAN2Generator
 
 
 def build_kfaar_pipeline(

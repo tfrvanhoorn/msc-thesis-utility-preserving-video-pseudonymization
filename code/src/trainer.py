@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .pipeline import KfaarPipeline
+from pipeline import KfaarPipeline
 
 
 class KfaarTrainer:

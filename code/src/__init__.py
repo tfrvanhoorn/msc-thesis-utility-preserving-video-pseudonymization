@@ -27,6 +27,7 @@ from .config import (
     SeedConfig,
 )
 from .trainer import KfaarTrainer
+from .data import ImageSample, build_dataset, iter_samples, load_image
 
 __all__ = [
     "KfaarPipeline",
@@ -54,4 +55,8 @@ __all__ = [
     "FeatureSelectorConfig",
     "SeedConfig",
     "KfaarTrainer",
+    "ImageSample",
+    "build_dataset",
+    "iter_samples",
+    "load_image",
 ]

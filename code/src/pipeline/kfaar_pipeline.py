@@ -11,11 +11,11 @@ try:
     import imageio.v2 as imageio  # type: ignore
 except Exception:  # pragma: no cover
     imageio = None
-from ..components import EmbeddingModel, FaceDetector, ProjectorMLP, ProjectorLSTM
-from ..components.alignment import FaceAligner
-from ..components.detector import Detection
-from ..components import StyleGAN2Generator
-from ..losses import (
+from components import EmbeddingModel, FaceDetector, ProjectorMLP, ProjectorLSTM
+from components.alignment import FaceAligner
+from components.detector import Detection
+from components import StyleGAN2Generator
+from losses import (
     anonymity_loss,
     synchronism_loss,
     diversity_loss,
