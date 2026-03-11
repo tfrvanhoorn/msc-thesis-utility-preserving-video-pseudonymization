@@ -190,13 +190,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--faceadapter_crop_ratio", type=float, default=0.81, help="Face crop ratio used by FaceAdapter")
     parser.add_argument("--faceadapter_seed", type=int, default=0, help="Fixed random seed for deterministic FaceAdapter inference")
 
-    # Deprecated diffusion aliases kept for backward compatibility
-    parser.add_argument("--diffusion_base_model", type=str, default=None, help="[Deprecated] Alias for --faceadapter_base_model")
-    parser.add_argument("--diffusion_ip_adapter_id", type=str, default=None, help="[Deprecated] Unused for FaceAdapter backend")
-    parser.add_argument("--diffusion_ip_adapter_weight", type=str, default=None, help="[Deprecated] Unused for FaceAdapter backend")
-    parser.add_argument("--diffusion_inference_steps", type=int, default=None, help="[Deprecated] Alias for --faceadapter_inference_steps")
-    parser.add_argument("--diffusion_ip_adapter_scale", type=float, default=None, help="[Deprecated] Alias for --faceadapter_guidance_scale")
-
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "lstm"], help="Projector architecture")
@@ -222,13 +215,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.7,
         help="Cosine similarity threshold for differentiation success (different identities, same key)",
-    )
-    parser.add_argument(
-        "--dif_threshold",
-        dest="diff_threshold_legacy",
-        type=float,
-        default=None,
-        help="[Deprecated] Legacy alias for --diff_threshold",
     )
     parser.add_argument(
         "--compute_auc_eer",
@@ -342,13 +328,6 @@ def main() -> None:
     configure_logging()
     device = torch.device(args.device)
 
-    if args.diff_threshold_legacy is not None:
-        if args.diff_threshold != 0.7 and args.diff_threshold != args.diff_threshold_legacy:
-            logging.warning("Ignoring --dif_threshold because --diff_threshold was explicitly provided")
-        else:
-            args.diff_threshold = args.diff_threshold_legacy
-            logging.warning("--dif_threshold is deprecated; please use --diff_threshold")
-
     _log_pipe(
         "evaluation_start",
         checkpoint=str(args.checkpoint),
@@ -381,18 +360,14 @@ def main() -> None:
             )
         elif swapper_choice == "diffusion":
             faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
-            faceadapter_base_model = args.diffusion_base_model or args.faceadapter_base_model
-            faceadapter_steps = args.diffusion_inference_steps if args.diffusion_inference_steps is not None else args.faceadapter_inference_steps
-            faceadapter_guidance = args.diffusion_ip_adapter_scale if args.diffusion_ip_adapter_scale is not None else args.faceadapter_guidance_scale
-
             face_swapper = DiffusionFaceSwapper(
                 faceadapter_root=args.faceadapter_root,
                 checkpoint_dir=faceadapter_ckpt_dir,
-                base_model_id=faceadapter_base_model,
+                base_model_id=args.faceadapter_base_model,
                 cache_dir=args.faceadapter_cache_dir,
                 use_cache=args.faceadapter_use_cache,
-                inference_steps=faceadapter_steps,
-                guidance_scale=faceadapter_guidance,
+                inference_steps=args.faceadapter_inference_steps,
+                guidance_scale=args.faceadapter_guidance_scale,
                 crop_ratio=args.faceadapter_crop_ratio,
                 seed=args.faceadapter_seed,
                 device=device,
