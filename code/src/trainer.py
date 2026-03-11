@@ -32,12 +32,6 @@ class KfaarTrainer:
         lambda_div: float = 1.0,
         lambda_dif: float = 1.0,
         lambda_temp: float = 0.0,
-        use_eyeglasses_regularization: bool = False,
-        lambda_glasses: float = 0.0,
-        glasses_margin: float = 0.0,
-        use_pose_regularization: bool = False,
-        lambda_pose: float = 0.0,
-        pose_margin: float = 0.0,
         batch_identities: int | None = None,
         samples_per_identity: int | None = None,
         checkpoint_dir: str | Path | None = None,
@@ -64,12 +58,6 @@ class KfaarTrainer:
         self.lambda_div = lambda_div
         self.lambda_dif = lambda_dif
         self.lambda_temp = lambda_temp
-        self.use_eyeglasses_regularization = use_eyeglasses_regularization
-        self.lambda_glasses = lambda_glasses
-        self.glasses_margin = glasses_margin
-        self.use_pose_regularization = use_pose_regularization
-        self.lambda_pose = lambda_pose
-        self.pose_margin = pose_margin
         self.batch_identities = batch_identities
         self.samples_per_identity = samples_per_identity
         self.start_epoch = start_epoch
@@ -135,8 +123,6 @@ class KfaarTrainer:
             epoch_syn = 0.0
             epoch_div = 0.0
             epoch_dif = 0.0
-            epoch_glasses_reg = 0.0
-            epoch_pose_reg = 0.0
             step_count = 0
             self._reset_interval_stats()
 
@@ -171,12 +157,6 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
-                        use_eyeglasses_regularization=self.use_eyeglasses_regularization,
-                        lambda_glasses=self.lambda_glasses,
-                        glasses_margin=self.glasses_margin,
-                        use_pose_regularization=self.use_pose_regularization,
-                        lambda_pose=self.lambda_pose,
-                        pose_margin=self.pose_margin,
                         return_components=True,
                     )
 
@@ -186,8 +166,6 @@ class KfaarTrainer:
                     epoch_syn += float(loss_components["syn"].item())
                     epoch_div += float(loss_components["div"].item())
                     epoch_dif += float(loss_components["dif"].item())
-                    epoch_glasses_reg += float(loss_components["glasses_reg"].item())
-                    epoch_pose_reg += float(loss_components["pose_reg"].item())
                     step_count += 1
                     progress.set_postfix({"loss": f"{loss_value:.4f}"})
 
@@ -202,26 +180,15 @@ class KfaarTrainer:
             avg_syn = epoch_syn / max(1, step_count)
             avg_div = epoch_div / max(1, step_count)
             avg_dif = epoch_dif / max(1, step_count)
-            epoch_msg = (
-                "Epoch %s complete | avg total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f"
-            )
-            epoch_vals: list[object] = [
+            logging.info(
+                "Epoch %s complete | avg total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f",
                 epoch + 1,
                 avg_loss,
                 avg_ano,
                 avg_syn,
                 avg_div,
                 avg_dif,
-            ]
-            if self.use_eyeglasses_regularization:
-                avg_glasses_reg = epoch_glasses_reg / max(1, step_count)
-                epoch_msg += " glasses_reg=%.6f"
-                epoch_vals.append(avg_glasses_reg)
-            if self.use_pose_regularization:
-                avg_pose_reg = epoch_pose_reg / max(1, step_count)
-                epoch_msg += " pose_reg=%.6f"
-                epoch_vals.append(avg_pose_reg)
-            logging.info(epoch_msg, *epoch_vals)
+            )
             self._log_memory(f"train epoch {epoch + 1} end")
             sys.stdout.flush()
 
@@ -265,12 +232,6 @@ class KfaarTrainer:
                 "lambda_syn": self.lambda_syn,
                 "lambda_div": self.lambda_div,
                 "lambda_dif": self.lambda_dif,
-                "use_eyeglasses_regularization": self.use_eyeglasses_regularization,
-                "lambda_glasses": self.lambda_glasses,
-                "glasses_margin": self.glasses_margin,
-                "use_pose_regularization": self.use_pose_regularization,
-                "lambda_pose": self.lambda_pose,
-                "pose_margin": self.pose_margin,
                 "batch_identities": self.batch_identities,
                 "samples_per_identity": self.samples_per_identity,
                 "device": str(self.device),
@@ -304,8 +265,6 @@ class KfaarTrainer:
         total_syn = 0.0
         total_div = 0.0
         total_dif = 0.0
-        total_glasses_reg = 0.0
-        total_pose_reg = 0.0
         steps = 0
 
         with torch.no_grad():
@@ -326,12 +285,6 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
-                        use_eyeglasses_regularization=self.use_eyeglasses_regularization,
-                        lambda_glasses=self.lambda_glasses,
-                        glasses_margin=self.glasses_margin,
-                        use_pose_regularization=self.use_pose_regularization,
-                        lambda_pose=self.lambda_pose,
-                        pose_margin=self.pose_margin,
                         use_face_swapper=self.use_face_swapper,
                         swap_for_visuals_only=self.swap_for_visuals_only,
                     )
@@ -339,13 +292,11 @@ class KfaarTrainer:
                     if comps is None:
                         continue
 
-                    ano, syn, div, dif, glasses_reg, pose_reg, loss = comps
+                    ano, syn, div, dif, loss = comps
                     total_ano += float(ano.item())
                     total_syn += float(syn.item())
                     total_div += float(div.item())
                     total_dif += float(dif.item())
-                    total_glasses_reg += float(glasses_reg.item())
-                    total_pose_reg += float(pose_reg.item())
                     total_loss += float(loss.item())
                     steps += 1
 
@@ -356,25 +307,15 @@ class KfaarTrainer:
         avg_syn = total_syn / denom
         avg_div = total_div / denom
         avg_dif = total_dif / denom
-        avg_glasses_reg = total_glasses_reg / denom
-        avg_pose_reg = total_pose_reg / denom
-
-        val_msg = "Validation epoch=%s | total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f"
-        val_vals: list[object] = [
+        logging.info(
+            "Validation epoch=%s | total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f",
             epoch if epoch is not None else "?",
             avg_total,
             avg_ano,
             avg_syn,
             avg_div,
             avg_dif,
-        ]
-        if self.use_eyeglasses_regularization:
-            val_msg += " glasses_reg=%.6f"
-            val_vals.append(avg_glasses_reg)
-        if self.use_pose_regularization:
-            val_msg += " pose_reg=%.6f"
-            val_vals.append(avg_pose_reg)
-        logging.info(val_msg, *val_vals)
+        )
 
         self.eval_history.append(
             {
@@ -384,8 +325,6 @@ class KfaarTrainer:
                 "syn": avg_syn,
                 "div": avg_div,
                 "dif": avg_dif,
-                "glasses_reg": avg_glasses_reg,
-                "pose_reg": avg_pose_reg,
             }
         )
 
@@ -398,8 +337,6 @@ class KfaarTrainer:
             "syn": avg_syn,
             "div": avg_div,
             "dif": avg_dif,
-            "glasses_reg": avg_glasses_reg,
-            "pose_reg": avg_pose_reg,
         }
 
     def _extract_batch(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
