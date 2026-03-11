@@ -14,6 +14,8 @@ class MetricsAccumulator:
     diversity_threshold: float = 0.7
     differentiation_threshold: float = 0.7
     compute_auc_eer: bool = False
+    anonymization_enabled: bool = True
+    diversity_enabled: bool = True
     detected_generated: int = 0
     total_generated: int = 0
     anonymization_success: int = 0
@@ -150,11 +152,19 @@ class MetricsAccumulator:
     def finalize(self) -> dict[str, Any]:
         self._compute_synchronism()
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
-        anonymization_success_rate = float(self.anonymization_success) / self.anonymization_total if self.anonymization_total else 0.0
+        anonymization_success_rate: float | None = (
+            float(self.anonymization_success) / self.anonymization_total
+            if self.anonymization_total and self.anonymization_enabled
+            else None if not self.anonymization_enabled else 0.0
+        )
         synchronism_success_rate = float(self.synchronism_success) / self.synchronism_total if self.synchronism_total else 0.0
         synchronism_within_success_rate = float(self.synchronism_within_success) / self.synchronism_within_total if self.synchronism_within_total else 0.0
         synchronism_cross_success_rate = float(self.synchronism_cross_success) / self.synchronism_cross_total if self.synchronism_cross_total else 0.0
-        diversity_success_rate = float(self.diversity_success) / self.diversity_total if self.diversity_total else 0.0
+        diversity_success_rate: float | None = (
+            float(self.diversity_success) / self.diversity_total
+            if self.diversity_total and self.diversity_enabled
+            else None if not self.diversity_enabled else 0.0
+        )
         differentiation_success_rate = float(self.differentiation_success) / self.differentiation_total if self.differentiation_total else 0.0
         geometric_head_posture_error = (
             self.geometric_head_posture_error_sum / float(self.geometric_pairs_valid)
@@ -176,6 +186,18 @@ class MetricsAccumulator:
             "differentiation": {"auc": None, "eer": None, "eer_threshold": None},
         }
 
+        anonymization_auc = auc_eer["anonymization"]["auc"] if self.anonymization_enabled else None
+        anonymization_eer = auc_eer["anonymization"]["eer"] if self.anonymization_enabled else None
+        anonymization_eer_threshold = auc_eer["anonymization"]["eer_threshold"] if self.anonymization_enabled else None
+        diversity_auc = auc_eer["diversity"]["auc"] if self.diversity_enabled else None
+        diversity_eer = auc_eer["diversity"]["eer"] if self.diversity_enabled else None
+        diversity_eer_threshold = auc_eer["diversity"]["eer_threshold"] if self.diversity_enabled else None
+
+        anonymization_success_count = int(self.anonymization_success) if self.anonymization_enabled else 0
+        anonymization_total_count = int(self.anonymization_total) if self.anonymization_enabled else 0
+        diversity_success_count = int(self.diversity_success) if self.diversity_enabled else 0
+        diversity_total_count = int(self.diversity_total) if self.diversity_enabled else 0
+
         return {
             "detection_rate": detection_rate,
             "anonymization_success_rate": anonymization_success_rate,
@@ -189,12 +211,12 @@ class MetricsAccumulator:
             "anonymization": {
                 "success_rate": anonymization_success_rate,
                 "threshold": float(self.anonymization_threshold),
-                "auc": auc_eer["anonymization"]["auc"],
-                "eer": auc_eer["anonymization"]["eer"],
-                "eer_threshold": auc_eer["anonymization"]["eer_threshold"],
+                "auc": anonymization_auc,
+                "eer": anonymization_eer,
+                "eer_threshold": anonymization_eer_threshold,
                 "counts": {
-                    "success": int(self.anonymization_success),
-                    "total": int(self.anonymization_total),
+                    "success": anonymization_success_count,
+                    "total": anonymization_total_count,
                 },
             },
             "synchronism_total": {
@@ -233,12 +255,12 @@ class MetricsAccumulator:
             "diversity": {
                 "success_rate": diversity_success_rate,
                 "threshold": float(self.diversity_threshold),
-                "auc": auc_eer["diversity"]["auc"],
-                "eer": auc_eer["diversity"]["eer"],
-                "eer_threshold": auc_eer["diversity"]["eer_threshold"],
+                "auc": diversity_auc,
+                "eer": diversity_eer,
+                "eer_threshold": diversity_eer_threshold,
                 "counts": {
-                    "success": int(self.diversity_success),
-                    "total": int(self.diversity_total),
+                    "success": diversity_success_count,
+                    "total": diversity_total_count,
                 },
             },
             "differentiation": {
@@ -263,8 +285,8 @@ class MetricsAccumulator:
             "counts": {
                 "detected_generated": int(self.detected_generated),
                 "total_generated": int(self.total_generated),
-                "anonymization_success": int(self.anonymization_success),
-                "anonymization_total": int(self.anonymization_total),
+                "anonymization_success": anonymization_success_count,
+                "anonymization_total": anonymization_total_count,
                 "synchronism_success": int(self.synchronism_success),
                 "synchronism_total": int(self.synchronism_total),
                 "synchronism_within_success": int(self.synchronism_within_success),
@@ -273,8 +295,8 @@ class MetricsAccumulator:
                 "synchronism_cross_total": int(self.synchronism_cross_total),
                 "differentiation_success": int(self.differentiation_success),
                 "differentiation_total": int(self.differentiation_total),
-                "diversity_success": int(self.diversity_success),
-                "diversity_total": int(self.diversity_total),
+                "diversity_success": diversity_success_count,
+                "diversity_total": diversity_total_count,
                 "geometric_pairs_valid": int(self.geometric_pairs_valid),
                 "geometric_pairs_invalid": int(self.geometric_pairs_invalid),
             },

@@ -72,7 +72,7 @@ def _to_uint8_rgb_image(image: torch.Tensor) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained KFAAR projector")
 
-    parser.add_argument("--checkpoint", type=Path, required=True, help="Path to a trained projector checkpoint (.pt)")
+    parser.add_argument("--checkpoint", type=Path, required=False, default=None, help="Path to a trained projector checkpoint (.pt)")
 
     # Path Arguments
     parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
@@ -241,6 +241,11 @@ def parse_args() -> argparse.Namespace:
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
+    parser.add_argument(
+        "--skip_pipeline_use_input_as_output",
+        action="store_true",
+        help="Skip projector/generator/swappers and use detected input faces as outputs for baseline utility metrics",
+    )
 
     # Generated face saving (matches training flags)
     parser.add_argument("--save_generated_faces", action="store_true", help="Store generated faces to disk during evaluation")
@@ -323,8 +328,32 @@ def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
     return frame_tensor, labels_tensor, seq_len_tensor, contexts, sources
 
 
+def _collect_detected_faces(
+    pipeline: Any,
+    sample_frames: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    detections, aligned_faces = pipeline.detector.detect_and_align(sample_frames)
+    device = sample_frames.device
+    input_mask = torch.tensor([face.numel() > 0 for face in aligned_faces], dtype=torch.bool, device=device)
+    if input_mask.any():
+        stacked = torch.stack([aligned_faces[i].to(device) for i in range(len(aligned_faces)) if input_mask[i]], dim=0)
+        embeds = pipeline.embedder(stacked)
+        embed_dim = int(embeds.shape[1])
+        full_embeds = torch.zeros((len(aligned_faces), embed_dim), device=device, dtype=embeds.dtype)
+        full_embeds[input_mask] = embeds
+    else:
+        probe = sample_frames[:1]
+        probe_embed = pipeline.embedder(probe)
+        embed_dim = int(probe_embed.shape[1])
+        full_embeds = torch.zeros((len(aligned_faces), embed_dim), device=device, dtype=probe_embed.dtype)
+    return full_embeds, input_mask, aligned_faces
+
+
 def main() -> None:
     args = parse_args()
+    if not args.skip_pipeline_use_input_as_output and args.checkpoint is None:
+        raise ValueError("--checkpoint is required unless --skip_pipeline_use_input_as_output is enabled")
+
     configure_logging()
     device = torch.device(args.device)
 
@@ -332,6 +361,7 @@ def main() -> None:
         "evaluation_start",
         checkpoint=str(args.checkpoint),
         dataset_type=args.dataset_type,
+        passthrough_baseline=bool(args.skip_pipeline_use_input_as_output),
         compute_auc_eer=bool(args.compute_auc_eer),
         anonymization_threshold=float(args.ano_threshold),
         synchronism_threshold=float(args.syn_threshold),
@@ -341,7 +371,7 @@ def main() -> None:
 
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
-    use_swapper_requested = args.use_face_swapper or swapper_choice != "none"
+    use_swapper_requested = (args.use_face_swapper or swapper_choice != "none") and not args.skip_pipeline_use_input_as_output
     if use_swapper_requested:
         if swapper_choice == "simswap" or swapper_choice == "none":
             simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
@@ -439,8 +469,10 @@ def main() -> None:
         group_by_video=cfg.data.dataset_type.lower() in {"voxceleb_video", "video_folder"},
     )
 
-    logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
-    stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
+    stylegan = None
+    if not args.skip_pipeline_use_input_as_output:
+        logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
+        stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
     pipeline = build_kfaar_pipeline(
         cfg,
         stylegan=stylegan,
@@ -460,9 +492,10 @@ def main() -> None:
             save_videos=args.save_videos,
         )
 
-    logging.info("Loading checkpoint %s", args.checkpoint)
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    load_projector_state_dict(pipeline.projector, ckpt["model_state_dict"])
+    if not args.skip_pipeline_use_input_as_output:
+        logging.info("Loading checkpoint %s", args.checkpoint)
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        load_projector_state_dict(pipeline.projector, ckpt["model_state_dict"])
     pipeline.projector.eval()
     if hasattr(pipeline.embedder, "eval"):
         pipeline.embedder.eval()
@@ -473,6 +506,8 @@ def main() -> None:
         diversity_threshold=args.div_threshold,
         differentiation_threshold=args.diff_threshold,
         compute_auc_eer=args.compute_auc_eer,
+        anonymization_enabled=not args.skip_pipeline_use_input_as_output,
+        diversity_enabled=not args.skip_pipeline_use_input_as_output,
     )
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
@@ -514,31 +549,57 @@ def main() -> None:
                     if sources is not None and idx < len(sources):
                         source_id = sources[idx]
 
-                    forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
-                    res1 = forward_fn(
-                        sample_frames,
-                        batch_key_1,
-                        sample_label=label,
-                        sample_context=sample_context,
-                        use_face_swapper=use_swapper,
-                        swap_for_visuals_only=args.swap_for_visuals_only,
-                        return_frame_pairs=True,
-                    )
-                    res2 = forward_fn(
-                        sample_frames,
-                        batch_key_2,
-                        sample_label=label,
-                        sample_context=sample_context,
-                        use_face_swapper=use_swapper,
-                        swap_for_visuals_only=args.swap_for_visuals_only,
-                        return_frame_pairs=True,
-                    )
+                    if args.skip_pipeline_use_input_as_output:
+                        real_full, input_mask, aligned_faces = _collect_detected_faces(pipeline, sample_frames)
+                        center_idx = int(sample_frames.shape[0] // 2)
+                        center_real = real_full[center_idx : center_idx + 1]
+                        center_valid = torch.tensor([bool(input_mask[center_idx].item())], device=device, dtype=torch.bool)
+                        input_face_frames = [face for face in aligned_faces if face.numel() > 0]
+                        generated_face_frames = [face.clone() for face in input_face_frames]
+                        res1_real_embeddings = center_real.detach()
+                        res1_virtual_embeddings = center_real.detach()
+                        res1_valid_mask = center_valid
+                        res1_gen_mask = center_valid
+                        res1_input_face_frames = input_face_frames
+                        res1_generated_face_frames = generated_face_frames
+                        res2_virtual_embeddings = center_real.detach()
+                        res2_valid_mask = center_valid
+                        res2_generated_face_frames = generated_face_frames
+                    else:
+                        forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
+                        res1 = forward_fn(
+                            sample_frames,
+                            batch_key_1,
+                            sample_label=label,
+                            sample_context=sample_context,
+                            use_face_swapper=use_swapper,
+                            swap_for_visuals_only=args.swap_for_visuals_only,
+                            return_frame_pairs=True,
+                        )
+                        res2 = forward_fn(
+                            sample_frames,
+                            batch_key_2,
+                            sample_label=label,
+                            sample_context=sample_context,
+                            use_face_swapper=use_swapper,
+                            swap_for_visuals_only=args.swap_for_visuals_only,
+                            return_frame_pairs=True,
+                        )
+                        res1_real_embeddings = res1.real_embeddings
+                        res1_virtual_embeddings = res1.virtual_embeddings
+                        res1_valid_mask = res1.valid_mask
+                        res1_gen_mask = res1.gen_mask
+                        res1_input_face_frames = list(res1.input_face_frames)
+                        res1_generated_face_frames = list(res1.generated_face_frames)
+                        res2_virtual_embeddings = res2.virtual_embeddings
+                        res2_valid_mask = res2.valid_mask
+                        res2_generated_face_frames = list(res2.generated_face_frames)
 
-                    pair_count = min(len(res1.input_face_frames), len(res1.generated_face_frames), len(res2.generated_face_frames))
+                    pair_count = min(len(res1_input_face_frames), len(res1_generated_face_frames), len(res2_generated_face_frames))
                     for frame_idx in range(pair_count):
-                        input_face = res1.input_face_frames[frame_idx]
-                        gen_face_key1 = res1.generated_face_frames[frame_idx]
-                        gen_face_key2 = res2.generated_face_frames[frame_idx]
+                        input_face = res1_input_face_frames[frame_idx]
+                        gen_face_key1 = res1_generated_face_frames[frame_idx]
+                        gen_face_key2 = res2_generated_face_frames[frame_idx]
 
                         if input_face.numel() == 0 or gen_face_key1.numel() == 0:
                             metrics.update_geometric_utility(None, None)
@@ -559,16 +620,17 @@ def main() -> None:
                             metrics.update_geometric_utility(errs_key2.head_posture_error, errs_key2.facial_expression_error)
 
                     # Keep existing metrics based on a single branch for comparability.
-                    metrics.update_detection(res1.gen_mask)
-                    metrics.update_anonymization(res1.real_embeddings, res1.virtual_embeddings, res1.valid_mask)
+                    metrics.update_detection(res1_gen_mask)
+                    if not args.skip_pipeline_use_input_as_output:
+                        metrics.update_anonymization(res1_real_embeddings, res1_virtual_embeddings, res1_valid_mask)
 
-                    pair_mask = res1.valid_mask & res2.valid_mask
-                    if pair_mask.any():
-                        pair_v1 = res1.virtual_embeddings[pair_mask]
-                        pair_v2 = res2.virtual_embeddings[pair_mask]
-                        metrics.update_diversity(pair_v1, pair_v2)
+                        pair_mask = res1_valid_mask & res2_valid_mask
+                        if pair_mask.any():
+                            pair_v1 = res1_virtual_embeddings[pair_mask]
+                            pair_v2 = res2_virtual_embeddings[pair_mask]
+                            metrics.update_diversity(pair_v1, pair_v2)
 
-                    valid_virtual = res1.virtual_embeddings[res1.valid_mask]
+                    valid_virtual = res1_virtual_embeddings[res1_valid_mask]
                     if valid_virtual.numel() > 0:
                         metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
 
@@ -599,6 +661,7 @@ def main() -> None:
         "evaluation_summary",
         checkpoint=str(args.checkpoint),
         dataset_type=args.dataset_type,
+        passthrough_baseline=bool(args.skip_pipeline_use_input_as_output),
         total_samples=total_samples,
         batch_processing_seconds=batch_processing_seconds,
         detection_rate=summary["detection_rate"],
@@ -672,7 +735,8 @@ def main() -> None:
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = args.output_dir / f"{args.checkpoint.stem}_{args.dataset_type}_eval.json"
+    report_stem = args.checkpoint.stem if args.checkpoint is not None else "passthrough_baseline"
+    report_path = args.output_dir / f"{report_stem}_{args.dataset_type}_eval.json"
     serialized_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(
