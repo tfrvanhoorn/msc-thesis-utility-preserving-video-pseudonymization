@@ -47,6 +47,13 @@ from data.splits import build_dataloader_for_identities, list_identities  # noqa
 from utils.logging import configure_logging  # noqa: E402
 
 
+def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) -> torch.Tensor:
+    if input_brightness_ev == 0.0:
+        return frames
+    scale = float(2.0 ** float(input_brightness_ev))
+    return (frames * scale).clamp(0.0, 1.0)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run KFAAR inference on image/video folders")
 
@@ -192,6 +199,12 @@ def parse_args() -> argparse.Namespace:
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
+    parser.add_argument(
+        "--input_brightness_ev",
+        type=float,
+        default=0.0,
+        help="Exposure adjustment in EV stops applied to input frames before processing (scale = 2**EV; negative darkens, positive brightens)",
+    )
 
     # Generated face saving
     parser.add_argument(
@@ -459,6 +472,7 @@ def main() -> None:
 
                 seq_len = int(seq_lens[idx].item())
                 sample_frames = frames[idx, :seq_len]
+                sample_frames = _apply_input_brightness(sample_frames, args.input_brightness_ev)
                 label = int(labels[idx].item())
 
                 sample_context = None

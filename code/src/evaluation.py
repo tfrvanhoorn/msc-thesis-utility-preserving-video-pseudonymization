@@ -69,6 +69,13 @@ def _to_uint8_rgb_image(image: torch.Tensor) -> np.ndarray:
     return (hwc * 255.0).round().astype(np.uint8)
 
 
+def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) -> torch.Tensor:
+    if input_brightness_ev == 0.0:
+        return frames
+    scale = float(2.0 ** float(input_brightness_ev))
+    return (frames * scale).clamp(0.0, 1.0)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained KFAAR projector")
 
@@ -242,6 +249,12 @@ def parse_args() -> argparse.Namespace:
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
     parser.add_argument(
+        "--input_brightness_ev",
+        type=float,
+        default=0.0,
+        help="Exposure adjustment in EV stops applied to input frames before processing (scale = 2**EV; negative darkens, positive brightens)",
+    )
+    parser.add_argument(
         "--skip_pipeline_use_input_as_output",
         action="store_true",
         help="Skip projector/generator/swappers and use detected input faces as outputs for baseline utility metrics",
@@ -332,18 +345,33 @@ def _collect_detected_faces(
     pipeline: Any,
     sample_frames: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-    detections, aligned_faces = pipeline.detector.detect_and_align(sample_frames)
     device = sample_frames.device
-    input_mask = torch.tensor([face.numel() > 0 for face in aligned_faces], dtype=torch.bool, device=device)
+    aligned_faces: list[torch.Tensor] = []
+    input_mask_list: list[bool] = []
+
+    for frame in sample_frames:
+        detections = pipeline.detector.detect(frame)
+        if detections:
+            top = max(detections, key=lambda d: d.score)
+            aligned = pipeline.aligner.align(frame, top).to(device)
+            aligned_faces.append(aligned)
+            input_mask_list.append(True)
+        else:
+            aligned_faces.append(torch.empty(0, device=device))
+            input_mask_list.append(False)
+
+    input_mask = torch.tensor(input_mask_list, dtype=torch.bool, device=device)
     if input_mask.any():
-        stacked = torch.stack([aligned_faces[i].to(device) for i in range(len(aligned_faces)) if input_mask[i]], dim=0)
-        embeds = pipeline.embedder(stacked)
+        valid_idx = [i for i, is_valid in enumerate(input_mask_list) if is_valid]
+        valid_faces = [aligned_faces[i] for i in valid_idx]
+        embeds = pipeline.embedder.embed(valid_faces, with_grad=False)
         embed_dim = int(embeds.shape[1])
         full_embeds = torch.zeros((len(aligned_faces), embed_dim), device=device, dtype=embeds.dtype)
-        full_embeds[input_mask] = embeds
+        for emb, idx in zip(embeds, valid_idx):
+            full_embeds[idx] = emb
     else:
-        probe = sample_frames[:1]
-        probe_embed = pipeline.embedder(probe)
+        probe = sample_frames[0] if sample_frames.shape[0] > 0 else torch.zeros((3, 256, 256), device=device)
+        probe_embed = pipeline.embedder.embed([probe], with_grad=False)
         embed_dim = int(probe_embed.shape[1])
         full_embeds = torch.zeros((len(aligned_faces), embed_dim), device=device, dtype=probe_embed.dtype)
     return full_embeds, input_mask, aligned_faces
@@ -362,6 +390,7 @@ def main() -> None:
         checkpoint=str(args.checkpoint),
         dataset_type=args.dataset_type,
         passthrough_baseline=bool(args.skip_pipeline_use_input_as_output),
+        input_brightness_ev=float(args.input_brightness_ev),
         compute_auc_eer=bool(args.compute_auc_eer),
         anonymization_threshold=float(args.ano_threshold),
         synchronism_threshold=float(args.syn_threshold),
@@ -539,6 +568,7 @@ def main() -> None:
                 for idx in range(batch_size):
                     seq_len = int(seq_lens[idx].item())
                     sample_frames = frames[idx, :seq_len]
+                    sample_frames = _apply_input_brightness(sample_frames, args.input_brightness_ev)
                     label = int(labels[idx].item())
 
                     sample_context = None
