@@ -109,8 +109,6 @@ def build_dataloader_for_identities(
     num_workers: int = 0,
     collate_fn=None,
     identity_batching: bool = False,
-    batch_identities: int | None = None,
-    samples_per_identity: int | None = None,
     group_by_video: bool = False,
     max_samples_per_identity: int | None = None,
 ) -> DataLoader:
@@ -132,16 +130,13 @@ def build_dataloader_for_identities(
         config = _ConfigProxy(config, options)
 
     if identity_batching:
-        if not batch_identities or not samples_per_identity:
-            raise ValueError("identity_batching requires batch_identities and samples_per_identity")
+        if config.dataset_type.lower() != "celeba":
+            raise ValueError("identity_batching is currently only supported for dataset_type='celeba'")
         sample_index = _build_identity_sample_index(config, identities)
         batched_dataset = IdentityBatchingDataset(
             sample_index,
             identity_to_index,
-            batch_identities=batch_identities,
-            samples_per_identity=samples_per_identity,
             shuffle_identities=shuffle,
-            group_by_video=group_by_video,
         )
         return DataLoader(batched_dataset, batch_size=None, shuffle=False, num_workers=num_workers)
 
@@ -162,8 +157,6 @@ def build_train_test_loaders(
     max_identities: int | None = None,
     max_samples_per_identity: int | None = None,
     batch_size: int = 4,
-    batch_identities: int | None = None,
-    samples_per_identity: int | None = None,
     identity_batching: bool = False,
     group_by_video: bool = False,
     shuffle_train: bool = True,
@@ -177,8 +170,6 @@ def build_train_test_loaders(
         split.train,
         batch_size=batch_size,
         identity_batching=identity_batching,
-        batch_identities=batch_identities,
-        samples_per_identity=samples_per_identity,
         group_by_video=group_by_video,
         shuffle=shuffle_train,
         num_workers=num_workers,
@@ -190,8 +181,6 @@ def build_train_test_loaders(
         split.test,
         batch_size=batch_size,
         identity_batching=identity_batching,
-        batch_identities=batch_identities,
-        samples_per_identity=samples_per_identity,
         group_by_video=group_by_video,
         shuffle=shuffle_test,
         num_workers=num_workers,

@@ -32,8 +32,6 @@ class KfaarTrainer:
         lambda_div: float = 1.0,
         lambda_dif: float = 1.0,
         lambda_temp: float = 0.0,
-        batch_identities: int | None = None,
-        samples_per_identity: int | None = None,
         checkpoint_dir: str | Path | None = None,
         device: str | torch.device = "cuda",
         train_identities: Sequence[Any] | None = None,
@@ -58,8 +56,6 @@ class KfaarTrainer:
         self.lambda_div = lambda_div
         self.lambda_dif = lambda_dif
         self.lambda_temp = lambda_temp
-        self.batch_identities = batch_identities
-        self.samples_per_identity = samples_per_identity
         self.start_epoch = start_epoch
         self._memory_log_interval = 100
         self._proc = psutil.Process()
@@ -232,8 +228,6 @@ class KfaarTrainer:
                 "lambda_syn": self.lambda_syn,
                 "lambda_div": self.lambda_div,
                 "lambda_dif": self.lambda_dif,
-                "batch_identities": self.batch_identities,
-                "samples_per_identity": self.samples_per_identity,
                 "device": str(self.device),
                 "train_identities": self.train_identities,
                 "val_identities": self.val_identities,

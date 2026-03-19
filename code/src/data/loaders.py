@@ -681,14 +681,12 @@ def unified_video_collate_fn(
 
 
 class IdentityBatchingDataset(IterableDataset):
-    """Emit identity-balanced batches with minimal in-memory buffering.
+    """Emit no-reuse tuple batches for CelebA-style projector training.
 
-    Identities are iterated in shuffled order per epoch. For each identity we
-    select samples and form batches with the first ``batch_identities`` identities.
-    When ``group_by_video`` is True, ``samples_per_identity`` counts videos and
-    all windows from those videos are included (subject to earlier caps). Otherwise
-    it counts individual samples. Only lightweight references are cached; frames
-    are loaded just-in-time for each batch.
+    Each yielded batch contains exactly three source samples arranged as:
+    two samples from identity A and one sample from identity B. The training
+    pipeline then maps those to the loss tuple
+    (A1_key1, A1_key2, A2_key1, B1_key1).
     """
 
     def __init__(
@@ -696,18 +694,12 @@ class IdentityBatchingDataset(IterableDataset):
         sample_index: dict[str, list[SampleReference]],
         identity_to_index: dict[str, int],
         *,
-        batch_identities: int,
-        samples_per_identity: int,
         shuffle_identities: bool = True,
         seed: int | None = None,
-        group_by_video: bool = False,
     ) -> None:
         self.sample_index = sample_index
         self.identity_to_index = identity_to_index
-        self.batch_identities = batch_identities
-        self.samples_per_identity = samples_per_identity
         self.shuffle_identities = shuffle_identities
-        self.group_by_video = group_by_video
         self._rng = random.Random(seed)
 
     def _pad_sequence(self, seq: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -730,19 +722,6 @@ class IdentityBatchingDataset(IterableDataset):
         if self.shuffle_identities:
             self._rng.shuffle(refs)
         return refs
-
-    def _group_refs(self, refs: list[SampleReference]) -> list[list[SampleReference]]:
-        if not self.group_by_video:
-            return [[r] for r in refs]
-        buckets: dict[Path, list[SampleReference]] = {}
-        for ref in refs:
-            buckets.setdefault(ref.path, []).append(ref)
-        groups = list(buckets.values())
-        if self.shuffle_identities:
-            self._rng.shuffle(groups)
-        else:
-            groups.sort(key=lambda g: str(g[0].path))
-        return groups
 
     def _load_reference(self, ref: SampleReference) -> tuple[torch.Tensor | None, str, str]:
         source_id = ref.source or str(ref.path)
@@ -769,65 +748,92 @@ class IdentityBatchingDataset(IterableDataset):
 
         return None, ref.context or "", source_id
 
-    def _materialize_batch(self, batch_refs: list[tuple[str, list[SampleReference]]]) -> Optional[dict[str, Any]]:
-        batch_sequences: list[torch.Tensor] = []
-        batch_labels: list[int] = []
-        batch_seq_lens: list[int] = []
-        batch_identities: list[str] = []
-        batch_contexts: list[str] = []
-        batch_sources: list[str] = []
+    def _build_tensor_batch(
+        self,
+        loaded_samples: list[tuple[str, torch.Tensor, str, str]],
+    ) -> Optional[dict[str, Any]]:
+        if not loaded_samples:
+            return None
 
-        for identity, refs in batch_refs:
-            loaded: list[tuple[torch.Tensor, str, str]] = []
-            groups = self._group_refs(refs)
-            if self.group_by_video and self.samples_per_identity and len(groups) < self.samples_per_identity:
-                continue
-            groups = groups[: self.samples_per_identity] if self.samples_per_identity else groups
-            for group in groups:
-                for ref in group:
+        batch_seq_lens = [int(frames.shape[0]) for _, frames, _, _ in loaded_samples]
+        max_len = max(batch_seq_lens)
+
+        padded = [self._pad_sequence(frames, max_len) for _, frames, _, _ in loaded_samples]
+        identities = [identity for identity, _, _, _ in loaded_samples]
+        contexts = [ctx for _, _, ctx, _ in loaded_samples]
+        sources = [source_id for _, _, _, source_id in loaded_samples]
+        labels = [self.identity_to_index[identity] for identity in identities]
+
+        return {
+            "frames": torch.stack(padded, dim=0),
+            "label": torch.tensor(labels, dtype=torch.long),
+            "seq_lens": torch.tensor(batch_seq_lens, dtype=torch.long),
+            "identity": identities,
+            "context": contexts,
+            "source": sources,
+        }
+
+    def _emit_tuple_batches(self) -> Iterator[dict[str, Any]]:
+        # Build an epoch-local pool and consume references immediately on use so
+        # no sample can be reused in the same epoch.
+        identity_order = self._iter_identity_order()
+        pools: dict[str, list[SampleReference]] = {}
+        for identity in identity_order:
+            refs = self._iter_refs_for_identity(identity)
+            if refs:
+                pools[identity] = refs
+
+        while True:
+            candidates_a = [identity for identity, refs in pools.items() if len(refs) >= 2]
+            if not candidates_a:
+                break
+
+            if self.shuffle_identities:
+                a_identity = self._rng.choice(candidates_a)
+            else:
+                a_identity = sorted(candidates_a)[0]
+
+            candidates_b = [identity for identity, refs in pools.items() if identity != a_identity and len(refs) >= 1]
+            if not candidates_b:
+                break
+
+            if self.shuffle_identities:
+                b_identity = self._rng.choice(candidates_b)
+            else:
+                b_identity = sorted(candidates_b)[0]
+
+            requested = [(a_identity, 2), (b_identity, 1)]
+            loaded_samples: list[tuple[str, torch.Tensor, str, str]] = []
+            missing_required = False
+
+            for identity, needed in requested:
+                taken = 0
+                while taken < needed:
+                    refs = pools.get(identity, [])
+                    if not refs:
+                        missing_required = True
+                        break
+
+                    # Consume once popped, regardless of load success.
+                    ref = refs.pop()
                     frames, ctx, source_id = self._load_reference(ref)
                     if frames is None:
                         continue
-                    loaded.append((frames, ctx, source_id))
-            if len(loaded) < 1:
+                    loaded_samples.append((identity, frames, ctx, source_id))
+                    taken += 1
+
+                if missing_required:
+                    break
+
+            # Keep only identities that still have remaining references.
+            pools = {identity: refs for identity, refs in pools.items() if refs}
+
+            if missing_required:
                 continue
-            for frames, ctx, source_id in loaded:
-                batch_sequences.append(frames)
-                batch_labels.append(self.identity_to_index[identity])
-                batch_seq_lens.append(int(frames.shape[0]))
-                batch_identities.append(identity)
-                batch_contexts.append(ctx)
-                batch_sources.append(source_id)
 
-        if len(batch_sequences) < self.batch_identities:
-            return None
-
-        max_len = max(batch_seq_lens)
-        padded = [self._pad_sequence(seq, max_len) for seq in batch_sequences]
-        return {
-            "frames": torch.stack(padded, dim=0),
-            "label": torch.tensor(batch_labels, dtype=torch.long),
-            "seq_lens": torch.tensor(batch_seq_lens, dtype=torch.long),
-            "identity": batch_identities,
-            "context": batch_contexts,
-            "source": batch_sources,
-        }
+            batch = self._build_tensor_batch(loaded_samples)
+            if batch is not None and int(batch["frames"].shape[0]) == 3:
+                yield batch
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        identity_order = self._iter_identity_order()
-        batch_refs: list[tuple[str, list[SampleReference]]] = []
-
-        for identity in identity_order:
-            refs = self._iter_refs_for_identity(identity)
-            if not refs:
-                continue
-            batch_refs.append((identity, refs))
-
-            if len(batch_refs) == self.batch_identities:
-                batch = self._materialize_batch(batch_refs)
-                if batch is not None:
-                    yield batch
-                batch_refs = []
-
-        # Drop any incomplete batch with fewer than batch_identities identities to
-        # match the expected projector training shape.
+        yield from self._emit_tuple_batches()

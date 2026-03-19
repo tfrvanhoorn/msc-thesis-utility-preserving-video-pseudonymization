@@ -48,15 +48,13 @@ def parse_args():
 
     # Path Arguments
     parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
-    parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba", "image_folder", "voxceleb_video", "video_folder"], help="Dataset type to use")
+    parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba"], help="Dataset type to use (currently only celeba is supported for training)")
     parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
     parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "train_results", help="Directory to save checkpoints")
 
     # Hyperparameters (Projector & Trainer)
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--batch_identities", type=int, default=4, help="Number of unique identities per batch")
-    parser.add_argument("--batch_samples_per_identity", type=int, default=2, help="Images per identity in a batch")
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for the projector")
 
@@ -145,6 +143,9 @@ def main():
     args = parse_args()
     configure_logging()
     device = torch.device(args.device)
+    if args.dataset_type.lower() != "celeba":
+        raise ValueError("training.py currently supports dataset_type=celeba only")
+
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
     use_swapper_requested = args.use_face_swapper or swapper_choice != "none"
@@ -225,10 +226,8 @@ def main():
         seed=args.seed,
         max_identities=args.max_identities,
         max_samples_per_identity=args.max_samples_per_identity,
-        batch_size=args.batch_identities * args.batch_samples_per_identity,
+        batch_size=3,
         identity_batching=True,
-        batch_identities=args.batch_identities,
-        samples_per_identity=args.batch_samples_per_identity,
         shuffle_train=True,
         shuffle_test=False,
     )
@@ -271,8 +270,6 @@ def main():
         lambda_div=args.lambda_div,
         lambda_dif=args.lambda_dif,
         lambda_temp=args.lambda_temp,
-        batch_identities=args.batch_identities,
-        samples_per_identity=args.batch_samples_per_identity,
         checkpoint_dir=args.output_dir,
         device=device,
         train_identities=split.train,
