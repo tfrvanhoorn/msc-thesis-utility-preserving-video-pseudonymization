@@ -5,8 +5,8 @@ import json
 import logging
 import sys
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 
@@ -42,8 +42,164 @@ from components import (  # noqa: E402
     SimSwapFaceSwapper,
     DiffusionFaceSwapper,
 )
-from data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
+from data.prepared import compile_prepared_regex, parse_prepared_video_path  # noqa: E402
+from data.video_io import get_video_fps, load_video_frames, write_mp4  # noqa: E402
 from utils.logging import configure_logging  # noqa: E402
+
+
+@dataclass(frozen=True)
+class SourceVideo:
+    identity: str
+    youtube_id: str | None
+    source_id: str
+    video_path: Path
+    sample_index: int
+    original_name: str
+
+
+DEFAULT_VIDEO_PATTERNS = ("*.mp4", "*.mkv", "*.avi", "*.mov")
+
+
+def _sanitize_segment(value: str) -> str:
+    cleaned = value.strip().replace("\\", "_").replace("/", "_")
+    return cleaned or "unknown"
+
+
+def _video_folder_identity_from_path(path: Path) -> str:
+    stem = path.stem
+    if "_" not in stem:
+        return stem
+    return stem.split("_", 1)[0]
+
+
+def _iter_video_paths(root: Path, patterns: tuple[str, ...] = DEFAULT_VIDEO_PATTERNS) -> list[Path]:
+    videos: list[Path] = []
+    for pattern in patterns:
+        videos.extend([p for p in root.rglob(pattern) if p.is_file()])
+    videos = sorted(set(videos))
+    return videos
+
+
+def _collect_sources(args: argparse.Namespace) -> list[SourceVideo]:
+    dataset_type = args.dataset_type.lower()
+    max_files = args.max_files if args.max_files is not None else None
+    prepared_regex = compile_prepared_regex(args.filename_regex)
+
+    if dataset_type == "voxceleb_video":
+        base = args.data_path / "dev" / "mp4"
+        if not base.exists():
+            raise FileNotFoundError(f"VoxCeleb path not found: {base}")
+
+        identities = sorted([p.name for p in base.iterdir() if p.is_dir()])
+        if args.max_identities is not None:
+            identities = identities[: args.max_identities]
+
+        sources: list[SourceVideo] = []
+        for identity in identities:
+            identity_dir = base / identity
+            youtube_dirs = sorted([p for p in identity_dir.iterdir() if p.is_dir()])
+            videos_seen_identity = 0
+            sample_counter = 1
+            for youtube_dir in youtube_dirs:
+                candidates = _iter_video_paths(youtube_dir)
+                if args.max_videos_per_youtube_id is not None:
+                    candidates = candidates[: args.max_videos_per_youtube_id]
+                for video_path in candidates:
+                    videos_seen_identity += 1
+                    if args.max_videos_per_identity is not None and videos_seen_identity > args.max_videos_per_identity:
+                        break
+                    rel_source = str(video_path.relative_to(base))
+                    sources.append(
+                        SourceVideo(
+                            identity=identity,
+                            youtube_id=youtube_dir.name,
+                            source_id=rel_source,
+                            video_path=video_path,
+                            sample_index=sample_counter,
+                            original_name=video_path.stem,
+                        )
+                    )
+                    sample_counter += 1
+                    if max_files is not None and len(sources) >= max_files:
+                        return sources
+                if args.max_videos_per_identity is not None and videos_seen_identity >= args.max_videos_per_identity:
+                    break
+        return sources
+
+    if dataset_type == "video_folder":
+        if not args.data_path.exists():
+            raise FileNotFoundError(f"Video folder path not found: {args.data_path}")
+
+        all_videos = _iter_video_paths(args.data_path)
+        parsed_by_identity: dict[str, list[tuple[int, str, Path]]] = {}
+        for video in all_videos:
+            parsed = parse_prepared_video_path(video, prepared_regex)
+            parsed_by_identity.setdefault(parsed.identity, []).append((parsed.sample_index, parsed.original_name, video))
+
+        identities = sorted(parsed_by_identity.keys())
+        if args.max_identities is not None:
+            identities = identities[: args.max_identities]
+
+        sources: list[SourceVideo] = []
+        for identity in identities:
+            candidates = sorted(parsed_by_identity.get(identity, []), key=lambda item: item[0])
+            if args.max_videos_per_identity is not None:
+                candidates = candidates[: args.max_videos_per_identity]
+            for sample_index, original_name, video_path in candidates:
+                sources.append(
+                    SourceVideo(
+                        identity=identity,
+                        youtube_id=None,
+                        source_id=str(video_path.name),
+                        video_path=video_path,
+                        sample_index=sample_index,
+                        original_name=original_name,
+                    )
+                )
+                if max_files is not None and len(sources) >= max_files:
+                    return sources
+        return sources
+
+    raise ValueError(f"Unsupported dataset_type for video inference: {args.dataset_type}")
+
+
+def _build_export_leaf(export_root: Path, source: SourceVideo) -> Path:
+    identity_seg = _sanitize_segment(source.identity)
+    source_seg = _sanitize_segment(Path(source.source_id).stem)
+    if source.youtube_id:
+        video_id = _sanitize_segment(f"{source.identity}+{source.youtube_id}+{source_seg}")
+    else:
+        video_id = _sanitize_segment(f"{source.identity}+{source_seg}")
+    return export_root / identity_seg / video_id
+
+
+def _prepared_output_filename(source: SourceVideo) -> str:
+    return f"{source.identity}_sample{source.sample_index}_{source.original_name}.mp4"
+
+
+def _normalize_frame(frame: torch.Tensor, image_size: int = 256) -> torch.Tensor:
+    if frame.numel() == 0:
+        return torch.zeros((3, image_size, image_size), dtype=torch.float32)
+    out = frame.detach().cpu().float()
+    if out.dim() != 3:
+        return torch.zeros((3, image_size, image_size), dtype=torch.float32)
+    if out.shape[0] != 3 and out.shape[-1] == 3:
+        out = out.permute(2, 0, 1)
+    if out.shape[0] != 3:
+        return torch.zeros((3, image_size, image_size), dtype=torch.float32)
+
+    if out.min().item() < 0.0 or out.max().item() > 1.0:
+        out = out.add(1.0).div(2.0)
+    out = out.clamp(0.0, 1.0)
+
+    if out.shape[1] != image_size or out.shape[2] != image_size:
+        out = torch.nn.functional.interpolate(
+            out.unsqueeze(0),
+            size=(image_size, image_size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+    return out
 
 
 def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) -> torch.Tensor:
@@ -54,7 +210,7 @@ def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) ->
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run KFAAR inference on image/video folders")
+    parser = argparse.ArgumentParser(description="Run KFAAR inference on prepared videos and export inferred MP4 videos")
 
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to a trained projector checkpoint (.pt)")
 
@@ -64,7 +220,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset_type",
         type=str,
         required=True,
-        choices=["image_folder", "video_folder"],
+        choices=["video_folder", "voxceleb_video"],
         help="Dataset type to use",
     )
     parser.add_argument(
@@ -78,7 +234,13 @@ def parse_args() -> argparse.Namespace:
         "--output_dir",
         type=Path,
         default=SRC_ROOT / "infer_results",
-        help="Directory to save inference outputs/reports",
+        help="Directory to save inferred outputs and reports",
+    )
+    parser.add_argument(
+        "--filename_regex",
+        type=str,
+        default=r"^(?P<identity>[^_]+)_sample(?P<sample>\d+)_(?P<original>.+)$",
+        help="Regex used for prepared video names when dataset_type=video_folder",
     )
 
     # Face swapping selector (visual-only by default)
@@ -173,6 +335,7 @@ def parse_args() -> argparse.Namespace:
 
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
+    parser.add_argument("--num_keys", type=int, default=2, help="Number of pseudonymization keys to render per source video")
     parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "lstm"], help="Projector architecture")
     parser.add_argument("--lstm_hidden_dim", type=int, default=512, help="Hidden size for LSTM projector")
     parser.add_argument("--lstm_num_layers", type=int, default=1, help="Number of layers for LSTM projector")
@@ -180,18 +343,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_lstm_bidirectional", dest="lstm_bidirectional", action="store_false", help="Disable bidirectional LSTM")
     parser.add_argument("--lstm_dropout", type=float, default=0.0, help="Dropout for LSTM projector (applied when num_layers>1)")
 
-    # Dataset options
-    parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (video_folder)")
-    parser.add_argument("--window_size", type=int, default=1, help="Window size (frames) for video datasets")
-    parser.add_argument("--frame_stride", type=int, default=1, help="Stride between frames inside a window")
-    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts (defaults to window_size*frame_stride)")
-    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (video datasets)")
-    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
-    parser.add_argument("--max_files", type=int, default=None, help="Global maximum number of input files to infer")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for folder iteration")
+    # Dataset and sampling options
+    parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities")
+    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max videos sampled per identity")
+    parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max videos sampled per YouTube ID (voxceleb_video)")
+    parser.add_argument("--max_files", type=int, default=None, help="Global maximum number of source videos")
+    parser.add_argument("--max_frames_per_video", type=int, default=64, help="Maximum sampled frames per source video")
+    parser.add_argument("--target_sample_fps", type=float, default=10.0, help="Target FPS for frame sampling before anonymization")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for key generation")
-    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
@@ -201,86 +360,14 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Exposure adjustment in EV stops applied to input frames before processing (scale = 2**EV; negative darkens, positive brightens)",
     )
-
-    # Generated face saving
     parser.add_argument(
-        "--save_generated_mode",
-        type=str,
-        default="detected",
-        choices=["detected", "undetected", "all"],
-        help="Which generated frames to store",
-    )
-    parser.add_argument(
-        "--save_generated_dir",
-        type=Path,
+        "--output_fps",
+        type=float,
         default=None,
-        help="Directory to store generated face outputs (defaults to output_dir/generated_faces)",
-    )
-    parser.add_argument(
-        "--save_videos",
-        action="store_true",
-        help="Also save each window trajectory as GIF videos alongside frame images",
+        help="Optional output FPS override. Defaults to source_fps/effective_sample_step.",
     )
 
     return parser.parse_args()
-
-
-def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str] | None, list[str] | None, list[str] | None]:
-    frames: Any
-    labels: torch.Tensor | None = None
-    seq_lens: Any = None
-    identities: list[str] | None = None
-    contexts: list[str] | None = None
-    sources: list[str] | None = None
-
-    if isinstance(batch, dict):
-        frames = batch.get("frames")
-        labels = batch.get("label")
-        if labels is None:
-            labels = batch.get("labels")
-        seq_lens = batch.get("seq_lens")
-        id_val = batch.get("identity")
-        if id_val is not None:
-            if isinstance(id_val, (list, tuple)):
-                identities = [str(v) for v in id_val]
-            else:
-                identities = [str(id_val)]
-        ctx_val = batch.get("context")
-        if ctx_val is not None:
-            if isinstance(ctx_val, (list, tuple)):
-                contexts = [str(c) for c in ctx_val]
-            else:
-                contexts = [str(ctx_val)]
-        src_val = batch.get("source")
-        if src_val is not None:
-            if isinstance(src_val, (list, tuple)):
-                sources = [str(s) for s in src_val]
-            else:
-                sources = [str(src_val)]
-    elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
-        frames, labels = batch[0], batch[1]
-        if len(batch) >= 3:
-            seq_lens = batch[2]
-    else:
-        raise TypeError("Unsupported batch format for inference")
-
-    if labels is None:
-        raise ValueError("Batch is missing labels for inference")
-    if frames is None:
-        raise ValueError("Batch is missing frames/images for inference")
-
-    labels_tensor = torch.as_tensor(labels, dtype=torch.long)
-    frame_tensor = frames if torch.is_tensor(frames) else torch.as_tensor(frames)
-    if frame_tensor.dim() == 4:
-        frame_tensor = frame_tensor.unsqueeze(1)
-    if frame_tensor.dim() != 5:
-        raise ValueError(f"Expected frames with 5 dimensions (B,Seq,C,H,W), got {tuple(frame_tensor.shape)}")
-
-    seq_len_tensor = torch.as_tensor(seq_lens, dtype=torch.long) if seq_lens is not None else torch.full(
-        (frame_tensor.shape[0],), frame_tensor.shape[1], dtype=torch.long
-    )
-
-    return frame_tensor, labels_tensor, seq_len_tensor, identities, contexts, sources
 
 
 def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | DiffusionFaceSwapper | None:
@@ -331,32 +418,22 @@ def main() -> None:
 
     if args.max_files is not None and args.max_files <= 0:
         raise ValueError("--max_files must be > 0 when provided")
-    if args.batch_size <= 0:
-        raise ValueError("--batch_size must be > 0")
+    if args.max_frames_per_video <= 0:
+        raise ValueError("--max_frames_per_video must be > 0")
+    if args.target_sample_fps <= 0:
+        raise ValueError("--target_sample_fps must be > 0")
+    if args.num_keys < 1:
+        raise ValueError("--num_keys must be >= 1")
+
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     face_swapper = _build_face_swapper(args, device)
-
-    data_options: dict[str, object] = {
-        "max_videos_per_identity": args.max_videos_per_identity,
-    }
-    if args.max_samples_per_identity is not None:
-        data_options["max_samples_per_identity"] = args.max_samples_per_identity
-        if args.dataset_type == "video_folder":
-            data_options["max_videos_per_identity"] = args.max_samples_per_identity
-    if args.dataset_type == "video_folder":
-        data_options.update(
-            {
-                "window_size": args.window_size,
-                "frame_stride": args.frame_stride,
-                "window_step": args.window_step,
-                "max_windows_per_video": args.max_windows_per_video,
-            }
-        )
 
     data_cfg = DataConfig(
         dataset_path=args.data_path,
         dataset_type=args.dataset_type,
-        options=data_options,
+        options={},
     )
     detector_cfg = DetectorConfig(image_size=256, device=str(device))
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(device))
@@ -395,95 +472,111 @@ def main() -> None:
     if hasattr(pipeline.embedder, "eval"):
         pipeline.embedder.eval()
 
-    output_dir = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_dir = args.save_generated_dir if args.save_generated_dir is not None else output_dir / "generated_faces"
-    save_videos = args.save_videos or args.dataset_type == "video_folder"
-    pipeline.configure_saving(
-        save_dir,
-        mode=args.save_generated_mode,
-        max_per_epoch=None,
-        save_videos=save_videos,
-    )
-
-    all_identities = list_identities(cfg.data)
-    if args.max_identities is not None:
-        all_identities = all_identities[: args.max_identities]
-
-    data_loader = build_dataloader_for_identities(
-        cfg.data,
-        all_identities,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        identity_batching=False,
-        max_samples_per_identity=args.max_samples_per_identity,
-    )
+    sources = _collect_sources(args)
+    identity_to_index: dict[str, int] = {}
+    for src in sources:
+        if src.identity not in identity_to_index:
+            identity_to_index[src.identity] = len(identity_to_index)
 
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
-    fixed_key = torch.randn(args.key_dim, generator=rng, device=device)
+    key_bank = [torch.randn(args.key_dim, generator=rng, device=device) for _ in range(args.num_keys)]
 
-    use_swapper = face_swapper is not None
-    processed_samples = 0
-    skipped_samples = 0
-    selected_video_sources: set[str] = set()
+    processed_videos = 0
+    skipped_videos = 0
+    manifest_entries: list[dict[str, object]] = []
 
     with torch.no_grad():
-        stop = False
-        for batch in data_loader:
-            frames, labels, seq_lens, identities, contexts, sources = _extract_batch(batch)
+        for src in sources:
+            source_fps = get_video_fps(src.video_path)
+            effective_sample_step = max(1, int(round(source_fps / float(args.target_sample_fps))))
+            sampled = load_video_frames(
+                src.video_path,
+                max_frames=args.max_frames_per_video,
+                frame_step=effective_sample_step,
+                convert_rgb=True,
+            )
+            if sampled is None:
+                skipped_videos += 1
+                continue
+
+            frames = torch.from_numpy(sampled).permute(0, 3, 1, 2).float() / 255.0
+            frames = _apply_input_brightness(frames, args.input_brightness_ev)
             frames = frames.to(device)
-            labels = labels.to(device)
-            seq_lens = seq_lens.to(device)
 
-            batch_size = frames.shape[0]
-            for idx in range(batch_size):
-                if args.dataset_type == "image_folder" and args.max_files is not None and processed_samples >= args.max_files:
-                    stop = True
-                    break
+            label = identity_to_index[src.identity]
+            sample_context = src.youtube_id if src.youtube_id is not None else Path(src.source_id).stem
 
-                source_id = None
-                if sources is not None and idx < len(sources):
-                    src_val = sources[idx].strip()
-                    if src_val:
-                        source_id = src_val
+            key_outputs: dict[str, list[torch.Tensor]] = {}
 
-                if args.dataset_type == "video_folder":
-                    if source_id is None:
-                        source_id = f"unknown_{idx}"
-                    if (
-                        args.max_files is not None
-                        and source_id not in selected_video_sources
-                        and len(selected_video_sources) >= args.max_files
-                    ):
-                        skipped_samples += 1
-                        continue
-                    selected_video_sources.add(source_id)
-
-                seq_len = int(seq_lens[idx].item())
-                sample_frames = frames[idx, :seq_len]
-                sample_frames = _apply_input_brightness(sample_frames, args.input_brightness_ev)
-                label = int(labels[idx].item())
-
-                sample_context = None
-                if contexts is not None and idx < len(contexts):
-                    sample_context = contexts[idx]
-
-                pipeline.forward_eval(
-                    sample_frames,
-                    fixed_key,
+            for key_idx, key_vec in enumerate(key_bank, start=1):
+                res = pipeline.forward_eval(
+                    frames,
+                    key_vec,
                     sample_label=label,
                     sample_context=sample_context,
-                    use_face_swapper=use_swapper,
+                    use_face_swapper=face_swapper is not None,
                     swap_for_visuals_only=args.swap_for_visuals_only,
+                    return_frame_pairs=True,
                 )
-                processed_samples += 1
 
-            if stop:
-                break
+                gen_frames = [_normalize_frame(frame, image_size=cfg.detector.image_size) for frame in res.generated_face_frames]
+                key_outputs[f"key{key_idx}"] = gen_frames
 
-    pipeline.finalize_saving()
+            if any(len(output_frames) == 0 for output_frames in key_outputs.values()):
+                skipped_videos += 1
+                continue
+
+            output_fps = float(args.output_fps) if args.output_fps is not None else max(1.0, source_fps / float(effective_sample_step))
+
+            prepared_filename = _prepared_output_filename(src)
+
+            outputs: dict[str, str] = {}
+            key_codecs: dict[str, str] = {}
+            for key_name, output_frames in key_outputs.items():
+                if args.num_keys >= 2:
+                    key_output_dir = output_dir / key_name
+                    key_output_dir.mkdir(parents=True, exist_ok=True)
+                    output_path = key_output_dir / prepared_filename
+                else:
+                    output_path = output_dir / prepared_filename
+                key_codecs[key_name] = write_mp4(output_path, output_frames, fps=output_fps)
+                outputs[key_name] = str(output_path.relative_to(output_dir).as_posix())
+
+            processed_videos += 1
+            manifest_entries.append(
+                {
+                    "identity": src.identity,
+                    "youtube_id": src.youtube_id,
+                    "sample_index": src.sample_index,
+                    "original_name": src.original_name,
+                    "prepared_filename": prepared_filename,
+                    "source_id": src.source_id,
+                    "source_video": str(src.video_path),
+                    "source_fps": float(source_fps),
+                    "target_sample_fps": float(args.target_sample_fps),
+                    "effective_sample_step": int(effective_sample_step),
+                    "sampled_frames": int(frames.shape[0]),
+                    "outputs": outputs,
+                    "fps": float(output_fps),
+                    "codecs": key_codecs,
+                }
+            )
+
+    manifest_path = output_dir / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "dataset_type": args.dataset_type,
+                "num_keys": args.num_keys,
+                "nested_key_outputs": bool(args.num_keys >= 2),
+                "max_frames_per_video": args.max_frames_per_video,
+                "target_sample_fps": float(args.target_sample_fps),
+                "entries": manifest_entries,
+            },
+            handle,
+            indent=2,
+        )
 
     report_path = output_dir / f"{args.checkpoint.stem}_{args.dataset_type}_infer.json"
     serialized_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
@@ -493,10 +586,11 @@ def main() -> None:
                 "checkpoint": str(args.checkpoint),
                 "dataset_type": args.dataset_type,
                 "seed": args.seed,
-                "processed_samples": processed_samples,
-                "processed_files": len(selected_video_sources) if args.dataset_type == "video_folder" else processed_samples,
-                "skipped_samples": skipped_samples,
-                "identities": all_identities,
+                "processed_videos": processed_videos,
+                "skipped_videos": skipped_videos,
+                "output_dir": str(output_dir),
+                "nested_key_outputs": bool(args.num_keys >= 2),
+                "manifest": str(manifest_path),
                 "settings": serialized_args,
             },
             handle,
@@ -504,10 +598,10 @@ def main() -> None:
         )
 
     logging.info(
-        "Inference complete | processed_samples=%d | processed_files=%d | skipped_samples=%d | report=%s",
-        processed_samples,
-        len(selected_video_sources) if args.dataset_type == "video_folder" else processed_samples,
-        skipped_samples,
+        "Inference export complete | processed_videos=%d | skipped_videos=%d | output_dir=%s | report=%s",
+        processed_videos,
+        skipped_videos,
+        output_dir,
         report_path,
     )
 

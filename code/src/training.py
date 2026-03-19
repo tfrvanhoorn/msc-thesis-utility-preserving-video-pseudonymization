@@ -78,10 +78,7 @@ def parse_args():
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--window_size", type=int, default=16, help="Window size for video datasets")
     parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for video datasets")
-    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts for video datasets (defaults to window_size*frame_stride)")
-    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows to sample per source video for video datasets")
     parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
@@ -191,10 +188,7 @@ def main():
         data_options.update(
             {
                 "max_videos_per_identity": args.max_samples_per_identity,
-                "window_size": args.window_size,
                 "frame_stride": args.frame_stride,
-                "window_step": args.window_step,
-                "max_windows_per_video": args.max_windows_per_video,
             }
         )
 

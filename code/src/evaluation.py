@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import logging
+import re
 import sys
 import time
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,25 +32,39 @@ if str(SRC_ROOT) not in sys.path:
 if str(EXTERNAL_LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
-from config import (  # noqa: E402
-    DataConfig,
-    DetectorConfig,
-    EmbeddingConfig,
-    PipelineConfig,
-    ProjectorConfig,
-    SeedConfig,
-)
-from metrics import MetricsAccumulator  # noqa: E402
+from components import FacenetEmbedder, MTCNNAligner, MTCNNDetector  # noqa: E402
 from geometric_metrics import GeometricUtilityEvaluator  # noqa: E402
-from pipeline.factory import build_kfaar_pipeline  # noqa: E402
-from components import (
-    load_stylegan2,
-    load_projector_state_dict,
-    SimSwapFaceSwapper,
-    DiffusionFaceSwapper,
-)  # noqa: E402
-from data.splits import build_dataloader_for_identities, list_identities  # noqa: E402
+from metrics import MetricsAccumulator  # noqa: E402
+from data.prepared import (  # noqa: E402
+    DEFAULT_PREPARED_REGEX,
+    PreparedNameError,
+    collect_prepared_videos,
+    compile_prepared_regex,
+    map_prepared_videos_by_key,
+)
+from data.video_io import load_video_frames  # noqa: E402
 from utils.logging import configure_logging  # noqa: E402
+
+
+SUPPORTED_METRICS = {
+    "detection",
+    "anonymization",
+    "synchronism",
+    "diversity",
+    "differentiation",
+    "geometric",
+}
+
+KEY_DIR_PATTERN = re.compile(r"^key(?P<index>\d+)$")
+
+
+@dataclass(frozen=True)
+class EvalEntry:
+    identity: str
+    youtube_id: str | None
+    source_id: str
+    input_video: Path
+    outputs: dict[str, Path]
 
 
 def _log_pipe(category: str, **fields: Any) -> None:
@@ -68,34 +85,109 @@ def _to_uint8_rgb_image(image: torch.Tensor) -> np.ndarray:
     return (hwc * 255.0).round().astype(np.uint8)
 
 
-def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) -> torch.Tensor:
-    if input_brightness_ev == 0.0:
-        return frames
-    scale = float(2.0 ** float(input_brightness_ev))
-    return (frames * scale).clamp(0.0, 1.0)
+def _parse_metrics(value: str) -> set[str]:
+    raw_items = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if not raw_items:
+        raise ValueError("--metrics must include at least one metric")
+    if "all" in raw_items:
+        return set(SUPPORTED_METRICS)
+    unknown = sorted(set(raw_items) - SUPPORTED_METRICS)
+    if unknown:
+        raise ValueError(f"Unsupported metric names in --metrics: {', '.join(unknown)}")
+    return set(raw_items)
+
+
+def _sorted_key_names(keys: list[str]) -> list[str]:
+    def _key_rank(name: str) -> tuple[int, str]:
+        if name.startswith("key"):
+            suffix = name[3:]
+            if suffix.isdigit():
+                return int(suffix), name
+        return 10**9, name
+
+    return sorted(keys, key=_key_rank)
+
+
+def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
+    if "detection" not in enabled:
+        summary["detection_rate"] = None
+        summary["counts"]["detected_generated"] = 0
+        summary["counts"]["total_generated"] = 0
+
+    if "anonymization" not in enabled:
+        summary["anonymization_success_rate"] = None
+        summary["anonymization"].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
+        summary["anonymization"]["counts"] = {"success": 0, "total": 0}
+        summary["counts"]["anonymization_success"] = 0
+        summary["counts"]["anonymization_total"] = 0
+
+    if "synchronism" not in enabled:
+        summary["synchronism_success_rate"] = None
+        summary["synchronism_within_success_rate"] = None
+        summary["synchronism_cross_success_rate"] = None
+        for key in ("synchronism_total", "synchronism_within", "synchronism_cross"):
+            summary[key].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
+            summary[key]["counts"] = {"success": 0, "total": 0}
+        summary["counts"]["synchronism_success"] = 0
+        summary["counts"]["synchronism_total"] = 0
+        summary["counts"]["synchronism_within_success"] = 0
+        summary["counts"]["synchronism_within_total"] = 0
+        summary["counts"]["synchronism_cross_success"] = 0
+        summary["counts"]["synchronism_cross_total"] = 0
+
+    if "diversity" not in enabled:
+        summary["diversity_success_rate"] = None
+        summary["diversity"].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
+        summary["diversity"]["counts"] = {"success": 0, "total": 0}
+        summary["counts"]["diversity_success"] = 0
+        summary["counts"]["diversity_total"] = 0
+
+    if "differentiation" not in enabled:
+        summary["differentiation_success_rate"] = None
+        summary["differentiation"].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
+        summary["differentiation"]["counts"] = {"success": 0, "total": 0}
+        summary["counts"]["differentiation_success"] = 0
+        summary["counts"]["differentiation_total"] = 0
+
+    if "geometric" not in enabled:
+        summary["head_posture_error"] = None
+        summary["facial_expression_error"] = None
+        summary["geometric_utility"]["head_posture_error"] = None
+        summary["geometric_utility"]["facial_expression_error"] = None
+        summary["geometric_utility"]["counts"] = {"valid_pairs": 0, "invalid_pairs": 0}
+        summary["counts"]["geometric_pairs_valid"] = 0
+        summary["counts"]["geometric_pairs_invalid"] = 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a trained KFAAR projector")
+    parser = argparse.ArgumentParser(description="Evaluate inferred videos from prepared input/inferred folders")
 
-    parser.add_argument("--checkpoint", type=Path, required=False, default=None, help="Path to a trained projector checkpoint (.pt)")
-
-    # Path Arguments
-    parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
     parser.add_argument(
-        "--dataset_type",
-        type=str,
-        default="celeba",
-        choices=["celeba", "image_folder", "voxceleb_video", "video_folder"],
-        help="Dataset type to use",
-    )
-    parser.add_argument(
-        "--stylegan_ckpt",
+        "--input_dir",
         type=Path,
-        default=SRC_ROOT / "models" / "stylegan2-celebahq-256x256.pkl",
-        help="Path to StyleGAN2 .pkl checkpoint",
+        required=True,
+        help="Directory containing prepared input videos named {id}_sample{count}_{original_filename}.mp4",
     )
-    parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
+    parser.add_argument(
+        "--inferred_dir",
+        type=Path,
+        required=True,
+        help="Directory containing inferred videos. Use --inferred_nested_keys for key1/key2/... subfolders.",
+    )
+    parser.add_argument(
+        "--inferred_nested_keys",
+        action="store_true",
+        help="Set when inferred_dir contains nested key folders named key1, key2, ...",
+    )
+    parser.add_argument(
+        "--filename_regex",
+        type=str,
+        default=DEFAULT_PREPARED_REGEX,
+        help=(
+            "Regex used to parse prepared filenames; must define named groups "
+            "identity, sample, original"
+        ),
+    )
     parser.add_argument(
         "--output_dir",
         type=Path,
@@ -103,104 +195,8 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save evaluation reports",
     )
 
-    # Face swapping selector (visual-only by default)
-    parser.add_argument(
-        "--face_swapper",
-        type=str,
-        default="none",
-        choices=["none", "simswap", "diffusion"],
-        help="Choose face swapper backend for visualization (none=disabled)",
-    )
-    parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping (overridden by face_swapper != none)")
-    parser.add_argument(
-        "--swap_for_visuals_only",
-        action="store_true",
-        help="Use swapped faces only for visualization; compute metrics on StyleGAN outputs",
-    )
-    parser.add_argument(
-        "--swap_for_loss",
-        dest="swap_for_visuals_only",
-        action="store_false",
-        help="Use swapped faces for embeddings/metrics (old behavior)",
-    )
-    parser.set_defaults(swap_for_visuals_only=True)
-
-    # SimSwap options
-    parser.add_argument(
-        "--simswap_root",
-        type=Path,
-        default=PROJECT_ROOT / "external_libraries" / "SimSwap",
-        help="Path to SimSwap repository root",
-    )
-    parser.add_argument(
-        "--simswap_checkpoints_dir",
-        type=Path,
-        default=None,
-        help="Path to SimSwap checkpoints directory (defaults to simswap_root/checkpoints)",
-    )
-    parser.add_argument(
-        "--simswap_name",
-        type=str,
-        default="people",
-        help="SimSwap experiment name (subfolder in checkpoints_dir)",
-    )
-    parser.add_argument(
-        "--simswap_epoch",
-        type=str,
-        default="latest",
-        help="Generator checkpoint epoch tag (e.g., latest, 0015)",
-    )
-    parser.add_argument(
-        "--simswap_arcface_ckpt",
-        type=Path,
-        default=None,
-        help="Path to ArcFace checkpoint used by SimSwap (defaults to simswap_root/arcface_model/arcface_checkpoint.tar)",
-    )
-    parser.add_argument(
-        "--simswap_parsing_ckpt",
-        type=Path,
-        default=None,
-        help="Path to face parsing checkpoint for SimSwap masking (optional)",
-    )
-    parser.add_argument(
-        "--simswap_crop_size",
-        type=int,
-        default=224,
-        choices=[224, 512],
-        help="Input/output resolution for SimSwap",
-    )
-    parser.add_argument(
-        "--simswap_detector_name",
-        type=str,
-        default="antelopev2",
-        help="Face detector name for SimSwap (e.g., antelopev2)",
-    )
-    parser.add_argument(
-        "--simswap_detector_root",
-        type=Path,
-        default=None,
-        help="Path to SimSwap face detector models root (defaults to simswap_root/insightface_func/models)",
-    )
-
-    # Diffusion swapper options
-    parser.add_argument("--faceadapter_root", type=Path, default=PROJECT_ROOT / "external_libraries" / "Face-Adapter", help="Path to Face-Adapter repository root")
-    parser.add_argument("--faceadapter_checkpoint_dir", type=Path, default=None, help="Path to FaceAdapter checkpoints (defaults to faceadapter_root/checkpoints)")
-    parser.add_argument("--faceadapter_base_model", type=str, default="runwayml/stable-diffusion-v1-5", help="Base Stable Diffusion model for FaceAdapter")
-    parser.add_argument("--faceadapter_cache_dir", type=Path, default=None, help="Cache directory for HF model files (optional)")
-    parser.add_argument("--faceadapter_use_cache", action="store_true", help="Use local-only cached HF model files for FaceAdapter")
-    parser.add_argument("--faceadapter_inference_steps", type=int, default=25, help="FaceAdapter diffusion inference steps")
-    parser.add_argument("--faceadapter_guidance_scale", type=float, default=5.0, help="FaceAdapter guidance scale")
-    parser.add_argument("--faceadapter_crop_ratio", type=float, default=0.81, help="Face crop ratio used by FaceAdapter")
-    parser.add_argument("--faceadapter_seed", type=int, default=0, help="Fixed random seed for deterministic FaceAdapter inference")
-
-    # Hyperparameters (Projector)
-    parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
-    parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "lstm"], help="Projector architecture")
-    parser.add_argument("--lstm_hidden_dim", type=int, default=512, help="Hidden size for LSTM projector")
-    parser.add_argument("--lstm_num_layers", type=int, default=1, help="Number of layers for LSTM projector")
-    parser.add_argument("--lstm_bidirectional", action="store_true", default=True, help="Use bidirectional LSTM")
-    parser.add_argument("--no_lstm_bidirectional", dest="lstm_bidirectional", action="store_false", help="Disable bidirectional LSTM")
-    parser.add_argument("--lstm_dropout", type=float, default=0.0, help="Dropout for LSTM projector (applied when num_layers>1)")
+    parser.add_argument("--num_keys", type=int, default=None, help="Required key count; defaults to manifest value or inferred from files")
+    parser.add_argument("--detection_key", type=int, default=1, help="Key index used for detection/anonymization/synchronism/differentiation branches")
 
     # Evaluation thresholds
     parser.add_argument("--ano_threshold", type=float, default=0.7, help="Cosine similarity threshold for anonymization success")
@@ -225,131 +221,47 @@ def parse_args() -> argparse.Namespace:
         help="Compute AUC/EER for anonymization, synchronism(all), diversity, and differentiation",
     )
 
-    # Dataset & Split
-    parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Max video files sampled per identity (video datasets)")
-    parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max video files sampled per YouTube ID (voxceleb_video)")
-    parser.add_argument("--min_youtube_id_per_identity", type=int, default=None, help="Require at least this many YouTube IDs per identity (voxceleb_video)")
-    parser.add_argument("--window_size", type=int, default=16, help="Window size (frames) for video datasets")
-    parser.add_argument("--frame_stride", type=int, default=1, help="Stride between frames inside a window")
-    parser.add_argument("--window_step", type=int, default=None, help="Step between window starts (defaults to window_size*frame_stride)")
-    parser.add_argument("--max_windows_per_video", type=int, default=None, help="Max windows sampled per source video (video datasets)")
-    parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting and key sampling")
-
-    # Identity batching
-    parser.add_argument("--batch_identities", type=int, default=4, help="Number of unique identities per batch")
-    parser.add_argument("--batch_videos_per_identity", type=int, default=2, help="Videos per identity per batch (voxceleb: all windows from each video) or samples for image datasets")
-    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--max_identities", type=int, default=None, help="Optional cap on number of identities to evaluate")
+    parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Optional cap on number of videos per identity to evaluate")
+    parser.add_argument(
+        "--metrics",
+        type=str,
+        default="detection,anonymization,synchronism,diversity,differentiation,geometric",
+        help="Comma-separated metrics list (supported: detection, anonymization, synchronism, diversity, differentiation, geometric; use 'all' for full set)",
+    )
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
-    parser.add_argument(
-        "--input_brightness_ev",
-        type=float,
-        default=0.0,
-        help="Exposure adjustment in EV stops applied to input frames before processing (scale = 2**EV; negative darkens, positive brightens)",
-    )
-    parser.add_argument(
-        "--skip_pipeline_use_input_as_output",
-        action="store_true",
-        help="Skip projector/generator/swappers and use detected input faces as outputs for baseline utility metrics",
-    )
-
-    # Generated face saving (matches training flags)
-    parser.add_argument("--save_generated_faces", action="store_true", help="Store generated faces to disk during evaluation")
-    parser.add_argument(
-        "--save_generated_mode",
-        type=str,
-        default="detected",
-        choices=["detected", "undetected", "all"],
-        help="Which generated frames to store",
-    )
-    parser.add_argument(
-        "--save_generated_dir",
-        type=Path,
-        default=None,
-        help="Directory to store generated face images (defaults to output_dir/generated_faces)",
-    )
-    parser.add_argument(
-        "--save_generated_max_per_epoch",
-        type=int,
-        default=100,
-        help="Maximum number of generated samples to store per evaluation run (set <=0 for no limit)",
-    )
-    parser.add_argument(
-        "--save_videos",
-        action="store_true",
-        help="Also save each window as an input/gen video alongside frame images",
-    )
 
     return parser.parse_args()
 
 
-def _extract_batch(batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[str] | None, list[str] | None]:
-    frames: Any
-    labels: torch.Tensor | None = None
-    seq_lens: Any = None
-    contexts: list[str] | None = None
-    sources: list[str] | None = None
-
-    if isinstance(batch, dict):
-        frames = batch.get("frames")
-        labels = batch.get("label")
-        if labels is None:
-            labels = batch.get("labels")
-        seq_lens = batch.get("seq_lens")
-        ctx_val = batch.get("context")
-        if ctx_val is not None:
-            if isinstance(ctx_val, (list, tuple)):
-                contexts = [str(c) for c in ctx_val]
-            else:
-                contexts = [str(ctx_val)]
-        src_val = batch.get("source")
-        if src_val is not None:
-            if isinstance(src_val, (list, tuple)):
-                sources = [str(s) for s in src_val]
-            else:
-                sources = [str(src_val)]
-    elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
-        frames, labels = batch[0], batch[1]
-        if len(batch) >= 3:
-            seq_lens = batch[2]
-    else:
-        raise TypeError("Unsupported batch format for evaluation")
-
-    if labels is None:
-        raise ValueError("Batch is missing labels for evaluation")
-    if frames is None:
-        raise ValueError("Batch is missing frames/images for evaluation")
-
-    labels_tensor = torch.as_tensor(labels, dtype=torch.long)
-    frame_tensor = frames if torch.is_tensor(frames) else torch.as_tensor(frames)
-    if frame_tensor.dim() == 4:
-        frame_tensor = frame_tensor.unsqueeze(1)
-    if frame_tensor.dim() != 5:
-        raise ValueError(f"Expected frames with 5 dimensions (B,Seq,C,H,W), got {tuple(frame_tensor.shape)}")
-
-    seq_len_tensor = torch.as_tensor(seq_lens, dtype=torch.long) if seq_lens is not None else torch.full(
-        (frame_tensor.shape[0],), frame_tensor.shape[1], dtype=torch.long
-    )
-
-    return frame_tensor, labels_tensor, seq_len_tensor, contexts, sources
+def _load_video_tensor(path: Path, device: torch.device) -> torch.Tensor:
+    arr = load_video_frames(path, max_frames=None, frame_step=1, convert_rgb=True)
+    if arr is None:
+        return torch.empty((0, 3, 0, 0), device=device)
+    return torch.from_numpy(arr).permute(0, 3, 1, 2).float().to(device) / 255.0
 
 
 def _collect_detected_faces(
-    pipeline: Any,
+    detector: MTCNNDetector,
+    aligner: MTCNNAligner,
+    embedder: FacenetEmbedder,
     sample_frames: torch.Tensor,
+    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
-    device = sample_frames.device
     aligned_faces: list[torch.Tensor] = []
     input_mask_list: list[bool] = []
 
+    if sample_frames.numel() == 0:
+        emb_dim = int(getattr(embedder, "embedding_size", 512))
+        return torch.empty((0, emb_dim), device=device), torch.empty((0,), dtype=torch.bool, device=device), aligned_faces
+
     for frame in sample_frames:
-        detections = pipeline.detector.detect(frame)
+        detections = detector.detect(frame)
         if detections:
             top = max(detections, key=lambda d: d.score)
-            aligned = pipeline.aligner.align(frame, top).to(device)
+            aligned = aligner.align(frame, top).to(device)
             aligned_faces.append(aligned)
             input_mask_list.append(True)
         else:
@@ -360,33 +272,205 @@ def _collect_detected_faces(
     if input_mask.any():
         valid_idx = [i for i, is_valid in enumerate(input_mask_list) if is_valid]
         valid_faces = [aligned_faces[i] for i in valid_idx]
-        embeds = pipeline.embedder.embed(valid_faces, with_grad=False)
+        embeds = embedder.embed(valid_faces, with_grad=False)
         embed_dim = int(embeds.shape[1])
         full_embeds = torch.zeros((len(aligned_faces), embed_dim), device=device, dtype=embeds.dtype)
         for emb, idx in zip(embeds, valid_idx):
             full_embeds[idx] = emb
     else:
-        probe = sample_frames[0] if sample_frames.shape[0] > 0 else torch.zeros((3, 256, 256), device=device)
-        probe_embed = pipeline.embedder.embed([probe], with_grad=False)
-        embed_dim = int(probe_embed.shape[1])
-        full_embeds = torch.zeros((len(aligned_faces), embed_dim), device=device, dtype=probe_embed.dtype)
+        emb_dim = int(getattr(embedder, "embedding_size", 512))
+        full_embeds = torch.zeros((len(aligned_faces), emb_dim), device=device, dtype=torch.float32)
     return full_embeds, input_mask, aligned_faces
+
+
+def _sorted_sample_keys(keys: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    return sorted(keys, key=lambda item: (item[0], item[1]))
+
+
+def _discover_key_video_maps(
+    inferred_dir: Path,
+    *,
+    nested_keys: bool,
+    filename_regex: re.Pattern[str],
+) -> dict[str, dict[tuple[str, int], Path]]:
+    if nested_keys:
+        key_maps: dict[str, dict[tuple[str, int], Path]] = {}
+        for child in sorted([p for p in inferred_dir.iterdir() if p.is_dir()]):
+            match = KEY_DIR_PATTERN.match(child.name)
+            if match is None:
+                continue
+            key_name = f"key{int(match.group('index'))}"
+            refs = collect_prepared_videos(child, filename_regex)
+            key_maps[key_name] = {ref.key: ref.video_path for ref in refs}
+        if not key_maps:
+            raise ValueError(
+                f"No key folders found in inferred_dir={inferred_dir}. Expected folders named key1, key2, ..."
+            )
+        return key_maps
+
+    refs = collect_prepared_videos(inferred_dir, filename_regex)
+    return {"key1": {ref.key: ref.video_path for ref in refs}}
+
+
+def _load_entries_from_prepared_dirs(
+    input_dir: Path,
+    inferred_dir: Path,
+    *,
+    nested_keys: bool,
+    filename_regex_pattern: str,
+    required_num_keys: int | None,
+) -> tuple[list[EvalEntry], int]:
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    if not inferred_dir.exists():
+        raise FileNotFoundError(f"Inferred directory not found: {inferred_dir}")
+
+    filename_regex = compile_prepared_regex(filename_regex_pattern)
+    input_refs = collect_prepared_videos(input_dir, filename_regex)
+    if not input_refs:
+        raise FileNotFoundError(f"No prepared input videos found in {input_dir}")
+
+    input_map = map_prepared_videos_by_key(input_refs)
+    key_video_maps = _discover_key_video_maps(
+        inferred_dir,
+        nested_keys=nested_keys,
+        filename_regex=filename_regex,
+    )
+
+    discovered_key_names = _sorted_key_names(list(key_video_maps.keys()))
+    if required_num_keys is not None:
+        if required_num_keys <= 0:
+            raise ValueError("--num_keys must be >= 1 when provided")
+        key_names = [f"key{i}" for i in range(1, required_num_keys + 1)]
+    else:
+        key_names = discovered_key_names
+
+    missing_key_dirs = [key_name for key_name in key_names if key_name not in key_video_maps]
+    if missing_key_dirs:
+        raise FileNotFoundError(
+            "Missing key folders or outputs in inferred directory: "
+            + ", ".join(missing_key_dirs)
+        )
+
+    entries: list[EvalEntry] = []
+    missing_pairs: list[str] = []
+
+    for sample_key in _sorted_sample_keys(list(input_map.keys())):
+        input_ref = input_map[sample_key]
+        outputs: dict[str, Path] = {}
+        for key_name in key_names:
+            output_path = key_video_maps[key_name].get(sample_key)
+            if output_path is None:
+                missing_pairs.append(
+                    f"identity={sample_key[0]} sample={sample_key[1]} key={key_name}"
+                )
+                continue
+            outputs[key_name] = output_path
+
+        source_id = f"{input_ref.identity}_sample{input_ref.sample_index}_{input_ref.original_name}"
+        entries.append(
+            EvalEntry(
+                identity=input_ref.identity,
+                youtube_id=None,
+                source_id=source_id,
+                input_video=input_ref.video_path,
+                outputs=outputs,
+            )
+        )
+
+    if missing_pairs:
+        preview = "; ".join(missing_pairs[:20])
+        if len(missing_pairs) > 20:
+            preview += f"; ... ({len(missing_pairs)} total missing pairs)"
+        raise FileNotFoundError(
+            "Missing inferred outputs for prepared inputs. "
+            f"Examples: {preview}"
+        )
+
+    return entries, len(key_names)
+
+
+def _apply_entry_caps(
+    entries: list[EvalEntry],
+    *,
+    max_identities: int | None,
+    max_videos_per_identity: int | None,
+) -> list[EvalEntry]:
+    if max_identities is None and max_videos_per_identity is None:
+        return entries
+
+    kept: list[EvalEntry] = []
+    seen_identities: set[str] = set()
+    per_identity_count: dict[str, int] = {}
+
+    for entry in entries:
+        identity = entry.identity
+        if identity not in seen_identities:
+            if max_identities is not None and len(seen_identities) >= max_identities:
+                continue
+            seen_identities.add(identity)
+
+        if max_videos_per_identity is not None:
+            current = per_identity_count.get(identity, 0)
+            if current >= max_videos_per_identity:
+                continue
+            per_identity_count[identity] = current + 1
+
+        kept.append(entry)
+
+    return kept
 
 
 def main() -> None:
     args = parse_args()
-    if not args.skip_pipeline_use_input_as_output and args.checkpoint is None:
-        raise ValueError("--checkpoint is required unless --skip_pipeline_use_input_as_output is enabled")
-
     configure_logging()
     device = torch.device(args.device)
+    enabled_metrics = _parse_metrics(args.metrics)
+    detection_branch_enabled = bool(enabled_metrics & {"detection", "anonymization", "synchronism", "differentiation", "geometric"})
+    diversity_enabled = "diversity" in enabled_metrics
+
+    if args.max_identities is not None and args.max_identities <= 0:
+        raise ValueError("--max_identities must be > 0 when provided")
+    if args.max_videos_per_identity is not None and args.max_videos_per_identity <= 0:
+        raise ValueError("--max_videos_per_identity must be > 0 when provided")
+
+    try:
+        entries, num_keys = _load_entries_from_prepared_dirs(
+            args.input_dir,
+            args.inferred_dir,
+            nested_keys=args.inferred_nested_keys,
+            filename_regex_pattern=args.filename_regex,
+            required_num_keys=args.num_keys,
+        )
+    except PreparedNameError as exc:
+        raise ValueError(str(exc)) from exc
+
+    if num_keys < 1:
+        raise ValueError("--num_keys must be >= 1")
+    if "diversity" in enabled_metrics and not args.inferred_nested_keys:
+        raise ValueError("Diversity metric requires --inferred_nested_keys and at least two key folders")
+    if "diversity" in enabled_metrics and num_keys < 2:
+        raise ValueError("Diversity metric requires at least two keys")
+
+    entries = _apply_entry_caps(
+        entries,
+        max_identities=args.max_identities,
+        max_videos_per_identity=args.max_videos_per_identity,
+    )
+
+    key_names = [f"key{i}" for i in range(1, num_keys + 1)]
+    required_detection_key = f"key{args.detection_key}"
+    if detection_branch_enabled and required_detection_key not in key_names:
+        raise ValueError(f"--detection_key must be in [1, {num_keys}]")
 
     _log_pipe(
         "evaluation_start",
-        checkpoint=str(args.checkpoint),
-        dataset_type=args.dataset_type,
-        passthrough_baseline=bool(args.skip_pipeline_use_input_as_output),
-        input_brightness_ev=float(args.input_brightness_ev),
+        input_dir=str(args.input_dir),
+        inferred_dir=str(args.inferred_dir),
+        num_entries=len(entries),
+        num_keys=num_keys,
+        detection_key=required_detection_key,
+        enabled_metrics=",".join(sorted(enabled_metrics)),
         compute_auc_eer=bool(args.compute_auc_eer),
         anonymization_threshold=float(args.ano_threshold),
         synchronism_threshold=float(args.syn_threshold),
@@ -394,131 +478,18 @@ def main() -> None:
         differentiation_threshold=float(args.diff_threshold),
     )
 
-    face_swapper = None
-    swapper_choice = (args.face_swapper or "none").lower()
-    use_swapper_requested = (args.use_face_swapper or swapper_choice != "none") and not args.skip_pipeline_use_input_as_output
-    if use_swapper_requested:
-        if swapper_choice == "simswap" or swapper_choice == "none":
-            simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
-            arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
-            face_swapper = SimSwapFaceSwapper(
-                simswap_root=args.simswap_root,
-                checkpoints_dir=simswap_ckpt_dir,
-                name=args.simswap_name,
-                which_epoch=args.simswap_epoch,
-                arcface_ckpt=arcface_ckpt,
-                parsing_ckpt=args.simswap_parsing_ckpt,
-                detector_name=args.simswap_detector_name,
-                detector_root=args.simswap_detector_root,
-                crop_size=args.simswap_crop_size,
-                device=device,
-            )
-        elif swapper_choice == "diffusion":
-            faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
-            face_swapper = DiffusionFaceSwapper(
-                faceadapter_root=args.faceadapter_root,
-                checkpoint_dir=faceadapter_ckpt_dir,
-                base_model_id=args.faceadapter_base_model,
-                cache_dir=args.faceadapter_cache_dir,
-                use_cache=args.faceadapter_use_cache,
-                inference_steps=args.faceadapter_inference_steps,
-                guidance_scale=args.faceadapter_guidance_scale,
-                crop_ratio=args.faceadapter_crop_ratio,
-                seed=args.faceadapter_seed,
-                device=device,
-            )
-
-    data_options: dict[str, object] = {
-        "max_videos_per_identity": args.max_videos_per_identity,
-        "max_videos_per_youtube_id": args.max_videos_per_youtube_id,
-        "min_youtube_id_per_identity": args.min_youtube_id_per_identity,
-    }
-    if args.max_samples_per_identity is not None:
-        data_options["max_samples_per_identity"] = args.max_samples_per_identity
-        if args.dataset_type in {"voxceleb_video", "video_folder"}:
-            data_options["max_videos_per_identity"] = args.max_samples_per_identity
-    if args.dataset_type in {"voxceleb_video", "video_folder"}:
-        data_options.update(
-            {
-                "window_size": args.window_size,
-                "frame_stride": args.frame_stride,
-                "window_step": args.window_step,
-                "max_windows_per_video": args.max_windows_per_video,
-            }
-        )
-
-    data_cfg = DataConfig(
-        dataset_path=args.data_path,
-        dataset_type=args.dataset_type,
-        options=data_options,
+    detector = MTCNNDetector(
+        image_size=256,
+        margin=0,
+        score_threshold=0.4,
+        min_face_size=20,
+        max_faces=None,
+        keep_all=True,
+        post_process=False,
+        device=str(device),
     )
-    detector_cfg = DetectorConfig(image_size=256, device=str(device))
-    embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(device))
-    projector_cfg = ProjectorConfig(
-        type=args.projector_type,
-        key_dim=args.key_dim,
-        hidden_dims=(1024, 512),
-        dropout=args.lstm_dropout if args.projector_type == "lstm" else 0.0,
-        lstm_hidden_dim=args.lstm_hidden_dim,
-        lstm_num_layers=args.lstm_num_layers,
-        lstm_bidirectional=args.lstm_bidirectional,
-    )
-
-    cfg = PipelineConfig(
-        data=data_cfg,
-        detector=detector_cfg,
-        embedding=embedding_cfg,
-        seed=SeedConfig(secret_key="master_thesis_secret"),
-        projector=projector_cfg,
-    )
-
-    logging.info("Building data loader for evaluation (all identities)...")
-    all_identities = list_identities(cfg.data)
-    if args.max_identities is not None:
-        all_identities = all_identities[: args.max_identities]
-
-    test_loader = build_dataloader_for_identities(
-        cfg.data,
-        all_identities,
-        batch_size=args.batch_identities * args.batch_videos_per_identity,
-        identity_batching=True,
-        batch_identities=args.batch_identities,
-        samples_per_identity=args.batch_videos_per_identity,
-        shuffle=False,
-        num_workers=args.num_workers,
-        group_by_video=cfg.data.dataset_type.lower() in {"voxceleb_video", "video_folder"},
-    )
-
-    stylegan = None
-    if not args.skip_pipeline_use_input_as_output:
-        logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
-        stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
-    pipeline = build_kfaar_pipeline(
-        cfg,
-        stylegan=stylegan,
-        device=device,
-        truncation_psi=args.truncation_psi,
-        face_swapper=face_swapper,
-    )
-    use_swapper = face_swapper is not None
-
-    if args.save_generated_faces and hasattr(pipeline, "configure_saving"):
-        save_dir = args.save_generated_dir if args.save_generated_dir is not None else args.output_dir / "generated_faces"
-        save_max = None if args.save_generated_max_per_epoch is not None and args.save_generated_max_per_epoch <= 0 else args.save_generated_max_per_epoch
-        pipeline.configure_saving(
-            save_dir,
-            mode=args.save_generated_mode,
-            max_per_epoch=save_max,
-            save_videos=args.save_videos,
-        )
-
-    if not args.skip_pipeline_use_input_as_output:
-        logging.info("Loading checkpoint %s", args.checkpoint)
-        ckpt = torch.load(args.checkpoint, map_location=device)
-        load_projector_state_dict(pipeline.projector, ckpt["model_state_dict"])
-    pipeline.projector.eval()
-    if hasattr(pipeline.embedder, "eval"):
-        pipeline.embedder.eval()
+    aligner = MTCNNAligner(output_size=256)
+    embedder = FacenetEmbedder(pretrained="vggface2", device=str(device))
 
     metrics = MetricsAccumulator(
         anonymization_threshold=args.ano_threshold,
@@ -526,163 +497,136 @@ def main() -> None:
         diversity_threshold=args.div_threshold,
         differentiation_threshold=args.diff_threshold,
         compute_auc_eer=args.compute_auc_eer,
-        anonymization_enabled=not args.skip_pipeline_use_input_as_output,
-        diversity_enabled=not args.skip_pipeline_use_input_as_output,
+        anonymization_enabled="anonymization" in enabled_metrics,
+        diversity_enabled=diversity_enabled,
     )
-    rng = torch.Generator(device=device)
-    rng.manual_seed(args.seed)
     geometric_evaluator = GeometricUtilityEvaluator()
 
+    identity_to_label: dict[str, int] = {}
+    batch_processing_start_time = time.perf_counter()
     total_samples = 0
-    batch_processing_start_time: float | None = None
-    batch_processing_end_time: float | None = None
+
+    diff_embeddings: list[torch.Tensor] = []
+    diff_labels: list[int] = []
+
     try:
         with torch.no_grad():
-            for batch in test_loader:
-                if batch_processing_start_time is None:
-                    batch_processing_start_time = time.perf_counter()
+            for entry in entries:
+                if entry.identity not in identity_to_label:
+                    identity_to_label[entry.identity] = len(identity_to_label)
+                label = identity_to_label[entry.identity]
 
-                batch_diff_embeddings: list[torch.Tensor] = []
-                batch_diff_labels: list[int] = []
-                # Use two random keys shared across the batch.
-                # key1 branch is used for differentiation (different identities, same key).
-                # key1/key2 pair is used for diversity (same identity, different keys).
-                batch_key_1 = torch.randn(args.key_dim, generator=rng, device=device)
-                batch_key_2 = torch.randn(args.key_dim, generator=rng, device=device)
+                available_key_names = [k for k in key_names if k in entry.outputs]
+                if detection_branch_enabled and required_detection_key not in available_key_names:
+                    raise FileNotFoundError(
+                        f"Entry {entry.input_video} is missing required detection branch output: {required_detection_key}"
+                    )
+                if diversity_enabled and len(available_key_names) < 2:
+                    raise ValueError(
+                        f"Diversity is enabled but entry {entry.input_video} has fewer than 2 outputs"
+                    )
 
-                frames, labels, seq_lens, contexts, sources = _extract_batch(batch)
-                frames = frames.to(device)
-                labels = labels.to(device)
-                seq_lens = seq_lens.to(device)
+                input_frames = _load_video_tensor(entry.input_video, device)
+                if input_frames.shape[0] == 0:
+                    continue
 
-                batch_size = frames.shape[0]
-                for idx in range(batch_size):
-                    seq_len = int(seq_lens[idx].item())
-                    sample_frames = frames[idx, :seq_len]
-                    sample_frames = _apply_input_brightness(sample_frames, args.input_brightness_ev)
-                    label = int(labels[idx].item())
+                real_embeddings, input_mask, input_faces = _collect_detected_faces(
+                    detector,
+                    aligner,
+                    embedder,
+                    input_frames,
+                    device,
+                )
 
-                    sample_context = None
-                    if contexts is not None and idx < len(contexts):
-                        sample_context = contexts[idx]
+                key_results: dict[str, tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]] = {}
+                eval_key_names = _sorted_key_names(available_key_names)
+                for key_name in eval_key_names:
+                    output_path = entry.outputs[key_name]
+                    output_frames = _load_video_tensor(output_path, device)
+                    if output_frames.shape[0] == 0:
+                        virt = torch.zeros_like(real_embeddings)
+                        gmask = torch.zeros_like(input_mask)
+                        gfaces = [torch.empty(0, device=device) for _ in range(int(input_mask.shape[0]))]
+                        key_results[key_name] = (virt, gmask, gfaces)
+                        continue
 
-                    source_id = None
-                    if sources is not None and idx < len(sources):
-                        source_id = sources[idx]
+                    min_len = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
+                    output_frames = output_frames[:min_len]
+                    if real_embeddings.shape[0] != min_len:
+                        real_embeddings = real_embeddings[:min_len]
+                        input_mask = input_mask[:min_len]
+                        input_faces = input_faces[:min_len]
 
-                    if args.skip_pipeline_use_input_as_output:
-                        real_full, input_mask, aligned_faces = _collect_detected_faces(pipeline, sample_frames)
-                        center_idx = int(sample_frames.shape[0] // 2)
-                        center_real = real_full[center_idx : center_idx + 1]
-                        center_valid = torch.tensor([bool(input_mask[center_idx].item())], device=device, dtype=torch.bool)
-                        input_face_frames = [face for face in aligned_faces if face.numel() > 0]
-                        generated_face_frames = [face.clone() for face in input_face_frames]
-                        res1_real_embeddings = center_real.detach()
-                        res1_virtual_embeddings = center_real.detach()
-                        res1_valid_mask = center_valid
-                        res1_gen_mask = center_valid
-                        res1_input_face_frames = input_face_frames
-                        res1_generated_face_frames = generated_face_frames
-                        res2_virtual_embeddings = center_real.detach()
-                        res2_valid_mask = center_valid
-                        res2_generated_face_frames = generated_face_frames
-                    else:
-                        forward_fn = pipeline.forward_eval if use_swapper else pipeline.forward
-                        res1 = forward_fn(
-                            sample_frames,
-                            batch_key_1,
-                            sample_label=label,
-                            sample_context=sample_context,
-                            use_face_swapper=use_swapper,
-                            swap_for_visuals_only=args.swap_for_visuals_only,
-                            return_frame_pairs=True,
-                        )
-                        res2 = forward_fn(
-                            sample_frames,
-                            batch_key_2,
-                            sample_label=label,
-                            sample_context=sample_context,
-                            use_face_swapper=use_swapper,
-                            swap_for_visuals_only=args.swap_for_visuals_only,
-                            return_frame_pairs=True,
-                        )
-                        res1_real_embeddings = res1.real_embeddings
-                        res1_virtual_embeddings = res1.virtual_embeddings
-                        res1_valid_mask = res1.valid_mask
-                        res1_gen_mask = res1.gen_mask
-                        res1_input_face_frames = list(res1.input_face_frames)
-                        res1_generated_face_frames = list(res1.generated_face_frames)
-                        res2_virtual_embeddings = res2.virtual_embeddings
-                        res2_valid_mask = res2.valid_mask
-                        res2_generated_face_frames = list(res2.generated_face_frames)
+                    virt_embeddings, gen_mask, gen_faces = _collect_detected_faces(
+                        detector,
+                        aligner,
+                        embedder,
+                        output_frames,
+                        device,
+                    )
+                    key_results[key_name] = (virt_embeddings, gen_mask, gen_faces)
 
-                    pair_count = min(len(res1_input_face_frames), len(res1_generated_face_frames), len(res2_generated_face_frames))
-                    for frame_idx in range(pair_count):
-                        input_face = res1_input_face_frames[frame_idx]
-                        gen_face_key1 = res1_generated_face_frames[frame_idx]
-                        gen_face_key2 = res2_generated_face_frames[frame_idx]
+                det_embeddings = torch.empty((0, 0), device=device)
+                det_gen_mask = torch.empty((0,), dtype=torch.bool, device=device)
+                valid_mask = torch.empty((0,), dtype=torch.bool, device=device)
+                if detection_branch_enabled:
+                    det_embeddings, det_gen_mask, _ = key_results[required_detection_key]
+                    valid_mask = input_mask & det_gen_mask
 
-                        if input_face.numel() == 0 or gen_face_key1.numel() == 0:
-                            metrics.update_geometric_utility(None, None)
-                        else:
-                            errs_key1 = geometric_evaluator.compute_pair_errors(
-                                _to_uint8_rgb_image(input_face),
-                                _to_uint8_rgb_image(gen_face_key1),
-                            )
-                            metrics.update_geometric_utility(errs_key1.head_posture_error, errs_key1.facial_expression_error)
+                if "detection" in enabled_metrics:
+                    metrics.update_detection(det_gen_mask)
+                if "anonymization" in enabled_metrics:
+                    metrics.update_anonymization(real_embeddings, det_embeddings, valid_mask)
 
-                        if input_face.numel() == 0 or gen_face_key2.numel() == 0:
-                            metrics.update_geometric_utility(None, None)
-                        else:
-                            errs_key2 = geometric_evaluator.compute_pair_errors(
-                                _to_uint8_rgb_image(input_face),
-                                _to_uint8_rgb_image(gen_face_key2),
-                            )
-                            metrics.update_geometric_utility(errs_key2.head_posture_error, errs_key2.facial_expression_error)
+                valid_virtual = det_embeddings[valid_mask] if detection_branch_enabled else torch.empty((0, 0), device=device)
+                if "synchronism" in enabled_metrics and valid_virtual.numel() > 0:
+                    metrics.add_synchronism_embeddings(label, valid_virtual, source_id=entry.source_id)
+                if "differentiation" in enabled_metrics and valid_virtual.numel() > 0:
+                    diff_embeddings.append(valid_virtual.detach())
+                    diff_labels.extend([label] * valid_virtual.shape[0])
 
-                    # Keep existing metrics based on a single branch for comparability.
-                    metrics.update_detection(res1_gen_mask)
-                    if not args.skip_pipeline_use_input_as_output:
-                        metrics.update_anonymization(res1_real_embeddings, res1_virtual_embeddings, res1_valid_mask)
+                for key_a, key_b in itertools.combinations(eval_key_names, 2):
+                    emb_a, mask_a, _ = key_results[key_a]
+                    emb_b, mask_b, _ = key_results[key_b]
+                    pair_mask = input_mask & mask_a & mask_b
+                    if diversity_enabled and pair_mask.any():
+                        metrics.update_diversity(emb_a[pair_mask], emb_b[pair_mask])
 
-                        pair_mask = res1_valid_mask & res2_valid_mask
-                        if pair_mask.any():
-                            pair_v1 = res1_virtual_embeddings[pair_mask]
-                            pair_v2 = res2_virtual_embeddings[pair_mask]
-                            metrics.update_diversity(pair_v1, pair_v2)
+                if "geometric" in enabled_metrics:
+                    for key_name in eval_key_names:
+                        _, _, gen_faces = key_results[key_name]
+                        pair_count = min(len(input_faces), len(gen_faces))
+                        for frame_idx in range(pair_count):
+                            input_face = input_faces[frame_idx]
+                            generated_face = gen_faces[frame_idx]
+                            if input_face.numel() == 0 or generated_face.numel() == 0:
+                                metrics.update_geometric_utility(None, None)
+                            else:
+                                errs = geometric_evaluator.compute_pair_errors(
+                                    _to_uint8_rgb_image(input_face),
+                                    _to_uint8_rgb_image(generated_face),
+                                )
+                                metrics.update_geometric_utility(errs.head_posture_error, errs.facial_expression_error)
 
-                    valid_virtual = res1_virtual_embeddings[res1_valid_mask]
-                    if valid_virtual.numel() > 0:
-                        metrics.add_synchronism_embeddings(label, valid_virtual, source_id=source_id)
+                total_samples += 1
 
-                        # Collect valid virtual embeddings for differentiation scoring across identities in the batch
-                        batch_diff_embeddings.append(valid_virtual.detach())
-                        batch_diff_labels.extend([label] * valid_virtual.shape[0])
+        if "differentiation" in enabled_metrics and diff_embeddings:
+            diff_embeds = torch.cat(diff_embeddings, dim=0)
+            diff_lbl = torch.tensor(diff_labels, device=diff_embeds.device, dtype=torch.long)
+            metrics.update_differentiation(diff_embeds, diff_lbl)
 
-                    total_samples += 1
-
-                if batch_diff_embeddings:
-                    diff_embeds = torch.cat(batch_diff_embeddings, dim=0)
-                    diff_labels = torch.as_tensor(batch_diff_labels, device=diff_embeds.device, dtype=torch.long)
-                    metrics.update_differentiation(diff_embeds, diff_labels)
-
-                batch_processing_end_time = time.perf_counter()
     finally:
         geometric_evaluator.close()
 
-    if hasattr(pipeline, "finalize_saving"):
-        pipeline.finalize_saving()
-
-    batch_processing_seconds = 0.0
-    if batch_processing_start_time is not None and batch_processing_end_time is not None:
-        batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
+    batch_processing_end_time = time.perf_counter()
+    batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
 
     summary = metrics.finalize()
+    _mask_disabled_metrics(summary, enabled_metrics)
     _log_pipe(
         "evaluation_summary",
-        checkpoint=str(args.checkpoint),
-        dataset_type=args.dataset_type,
-        passthrough_baseline=bool(args.skip_pipeline_use_input_as_output),
+        input_dir=str(args.input_dir),
+        inferred_dir=str(args.inferred_dir),
         total_samples=total_samples,
         batch_processing_seconds=batch_processing_seconds,
         detection_rate=summary["detection_rate"],
@@ -756,24 +700,23 @@ def main() -> None:
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    report_stem = args.checkpoint.stem if args.checkpoint is not None else "passthrough_baseline"
-    report_path = args.output_dir / f"{report_stem}_{args.dataset_type}_eval.json"
+    report_path = args.output_dir / "folder_eval_report.json"
     serialized_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(
             {
-                "checkpoint": str(args.checkpoint),
-                "dataset_type": args.dataset_type,
-                "seed": args.seed,
+                "input_dir": str(args.input_dir),
+                "inferred_dir": str(args.inferred_dir),
+                "inferred_nested_keys": bool(args.inferred_nested_keys),
+                "num_keys": num_keys,
+                "enabled_metrics": sorted(enabled_metrics),
                 "metrics": summary,
                 "total_samples": total_samples,
                 "timing": {
                     "batch_processing_seconds": batch_processing_seconds,
                 },
                 "settings": serialized_args,
-                "identities": {
-                    "all": all_identities,
-                },
+                "identities": sorted(identity_to_label.keys()),
             },
             f,
             indent=2,
@@ -781,8 +724,8 @@ def main() -> None:
     _log_pipe(
         "evaluation_report_saved",
         path=str(report_path),
-        checkpoint=str(args.checkpoint),
-        dataset_type=args.dataset_type,
+        input_dir=str(args.input_dir),
+        inferred_dir=str(args.inferred_dir),
         batch_processing_seconds=batch_processing_seconds,
     )
 
