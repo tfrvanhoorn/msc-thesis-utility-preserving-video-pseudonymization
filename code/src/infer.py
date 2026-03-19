@@ -177,22 +177,23 @@ def _prepared_output_filename(source: SourceVideo) -> str:
     return f"{source.identity}_sample{source.sample_index}_{source.original_name}.mp4"
 
 
-def _normalize_frame(frame: torch.Tensor, image_size: int = 256) -> torch.Tensor:
+def _normalize_frame(frame: torch.Tensor, image_size: int | None = 256) -> torch.Tensor:
+    fallback_size = 256 if image_size is None else image_size
     if frame.numel() == 0:
-        return torch.zeros((3, image_size, image_size), dtype=torch.float32)
+        return torch.zeros((3, fallback_size, fallback_size), dtype=torch.float32)
     out = frame.detach().cpu().float()
     if out.dim() != 3:
-        return torch.zeros((3, image_size, image_size), dtype=torch.float32)
+        return torch.zeros((3, fallback_size, fallback_size), dtype=torch.float32)
     if out.shape[0] != 3 and out.shape[-1] == 3:
         out = out.permute(2, 0, 1)
     if out.shape[0] != 3:
-        return torch.zeros((3, image_size, image_size), dtype=torch.float32)
+        return torch.zeros((3, fallback_size, fallback_size), dtype=torch.float32)
 
     if out.min().item() < 0.0 or out.max().item() > 1.0:
         out = out.add(1.0).div(2.0)
     out = out.clamp(0.0, 1.0)
 
-    if out.shape[1] != image_size or out.shape[2] != image_size:
+    if image_size is not None and (out.shape[1] != image_size or out.shape[2] != image_size):
         out = torch.nn.functional.interpolate(
             out.unsqueeze(0),
             size=(image_size, image_size),
@@ -520,7 +521,8 @@ def main() -> None:
                     return_frame_pairs=True,
                 )
 
-                gen_frames = [_normalize_frame(frame, image_size=cfg.detector.image_size) for frame in res.generated_face_frames]
+                output_image_size = None if face_swapper is not None else cfg.detector.image_size
+                gen_frames = [_normalize_frame(frame, image_size=output_image_size) for frame in res.generated_face_frames]
                 key_outputs[f"key{key_idx}"] = gen_frames
 
             if any(len(output_frames) == 0 for output_frames in key_outputs.values()):

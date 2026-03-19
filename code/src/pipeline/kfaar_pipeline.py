@@ -188,8 +188,24 @@ class KfaarPipeline:
                     z_i = projected_seq[frame_idx : frame_idx + 1]
                     w_i = self.stylegan.map(z_i, truncation_psi=self.truncation_psi)
                     img_i = self.stylegan.synthesize(w_i, noise_mode="const")[0].clamp(-1, 1).add(1).div(2.0)
+
+                    visual_i = img_i
+                    if use_face_swapper and self.face_swapper is not None:
+                        stylegan_dets_i = self.detector.detect(img_i)
+                        if stylegan_dets_i:
+                            stylegan_top_i = max(stylegan_dets_i, key=lambda d: d.score)
+                            aligned_stylegan_i = self.aligner.align(img_i, stylegan_top_i).to(device)
+
+                            is_diffusion = type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+                            target_to_swap_i = frames_t[frame_idx] if is_diffusion else aligned_input
+                            if target_to_swap_i.numel() > 0:
+                                swapped_i = self.face_swapper.swap(aligned_stylegan_i, target_to_swap_i)
+                                if swapped_i is not None:
+                                    # Diffusion returns full-frame composites; legacy swappers return face crops.
+                                    visual_i = swapped_i
+
                     frame_pair_inputs.append(aligned_input.detach())
-                    frame_pair_generated.append(img_i.detach())
+                    frame_pair_generated.append(visual_i.detach())
 
             w_pre_boundary = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
             images = self.stylegan.synthesize(w_pre_boundary, noise_mode="const")
