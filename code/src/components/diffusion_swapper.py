@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import importlib
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -14,6 +15,15 @@ import torchvision.transforms as transforms
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+
+def _load_module_from_file(module_name: str, module_file: Path):
+    spec = importlib.util.spec_from_file_location(module_name, str(module_file))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot create module spec for {module_name} from {module_file}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 class DiffusionFaceSwapper:
     """FaceAdapter-backed face swapper for aligned KFAAR face crops.
@@ -80,7 +90,10 @@ class DiffusionFaceSwapper:
             CLIPImageProcessor = transformers_mod.CLIPImageProcessor
             CLIPVisionModel = transformers_mod.CLIPVisionModel
 
-            datasets_faceswap = importlib.import_module("data.datasets_faceswap")
+            datasets_faceswap = _load_module_from_file(
+                "faceadapter_datasets_faceswap",
+                self.faceadapter_root / "data" / "datasets_faceswap.py",
+            )
             model_seg_unet = importlib.import_module("face_adapter.model_seg_unet")
             bfm = importlib.import_module("third_party.d3dfr.bfm")
             model_insightface_backbone = importlib.import_module("third_party.insightface_backbone_conv")
