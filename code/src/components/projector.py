@@ -20,7 +20,6 @@ class ProjectorMLP(nn.Module):
         super().__init__()
         input_dim = output_dim + key_dim
         
-        # Build the hidden layers separately
         layers: list[nn.Module] = []
         in_dim = input_dim
         for h in hidden_dims:
@@ -32,13 +31,9 @@ class ProjectorMLP(nn.Module):
         
         self.hidden_net = nn.Sequential(*layers)
         
-        # The output section
+        # The output section (This now represents the DELTA, not the full face)
         self.output_layer = nn.Linear(in_dim, output_dim)
         
-        # --- OLD IMPLEMENTATION: LayerNorm (caused outliers) ---
-        # self.norm = nn.LayerNorm(output_dim, elementwise_affine=True)
-        
-        # Apply initialization
         self.apply(self._init_weights)
 
     def _init_weights(self, m: nn.Module) -> None:
@@ -48,74 +43,35 @@ class ProjectorMLP(nn.Module):
             if m.bias is not None:
                 init.constant_(m.bias, 0)
                 
-        # --- OLD IMPLEMENTATION: LayerNorm init ---
-        # elif isinstance(m, nn.LayerNorm):
-        #     init.constant_(m.bias, 0)
-        #     init.constant_(m.weight, 1)
+        # --- THE MAGIC FIX: ZERO INITIALIZATION ---
+        # We force the final layer to output exactly 0.0 at the start of training.
+        if m is self.output_layer:
+            init.constant_(m.weight, 0)
+            if m.bias is not None:
+                init.constant_(m.bias, 0)
 
     def forward(self, z: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         if key.dim() == 1: key = key.unsqueeze(0)
         if z.dim() == 1: z = z.unsqueeze(0)
         
-        # --- ADDED: L2 Normalization for the key ---
-        # This fixes the Magnitude Mismatch before concatenation
+        # Normalize key to prevent Magnitude Mismatch
         key = F.normalize(key, p=2, dim=-1)
         
         concat = torch.cat([z, key], dim=-1)
         
-        # Pass through hidden layers
         x = self.hidden_net(concat)
         
-        # Project to output_dim
-        out = self.output_layer(x)
+        # Calculate the shift (delta) caused by the key
+        delta = self.output_layer(x)
         
-        # --- OLD IMPLEMENTATION: LayerNorm ---
-        # out = self.norm(out)
+        # --- THE RESIDUAL CONNECTION ---
+        # Original Face + Shift = New Face
+        out = z + delta
 
-        # --- NEW IMPLEMENTATION: Scaled Tanh ---
-        # Restricts values strictly between -3 and 3, but leaves values around 0 fairly intact
+        # Restrict values strictly between -3 and 3
         out = 3.0 * torch.tanh(out / 3.0)
 
         return out
 
     def project(self, z: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         return self.forward(z, key)
-
-
-def load_projector_state_dict(model: nn.Module, state_dict: dict[str, torch.Tensor], *, strict: bool = True) -> None:
-    """Load projector weights, remapping legacy MLP checkpoint keys when needed."""
-
-    def _remap_legacy_mlp_keys(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        mapped: dict[str, torch.Tensor] = {}
-        legacy_found = False
-
-        for key, tensor in sd.items():
-            if key.startswith("net."):
-                legacy_found = True
-                if key.startswith("net.0."):
-                    new_key = key.replace("net.0", "hidden_net.0", 1)
-                elif key.startswith("net.2."):
-                    new_key = key.replace("net.2", "hidden_net.2", 1)
-                elif key.startswith("net.4."):
-                    new_key = key.replace("net.4", "output_layer", 1)
-                else:
-                    new_key = key
-            else:
-                new_key = key
-
-            mapped[new_key] = tensor
-
-        if legacy_found:
-            logger.info("Remapped legacy ProjectorMLP checkpoint keys (net.* -> hidden_net.*, output_layer)")
-
-        return mapped
-
-    if isinstance(model, ProjectorMLP):
-        state_dict = _remap_legacy_mlp_keys(state_dict)
-    try:
-        model.load_state_dict(state_dict, strict=strict)
-    except RuntimeError as exc:
-        raise RuntimeError(
-            "Failed to load projector checkpoint into ProjectorMLP. "
-            "Legacy LSTM projector checkpoints are no longer supported."
-        ) from exc
