@@ -3,11 +3,12 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
-    """Projecteert face embedding z + key k naar een z' gelimiteerd tot (-3, 3)."""
+    """Projects face embedding z + key k to a z' limited to (-3, 3)."""
 
     def __init__(
         self,
@@ -19,7 +20,7 @@ class ProjectorMLP(nn.Module):
         super().__init__()
         input_dim = output_dim + key_dim
         
-        # We bouwen de hidden layers apart
+        # Build the hidden layers separately
         layers: list[nn.Module] = []
         in_dim = input_dim
         for h in hidden_dims:
@@ -31,23 +32,23 @@ class ProjectorMLP(nn.Module):
         
         self.hidden_net = nn.Sequential(*layers)
         
-        # De output sectie
+        # The output section
         self.output_layer = nn.Linear(in_dim, output_dim)
         
-        # --- OUDE IMPLEMENTATIE: LayerNorm (veroorzaakte uitschieters) ---
+        # --- OLD IMPLEMENTATION: LayerNorm (caused outliers) ---
         # self.norm = nn.LayerNorm(output_dim, elementwise_affine=True)
         
-        # Pas initialisatie toe
+        # Apply initialization
         self.apply(self._init_weights)
 
     def _init_weights(self, m: nn.Module) -> None:
-        """Initialiseert gewichten voor netwerken."""
+        """Initializes weights for networks."""
         if isinstance(m, nn.Linear):
             init.kaiming_normal_(m.weight, nonlinearity='relu')
             if m.bias is not None:
                 init.constant_(m.bias, 0)
                 
-        # --- OUDE IMPLEMENTATIE: LayerNorm init ---
+        # --- OLD IMPLEMENTATION: LayerNorm init ---
         # elif isinstance(m, nn.LayerNorm):
         #     init.constant_(m.bias, 0)
         #     init.constant_(m.weight, 1)
@@ -56,20 +57,24 @@ class ProjectorMLP(nn.Module):
         if key.dim() == 1: key = key.unsqueeze(0)
         if z.dim() == 1: z = z.unsqueeze(0)
         
+        # --- ADDED: L2 Normalization for the key ---
+        # This fixes the Magnitude Mismatch before concatenation
+        key = F.normalize(key, p=2, dim=-1)
+        
         concat = torch.cat([z, key], dim=-1)
         
-        # Doorloop hidden layers
+        # Pass through hidden layers
         x = self.hidden_net(concat)
         
-        # Projecteer naar output_dim
+        # Project to output_dim
         out = self.output_layer(x)
         
-        # --- OUDE IMPLEMENTATIE: LayerNorm ---
+        # --- OLD IMPLEMENTATION: LayerNorm ---
         # out = self.norm(out)
 
-        # --- NIEUWE IMPLEMENTATIE: Scaled Tanh ---
-        # Beperkt waarden strikt tussen -3 en 3, maar laat waarden rond 0 vrij intact
-        out = 3.0 * torch.tanh(out / 3)
+        # --- NEW IMPLEMENTATION: Scaled Tanh ---
+        # Restricts values strictly between -3 and 3, but leaves values around 0 fairly intact
+        out = 3.0 * torch.tanh(out / 3.0)
 
         return out
 
