@@ -15,6 +15,7 @@ from .video_loaders import VoxCelebVideoDataset, DEFAULT_VIDEO_PATTERNS
 from .video_io import get_video_frame_count, load_video_window
 from .prepared import (
     DEFAULT_PREPARED_REGEX,
+    PreparedImageRef,
     collect_prepared_images,
     compile_prepared_regex,
 )
@@ -441,11 +442,15 @@ def _build_identity_sample_index(config: SupportsDataConfig, identities: Sequenc
 
     if dataset_type == "prepared_images":
         max_samples = _as_optional_int(options.get("max_samples_per_identity"))
-        regex = compile_prepared_regex(options.get("prepared_filename_regex", DEFAULT_PREPARED_REGEX))
-        refs = collect_prepared_images(config.dataset_path, regex)
+        wanted_identities = {str(identity) for identity in identities}
+        prefetched_refs = options.get("prepared_prefetched_refs")
+        if prefetched_refs is not None:
+            refs = [ref for ref in prefetched_refs if isinstance(ref, PreparedImageRef)]
+        else:
+            regex = compile_prepared_regex(options.get("prepared_filename_regex", DEFAULT_PREPARED_REGEX))
+            refs = collect_prepared_images(config.dataset_path, regex, identities=wanted_identities)
 
         grouped: dict[str, list[SampleReference]] = defaultdict(list)
-        wanted_identities = {str(identity) for identity in identities}
         for ref in refs:
             if ref.identity not in wanted_identities:
                 continue

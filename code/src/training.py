@@ -141,11 +141,23 @@ def main():
         raise FileNotFoundError(f"Prepared input directory not found: {args.input_dir}")
     try:
         prepared_regex = compile_prepared_regex(args.prepared_filename_regex)
-        prepared_refs = collect_prepared_images(args.input_dir, prepared_regex)
+        prepared_refs = collect_prepared_images(
+            args.input_dir,
+            prepared_regex,
+            max_identities=args.max_identities,
+            stop_after_max_identities=bool(args.max_identities is not None),
+        )
     except PreparedNameError as exc:
         raise ValueError(f"Invalid prepared input naming: {exc}") from exc
     if not prepared_refs:
         raise FileNotFoundError(f"No prepared images found in input_dir: {args.input_dir}")
+
+    discovered_identities = sorted({ref.identity for ref in prepared_refs})
+    logging.info(
+        "Prepared scan complete: files=%d identities=%d",
+        len(prepared_refs),
+        len(discovered_identities),
+    )
 
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
@@ -187,6 +199,7 @@ def main():
     if args.max_samples_per_identity is not None:
         data_options["max_samples_per_identity"] = args.max_samples_per_identity
     data_options["prepared_filename_regex"] = args.prepared_filename_regex
+    data_options["prepared_prefetched_refs"] = prepared_refs
 
     data_cfg = DataConfig(
         dataset_path=args.input_dir,

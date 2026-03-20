@@ -15,7 +15,7 @@ from .loaders import (
     build_dataset,
     unified_video_collate_fn,
 )
-from .prepared import DEFAULT_PREPARED_REGEX, collect_prepared_images, compile_prepared_regex
+from .prepared import DEFAULT_PREPARED_REGEX, PreparedImageRef, collect_prepared_images, compile_prepared_regex
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class IdentitySplit:
     test: List[str]
 
 
-def list_identities(config: SupportsDataConfig) -> List[str]:
+def list_identities(config: SupportsDataConfig, *, max_identities: int | None = None) -> List[str]:
     dataset_type = config.dataset_type.lower()
 
     if dataset_type == "image_folder":
@@ -46,8 +46,21 @@ def list_identities(config: SupportsDataConfig) -> List[str]:
 
     if dataset_type == "prepared_images":
         options = config.options or {}
+        prefetched_refs = options.get("prepared_prefetched_refs")
+        if prefetched_refs is not None:
+            refs = [ref for ref in prefetched_refs if isinstance(ref, PreparedImageRef)]
+            identities = sorted({ref.identity for ref in refs})
+            if max_identities is not None:
+                identities = identities[:max_identities]
+            return identities
+
         regex = compile_prepared_regex(options.get("prepared_filename_regex", DEFAULT_PREPARED_REGEX))
-        refs = collect_prepared_images(config.dataset_path, regex)
+        refs = collect_prepared_images(
+            config.dataset_path,
+            regex,
+            max_identities=max_identities,
+            stop_after_max_identities=bool(max_identities is not None),
+        )
         return sorted({ref.identity for ref in refs})
 
     if dataset_type == "voxceleb_video":
@@ -77,7 +90,7 @@ def split_identities(
     seed: int = 0,
     max_identities: int | None = None,
 ) -> IdentitySplit:
-    identities = list_identities(config)
+    identities = list_identities(config, max_identities=max_identities)
     rng = random.Random(seed)
     rng.shuffle(identities)
 

@@ -182,12 +182,33 @@ def collect_prepared_images(
     root: Path,
     regex: re.Pattern[str],
     patterns: tuple[str, ...] = DEFAULT_IMAGE_PATTERNS,
+    *,
+    identities: set[str] | None = None,
+    max_identities: int | None = None,
+    stop_after_max_identities: bool = False,
 ) -> list[PreparedImageRef]:
     refs: list[PreparedImageRef] = []
     seen: set[tuple[str, int]] = set()
+    selected_identities: set[str] = set()
+
+    if max_identities is not None and max_identities <= 0:
+        raise ValueError("max_identities must be > 0 when provided")
+
+    wanted = set(identities) if identities is not None else None
 
     for path in iter_image_paths(root, patterns=patterns):
         ref = parse_prepared_image_path(path, regex)
+
+        if wanted is not None and ref.identity not in wanted:
+            continue
+
+        if wanted is None and max_identities is not None and ref.identity not in selected_identities:
+            if len(selected_identities) >= max_identities:
+                if stop_after_max_identities:
+                    break
+                continue
+            selected_identities.add(ref.identity)
+
         if ref.key in seen:
             raise PreparedNameError(
                 "Duplicate prepared sample key found "
