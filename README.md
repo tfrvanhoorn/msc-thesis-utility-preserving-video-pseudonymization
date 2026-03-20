@@ -30,12 +30,9 @@ If you use external swappers (`SimSwap`, `Face-Adapter`), install their extra re
 
 ### Supported Training Dataset Types
 
-Training (`code/src/training.py`) supports:
+Training (`code/src/training.py`) currently supports prepared CelebA image inputs only.
 
-1. `celeba`
-2. `image_folder`
-3. `voxceleb_video`
-4. `video_folder`
+Prepare your dataset first with `code/src/dataset_utils.py` and then point training to that prepared folder.
 
 ### Generic Rule To Add A New Dataset
 
@@ -54,8 +51,8 @@ Use the new utility script:
 
 ### Required Arguments
 
-1. `--type voxceleb` or `--type video_folder`
-2. `--data_path <raw_voxceleb_root>`
+1. `--type voxceleb`, `--type video_folder`, or `--type celeba`
+2. `--data_path <source_dataset_root>`
 3. `--output_dir <prepared_input_dir>`
 
 ### Optional Filtering/Sampling Arguments
@@ -66,6 +63,7 @@ Use the new utility script:
 4. `--max_frames_per_video`
 5. `--fps`
 6. `--video_folder_identity` (only used when `--type video_folder`)
+7. `--celeba_identity_file` and `--celeba_images_subdir` (only used when `--type celeba` with flat + identity-map layout)
 
 ### Example
 
@@ -111,6 +109,57 @@ Prepared output layout:
 	dataset_preparation_report.json
 ```
 
+## Prepare CelebA For Training
+
+Use the same preparation utility:
+
+`code/src/dataset_utils.py`
+
+Prepared training inputs use the same naming contract as inference/evaluation, but keep image extensions (`.jpg`, `.jpeg`, `.png`).
+
+### Supported CelebA Source Layouts
+
+1. Identity subfolders:
+
+```text
+<data_path>/
+	<identity>/
+		*.jpg|*.jpeg|*.png
+```
+
+2. Flat image folder with identity map file (current CelebA default style):
+
+```text
+<data_path>/
+	identity_CelebA.txt
+	img_align_celeba/
+		*.jpg
+```
+
+### Identity Subfolders Example
+
+```powershell
+python .\code\src\dataset_utils.py \
+	--type celeba \
+	--data_path D:\datasets\celeba_by_identity \
+	--output_dir D:\datasets\prepared_celeba_train \
+	--max_identities 2000 \
+	--max_videos_per_id 50
+```
+
+### Flat + Identity Map Example
+
+```powershell
+python .\code\src\dataset_utils.py \
+	--type celeba \
+	--data_path D:\datasets\celeba \
+	--output_dir D:\datasets\prepared_celeba_train \
+	--celeba_identity_file identity_CelebA.txt \
+	--celeba_images_subdir img_align_celeba \
+	--max_identities 2000 \
+	--max_videos_per_id 50
+```
+
 ## Train The Pipeline
 
 Entry point:
@@ -121,18 +170,16 @@ Entry point:
 
 ```powershell
 python .\code\src\training.py \
-	--data_path D:\datasets\celeba \
-	--dataset_type celeba \
+	--input_dir D:\datasets\prepared_celeba_train \
 	--output_dir .\code\train_results \
 	--epochs 10 \
-	--batch_identities 4 \
-	--batch_samples_per_identity 2
+	--max_samples_per_identity 50
 ```
 
 ### Notes
 
-1. Training does not require prepared filenames.
-2. Prepared filenames are required for the new inference/evaluation folder contract.
+1. Training requires prepared image filenames from `dataset_utils.py`.
+2. Identity tokens in prepared filenames cannot contain underscores.
 3. Use `--resume_ckpt` to continue from a saved checkpoint.
 
 ## Why The Prepared Naming Contract Exists

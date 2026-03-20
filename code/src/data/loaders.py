@@ -13,6 +13,11 @@ from torch.utils.data import IterableDataset
 
 from .video_loaders import VoxCelebVideoDataset, DEFAULT_VIDEO_PATTERNS
 from .video_io import get_video_frame_count, load_video_window
+from .prepared import (
+    DEFAULT_PREPARED_REGEX,
+    collect_prepared_images,
+    compile_prepared_regex,
+)
 
 try:  # Python 3.7 compatibility
     from typing import Protocol as _Protocol
@@ -160,6 +165,47 @@ class CelebADataset(IterableDataset):
         return entries
 
 
+class PreparedImagesDataset(IterableDataset):
+    def __init__(
+        self,
+        root: Path,
+        identities: Sequence[str] | None = None,
+        prepared_filename_regex: str = DEFAULT_PREPARED_REGEX,
+        shuffle: bool = False,
+        max_samples_per_identity: int | None = None,
+    ) -> None:
+        self.root = root
+        self.identities = set(str(identity) for identity in identities) if identities else None
+        self.prepared_filename_regex = prepared_filename_regex
+        self.shuffle = shuffle
+        self.max_samples_per_identity = max_samples_per_identity
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        regex = compile_prepared_regex(self.prepared_filename_regex)
+        refs = collect_prepared_images(self.root, regex)
+        if self.shuffle:
+            random.shuffle(refs)
+
+        per_identity_counter: MutableMapping[str, int] = defaultdict(int)
+        for ref in refs:
+            if self.identities and ref.identity not in self.identities:
+                continue
+            if self.max_samples_per_identity and per_identity_counter[ref.identity] >= self.max_samples_per_identity:
+                continue
+
+            frame = _load_image_tensor(ref.image_path)
+            if frame is None:
+                continue
+
+            yield {
+                "frames": frame.unsqueeze(0),
+                "identity": ref.identity,
+                "context": "static",
+                "source": str(ref.image_path.name),
+            }
+            per_identity_counter[ref.identity] += 1
+
+
 class VideoFolderDataset(IterableDataset):
     """Load video windows from a flat folder of video files.
 
@@ -291,6 +337,17 @@ def _build_celeba_dataset(config: SupportsDataConfig) -> CelebADataset:
     )
 
 
+def _build_prepared_images_dataset(config: SupportsDataConfig) -> PreparedImagesDataset:
+    options = config.options or {}
+    return PreparedImagesDataset(
+        root=config.dataset_path,
+        identities=_normalize_identities(options.get("identities")),
+        prepared_filename_regex=options.get("prepared_filename_regex", DEFAULT_PREPARED_REGEX),
+        shuffle=bool(options.get("shuffle", False)),
+        max_samples_per_identity=_as_optional_int(options.get("max_samples_per_identity")),
+    )
+
+
 def _build_voxceleb_video_dataset(config: SupportsDataConfig) -> VoxCelebVideoDataset:
     options = config.options or {}
     return VoxCelebVideoDataset(
@@ -345,6 +402,7 @@ def _as_optional_int(value: Any) -> int | None:
 _DATASET_BUILDERS: Dict[str, Callable[[SupportsDataConfig], Iterable]] = {
     "image_folder": _build_image_folder_dataset,
     "celeba": _build_celeba_dataset,
+    "prepared_images": _build_prepared_images_dataset,
     "voxceleb_video": _build_voxceleb_video_dataset,
     "video_folder": _build_video_folder_dataset,
 }
@@ -379,6 +437,36 @@ def _build_identity_sample_index(config: SupportsDataConfig, identities: Sequenc
             if files:
                 refs = [SampleReference(identity, config.dataset_path / images_subdir / fname, "image", context="static") for fname in files]
                 index[str(identity)] = refs
+        return index
+
+    if dataset_type == "prepared_images":
+        max_samples = _as_optional_int(options.get("max_samples_per_identity"))
+        regex = compile_prepared_regex(options.get("prepared_filename_regex", DEFAULT_PREPARED_REGEX))
+        refs = collect_prepared_images(config.dataset_path, regex)
+
+        grouped: dict[str, list[SampleReference]] = defaultdict(list)
+        wanted_identities = {str(identity) for identity in identities}
+        for ref in refs:
+            if ref.identity not in wanted_identities:
+                continue
+            grouped[ref.identity].append(
+                SampleReference(
+                    identity=ref.identity,
+                    path=ref.image_path,
+                    kind="image",
+                    context="static",
+                    source=str(ref.image_path.name),
+                )
+            )
+
+        for identity in identities:
+            identity_key = str(identity)
+            identity_refs = grouped.get(identity_key, [])
+            if max_samples:
+                identity_refs = identity_refs[:max_samples]
+            if identity_refs:
+                index[identity_key] = identity_refs
+
         return index
 
     if dataset_type == "voxceleb_video":

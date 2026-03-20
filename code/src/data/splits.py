@@ -15,6 +15,7 @@ from .loaders import (
     build_dataset,
     unified_video_collate_fn,
 )
+from .prepared import DEFAULT_PREPARED_REGEX, collect_prepared_images, compile_prepared_regex
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,12 @@ def list_identities(config: SupportsDataConfig) -> List[str]:
                 _, identity = stripped.split()
                 identities.add(str(identity))
         return sorted(identities)
+
+    if dataset_type == "prepared_images":
+        options = config.options or {}
+        regex = compile_prepared_regex(options.get("prepared_filename_regex", DEFAULT_PREPARED_REGEX))
+        refs = collect_prepared_images(config.dataset_path, regex)
+        return sorted({ref.identity for ref in refs})
 
     if dataset_type == "voxceleb_video":
         base = Path(config.dataset_path) / "dev" / "mp4"
@@ -130,8 +137,8 @@ def build_dataloader_for_identities(
         config = _ConfigProxy(config, options)
 
     if identity_batching:
-        if config.dataset_type.lower() != "celeba":
-            raise ValueError("identity_batching is currently only supported for dataset_type='celeba'")
+        if config.dataset_type.lower() != "prepared_images":
+            raise ValueError("identity_batching is currently only supported for dataset_type='prepared_images'")
         sample_index = _build_identity_sample_index(config, identities)
         batched_dataset = IdentityBatchingDataset(
             sample_index,

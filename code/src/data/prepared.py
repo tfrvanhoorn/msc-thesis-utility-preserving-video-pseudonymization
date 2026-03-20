@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 DEFAULT_VIDEO_PATTERNS: tuple[str, ...] = ("*.mp4", "*.mkv", "*.avi", "*.mov")
+DEFAULT_IMAGE_PATTERNS: tuple[str, ...] = ("*.jpg", "*.jpeg", "*.png")
 DEFAULT_PREPARED_REGEX = r"^(?P<identity>[^_]+)_sample(?P<sample>\d+)_(?P<original>.+)$"
 
 
@@ -23,6 +24,18 @@ class PreparedVideoRef:
 
 class PreparedNameError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class PreparedImageRef:
+    identity: str
+    sample_index: int
+    original_name: str
+    image_path: Path
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return (self.identity, self.sample_index)
 
 
 def compile_prepared_regex(pattern: str | None = None) -> re.Pattern[str]:
@@ -64,6 +77,38 @@ def parse_prepared_video_path(path: Path, regex: re.Pattern[str]) -> PreparedVid
         sample_index=sample_index,
         original_name=original_name,
         video_path=path,
+    )
+
+
+def parse_prepared_image_path(path: Path, regex: re.Pattern[str]) -> PreparedImageRef:
+    match = regex.match(path.stem)
+    if match is None:
+        raise PreparedNameError(f"Filename does not match prepared naming convention: {path.name}")
+
+    identity = match.group("identity").strip()
+    sample_raw = match.group("sample").strip()
+    original_name = match.group("original").strip()
+
+    if not identity:
+        raise PreparedNameError(f"Prepared filename has empty identity: {path.name}")
+    if "_" in identity:
+        raise PreparedNameError(f"Identity cannot contain underscores in prepared naming: {path.name}")
+
+    try:
+        sample_index = int(sample_raw)
+    except ValueError as exc:
+        raise PreparedNameError(f"Sample index is not an integer in prepared filename: {path.name}") from exc
+
+    if sample_index <= 0:
+        raise PreparedNameError(f"Sample index must be >= 1 in prepared filename: {path.name}")
+    if not original_name:
+        raise PreparedNameError(f"Prepared filename has empty original token: {path.name}")
+
+    return PreparedImageRef(
+        identity=identity,
+        sample_index=sample_index,
+        original_name=original_name,
+        image_path=path,
     )
 
 
@@ -124,3 +169,31 @@ def map_prepared_videos_by_key(
             )
         mapping[ref.key] = ref
     return mapping
+
+
+def iter_image_paths(root: Path, patterns: tuple[str, ...] = DEFAULT_IMAGE_PATTERNS) -> list[Path]:
+    images: list[Path] = []
+    for pattern in patterns:
+        images.extend([p for p in root.rglob(pattern) if p.is_file()])
+    return sorted(set(images))
+
+
+def collect_prepared_images(
+    root: Path,
+    regex: re.Pattern[str],
+    patterns: tuple[str, ...] = DEFAULT_IMAGE_PATTERNS,
+) -> list[PreparedImageRef]:
+    refs: list[PreparedImageRef] = []
+    seen: set[tuple[str, int]] = set()
+
+    for path in iter_image_paths(root, patterns=patterns):
+        ref = parse_prepared_image_path(path, regex)
+        if ref.key in seen:
+            raise PreparedNameError(
+                "Duplicate prepared sample key found "
+                f"for identity={ref.identity} sample={ref.sample_index}: {path}"
+            )
+        seen.add(ref.key)
+        refs.append(ref)
+
+    return refs

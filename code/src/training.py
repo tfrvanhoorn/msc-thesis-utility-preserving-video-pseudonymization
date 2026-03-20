@@ -41,14 +41,15 @@ from components import (
     DiffusionFaceSwapper,
 )
 from data.splits import build_train_test_loaders
+from data.prepared import DEFAULT_PREPARED_REGEX, collect_prepared_images, compile_prepared_regex, PreparedNameError
 from utils.logging import configure_logging
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the KFAAR Projector for Face Pseudonymization")
 
     # Path Arguments
-    parser.add_argument("--data_path", type=Path, default=PROJECT_ROOT / "data" / "celeba", help="Path to the dataset root")
-    parser.add_argument("--dataset_type", type=str, default="celeba", choices=["celeba"], help="Dataset type to use (currently only celeba is supported for training)")
+    parser.add_argument("--input_dir", type=Path, default=PROJECT_ROOT / "data" / "prepared_celeba", help="Path to prepared input images root")
+    parser.add_argument("--prepared_filename_regex", type=str, default=DEFAULT_PREPARED_REGEX, help="Regex used to parse prepared image filenames")
     parser.add_argument("--stylegan_ckpt", type=Path, default=SRC_ROOT / "models" / "stylegan2-celebahq-256x256.pkl", help="Path to StyleGAN2 .pkl checkpoint")
     parser.add_argument("--truncation_psi", type=float, default=0.5, help="Truncation psi for StyleGAN2 mapping")
     parser.add_argument("--output_dir", type=Path, default=SRC_ROOT / "train_results", help="Directory to save checkpoints")
@@ -76,7 +77,6 @@ def parse_args():
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
-    parser.add_argument("--frame_stride", type=int, default=1, help="Frame stride inside a window for video datasets")
     parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
@@ -143,8 +143,16 @@ def main():
     args = parse_args()
     configure_logging()
     device = torch.device(args.device)
-    if args.dataset_type.lower() != "celeba":
-        raise ValueError("training.py currently supports dataset_type=celeba only")
+
+    if not args.input_dir.exists():
+        raise FileNotFoundError(f"Prepared input directory not found: {args.input_dir}")
+    try:
+        prepared_regex = compile_prepared_regex(args.prepared_filename_regex)
+        prepared_refs = collect_prepared_images(args.input_dir, prepared_regex)
+    except PreparedNameError as exc:
+        raise ValueError(f"Invalid prepared input naming: {exc}") from exc
+    if not prepared_refs:
+        raise FileNotFoundError(f"No prepared images found in input_dir: {args.input_dir}")
 
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
@@ -185,17 +193,11 @@ def main():
     data_options: dict[str, object] = {}
     if args.max_samples_per_identity is not None:
         data_options["max_samples_per_identity"] = args.max_samples_per_identity
-    if args.dataset_type in {"voxceleb_video", "video_folder"}:
-        data_options.update(
-            {
-                "max_videos_per_identity": args.max_samples_per_identity,
-                "frame_stride": args.frame_stride,
-            }
-        )
+    data_options["prepared_filename_regex"] = args.prepared_filename_regex
 
     data_cfg = DataConfig(
-        dataset_path=args.data_path,
-        dataset_type=args.dataset_type,
+        dataset_path=args.input_dir,
+        dataset_type="prepared_images",
         options=data_options,
     )
     detector_cfg = DetectorConfig(image_size=256, device=str(device))
