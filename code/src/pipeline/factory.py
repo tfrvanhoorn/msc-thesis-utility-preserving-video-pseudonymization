@@ -7,7 +7,6 @@ from components import (
     MTCNNDetector,
     SemanticAttributeEmbedder,
     ProjectorMLP,
-    ProjectorLSTM,
 )
 from components.alignment import MTCNNAligner
 from config import PipelineConfig
@@ -37,23 +36,14 @@ def build_kfaar_pipeline(
     aligner = MTCNNAligner(output_size=config.detector.image_size)
     embedder = _build_embedder(config, target_device)
 
-    proj_type = config.projector.normalized_type()
-    if proj_type == "lstm":
-        projector = ProjectorLSTM(
-            key_dim=config.projector.key_dim,
-            output_dim=embedder.embedding_size,
-            hidden_dim=config.projector.lstm_hidden_dim,
-            num_layers=config.projector.lstm_num_layers,
-            bidirectional=config.projector.lstm_bidirectional,
-            dropout=config.projector.dropout,
-        ).to(target_device)
-    else:
-        projector = ProjectorMLP(
-            key_dim=config.projector.key_dim,
-            output_dim=embedder.embedding_size,
-            hidden_dims=config.projector.hidden_dims,
-            dropout=config.projector.dropout,
-        ).to(target_device)
+    # Validate configured projector type and instantiate the only supported variant.
+    config.projector.normalized_type()
+    projector = ProjectorMLP(
+        key_dim=config.projector.key_dim,
+        output_dim=embedder.embedding_size,
+        hidden_dims=config.projector.hidden_dims,
+        dropout=config.projector.dropout,
+    ).to(target_device)
 
     if stylegan is not None:
         stylegan = stylegan.to(target_device)

@@ -11,7 +11,7 @@ try:
     import imageio.v2 as imageio  # type: ignore
 except Exception:  # pragma: no cover
     imageio = None
-from components import EmbeddingModel, FaceDetector, ProjectorMLP, ProjectorLSTM
+from components import EmbeddingModel, FaceDetector, ProjectorMLP
 from components.alignment import FaceAligner
 from components.detector import Detection
 from components import StyleGAN2Generator
@@ -55,7 +55,6 @@ class KfaarPipeline:
         self.stylegan = stylegan
         self.face_swapper = face_swapper
         self.device = device or next(projector.parameters()).device
-        self._projector_is_lstm = isinstance(projector, ProjectorLSTM)
         self._warned_face_swapper = False
         
         # Optimizer Setup
@@ -146,13 +145,8 @@ class KfaarPipeline:
 
         # 2. Projection
         key_t = key.to(device)
-        if self._projector_is_lstm:
-            k_in = key_t.view(1, 1, -1).expand(1, seq_len, -1)
-            projected_seq = self.projector.project(real_emb.unsqueeze(0), k_in)[0]
-            projected_z = projected_seq[center_idx : center_idx + 1]
-        else:
-            real_center = real_emb[center_idx : center_idx + 1]
-            projected_z = self.projector.project(real_center, key_t.expand(1, -1))
+        real_center = real_emb[center_idx : center_idx + 1]
+        projected_z = self.projector.project(real_center, key_t.expand(1, -1))
 
         # 3. Virtual Processing
         v_embeddings = torch.zeros_like(projected_z)
@@ -167,12 +161,8 @@ class KfaarPipeline:
         if self.stylegan is not None:
             projected_seq = None
             if return_frame_pairs:
-                if self._projector_is_lstm:
-                    k_in = key_t.view(1, 1, -1).expand(1, seq_len, -1)
-                    projected_seq = self.projector.project(real_emb.unsqueeze(0), k_in)[0]
-                else:
-                    key_seq = key_t.view(1, -1).expand(seq_len, -1)
-                    projected_seq = self.projector.project(real_emb, key_seq)
+                key_seq = key_t.view(1, -1).expand(seq_len, -1)
+                projected_seq = self.projector.project(real_emb, key_seq)
 
                 for frame_idx in range(seq_len):
                     aligned_input = aligned_faces[frame_idx]

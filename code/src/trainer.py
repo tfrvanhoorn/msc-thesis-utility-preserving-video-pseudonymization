@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from pipeline import KfaarPipeline
+from utils.keys import sample_binary_key
 
 
 class KfaarTrainer:
@@ -69,6 +70,7 @@ class KfaarTrainer:
         self.save_generated_max_per_epoch = save_generated_max_per_epoch
         self.use_face_swapper = use_face_swapper
         self.swap_for_visuals_only = swap_for_visuals_only
+        self._key_dtype = next(self.pipeline.projector.parameters()).dtype
 
         default_ckpt_dir = Path(__file__).resolve().parent / "checkpoints"
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else default_ckpt_dir
@@ -133,8 +135,8 @@ class KfaarTrainer:
                 for sub_idx, (sub_frames, sub_labels, sub_seq_lens) in enumerate(
                     self._iter_effective_batches(frames, labels, seq_lens)
                 ):
-                    key_1 = torch.randn(self.key_dim, device=self.device)
-                    key_2 = torch.randn(self.key_dim, device=self.device)
+                    key_1 = sample_binary_key(self.key_dim, device=self.device, dtype=self._key_dtype)
+                    key_2 = sample_binary_key(self.key_dim, device=self.device, dtype=self._key_dtype)
 
                     batch_number = int(batch_idx + 1)
 
@@ -265,8 +267,8 @@ class KfaarTrainer:
             for batch in self.val_loader:
                 frames, labels, seq_lens = self._extract_batch(batch)
                 for sub_frames, sub_labels, sub_seq_lens in self._iter_effective_batches(frames, labels, seq_lens):
-                    key_1 = torch.randn(self.key_dim, device=self.device)
-                    key_2 = torch.randn(self.key_dim, device=self.device)
+                    key_1 = sample_binary_key(self.key_dim, device=self.device, dtype=self._key_dtype)
+                    key_2 = sample_binary_key(self.key_dim, device=self.device, dtype=self._key_dtype)
                     comps = self.pipeline.hpvg_loss_components(
                         sub_frames,
                         sub_labels,

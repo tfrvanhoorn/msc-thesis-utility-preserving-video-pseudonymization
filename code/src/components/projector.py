@@ -107,5 +107,10 @@ def load_projector_state_dict(model: nn.Module, state_dict: dict[str, torch.Tens
 
     if isinstance(model, ProjectorMLP):
         state_dict = _remap_legacy_mlp_keys(state_dict)
-
-    model.load_state_dict(state_dict, strict=strict)
+    try:
+        model.load_state_dict(state_dict, strict=strict)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Failed to load projector checkpoint into ProjectorMLP. "
+            "Legacy LSTM projector checkpoints are no longer supported."
+        ) from exc

@@ -58,20 +58,13 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for the projector")
-
-    parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "lstm"], help="Projector architecture")
-    parser.add_argument("--lstm_hidden_dim", type=int, default=512, help="Hidden size for LSTM projector")
-    parser.add_argument("--lstm_num_layers", type=int, default=1, help="Number of layers for LSTM projector")
-    parser.add_argument("--lstm_bidirectional", action="store_true", default=True, help="Use bidirectional LSTM")
-    parser.add_argument("--no_lstm_bidirectional", dest="lstm_bidirectional", action="store_false", help="Disable bidirectional LSTM")
-    parser.add_argument("--lstm_dropout", type=float, default=0.0, help="Dropout for LSTM projector (applied when num_layers>1)")
     
     # Loss Weights (The KFAAR Lambda parameters)
     parser.add_argument("--lambda_ano", type=float, default=0.4, help="Weight for Anonymity loss")
     parser.add_argument("--lambda_syn", type=float, default=1.0, help="Weight for Synchronism loss")
     parser.add_argument("--lambda_div", type=float, default=1.0, help="Weight for Diversity loss")
     parser.add_argument("--lambda_dif", type=float, default=1.0, help="Weight for Differentiation loss")
-    parser.add_argument("--lambda_temp", type=float, default=0.0, help="Weight for temporal smoothness loss (LSTM + seq>1 only)")
+    parser.add_argument("--lambda_temp", type=float, default=0.0, help="Weight for temporal smoothness loss")
     parser.add_argument("--margin", type=float, default=0.5, help="Margin for triplet/cosine losses")
 
     # Dataset & Split
@@ -203,13 +196,9 @@ def main():
     detector_cfg = DetectorConfig(image_size=256, device=str(device))
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(device))
     projector_cfg = ProjectorConfig(
-        type=args.projector_type,
         key_dim=args.key_dim,
         hidden_dims=(1024, 512),
-        dropout=args.lstm_dropout if args.projector_type == "lstm" else 0.0,
-        lstm_hidden_dim=args.lstm_hidden_dim,
-        lstm_num_layers=args.lstm_num_layers,
-        lstm_bidirectional=args.lstm_bidirectional,
+        dropout=0.0,
     )
     
     cfg = PipelineConfig(

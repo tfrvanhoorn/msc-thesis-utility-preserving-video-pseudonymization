@@ -44,6 +44,7 @@ from components import (  # noqa: E402
 )
 from data.prepared import compile_prepared_regex, parse_prepared_video_path  # noqa: E402
 from data.video_io import get_video_fps, load_video_frames, write_mp4  # noqa: E402
+from utils.keys import sample_binary_key_bank  # noqa: E402
 from utils.logging import configure_logging  # noqa: E402
 
 
@@ -337,12 +338,6 @@ def parse_args() -> argparse.Namespace:
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--num_keys", type=int, default=2, help="Number of pseudonymization keys to render per source video")
-    parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "lstm"], help="Projector architecture")
-    parser.add_argument("--lstm_hidden_dim", type=int, default=512, help="Hidden size for LSTM projector")
-    parser.add_argument("--lstm_num_layers", type=int, default=1, help="Number of layers for LSTM projector")
-    parser.add_argument("--lstm_bidirectional", action="store_true", default=True, help="Use bidirectional LSTM")
-    parser.add_argument("--no_lstm_bidirectional", dest="lstm_bidirectional", action="store_false", help="Disable bidirectional LSTM")
-    parser.add_argument("--lstm_dropout", type=float, default=0.0, help="Dropout for LSTM projector (applied when num_layers>1)")
 
     # Dataset and sampling options
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities")
@@ -439,13 +434,9 @@ def main() -> None:
     detector_cfg = DetectorConfig(image_size=256, device=str(device))
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(device))
     projector_cfg = ProjectorConfig(
-        type=args.projector_type,
         key_dim=args.key_dim,
         hidden_dims=(1024, 512),
-        dropout=args.lstm_dropout if args.projector_type == "lstm" else 0.0,
-        lstm_hidden_dim=args.lstm_hidden_dim,
-        lstm_num_layers=args.lstm_num_layers,
-        lstm_bidirectional=args.lstm_bidirectional,
+        dropout=0.0,
     )
 
     cfg = PipelineConfig(
@@ -481,7 +472,14 @@ def main() -> None:
 
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
-    key_bank = [torch.randn(args.key_dim, generator=rng, device=device) for _ in range(args.num_keys)]
+    projector_dtype = next(pipeline.projector.parameters()).dtype
+    key_bank = sample_binary_key_bank(
+        args.num_keys,
+        args.key_dim,
+        device=device,
+        generator=rng,
+        dtype=projector_dtype,
+    )
 
     processed_videos = 0
     skipped_videos = 0

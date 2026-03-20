@@ -181,6 +181,8 @@ python .\code\src\training.py \
 1. Training requires prepared image filenames from `dataset_utils.py`.
 2. Identity tokens in prepared filenames cannot contain underscores.
 3. Use `--resume_ckpt` to continue from a saved checkpoint.
+4. Projector architecture is MLP-only.
+5. Pseudonymization keys are sampled as binary 0/1 vectors of length `key_dim`.
 
 ## Why The Prepared Naming Contract Exists
 
@@ -218,6 +220,7 @@ Entry point:
 
 1. If `--num_keys 1`: outputs are written directly into `output_dir` with the same prepared filename.
 2. If `--num_keys >= 2`: outputs are written into nested key folders `key1`, `key2`, ... with the same prepared filename in each key folder.
+3. Each key vector is sampled as a binary 0/1 vector of length `key_dim`.
 
 ### Single-Key Example
 

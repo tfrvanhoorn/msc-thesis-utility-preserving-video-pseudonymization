@@ -49,12 +49,15 @@ class ProjectorConfig:
     key_dim: int = 128
     hidden_dims: Tuple[int, ...] = (1024, 512)
     dropout: float = 0.0
-    lstm_hidden_dim: int = 512
-    lstm_num_layers: int = 1
-    lstm_bidirectional: bool = True
 
     def normalized_type(self) -> str:
-        return (self.type or "mlp").lower()
+        proj_type = (self.type or "mlp").lower()
+        if proj_type != "mlp":
+            raise ValueError(
+                f"Unsupported projector type '{proj_type}'. Only 'mlp' is supported. "
+                "Legacy LSTM projector checkpoints are no longer supported."
+            )
+        return proj_type
 
 
 @dataclass
@@ -96,9 +99,6 @@ class PipelineConfig:
             key_dim=int(projector_cfg.get("key_dim", 128)),
             hidden_dims=tuple(projector_cfg.get("hidden_dims", (1024, 512))),
             dropout=float(projector_cfg.get("dropout", 0.0)),
-            lstm_hidden_dim=int(projector_cfg.get("lstm_hidden_dim", 512)),
-            lstm_num_layers=int(projector_cfg.get("lstm_num_layers", 1)),
-            lstm_bidirectional=bool(projector_cfg.get("lstm_bidirectional", True)),
         )
 
         return cls(
