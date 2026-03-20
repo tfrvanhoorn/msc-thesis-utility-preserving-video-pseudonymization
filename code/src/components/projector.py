@@ -66,9 +66,6 @@ class ProjectorMLP(nn.Module):
         # --- RESIDUAL CONNECTION ---
         out = z + delta
 
-        # Scaled Tanh constraint
-        out = 3.0 * torch.tanh(out / 3.0)
-
         return out
 
     def project(self, z: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
