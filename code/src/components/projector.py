@@ -16,9 +16,11 @@ class ProjectorMLP(nn.Module):
         output_dim: int = 512,
         hidden_dims: tuple[int, ...] = (1024, 512),
         dropout: float = 0.0,
+        output_l2_normalize: bool = True,
     ) -> None:
         super().__init__()
         input_dim = output_dim + key_dim
+        self.output_l2_normalize = output_l2_normalize
         
         layers: list[nn.Module] = []
         in_dim = input_dim
@@ -56,8 +58,9 @@ class ProjectorMLP(nn.Module):
         # Predict a new embedding directly from z and key.
         out = self.output_layer(x)
 
-        # L2 normalization keeps the embedding norm bounded and stable.
-        out = F.normalize(out, p=2, dim=-1)
+        # Optional output normalization allows explicit control from training args.
+        if self.output_l2_normalize:
+            out = F.normalize(out, p=2, dim=-1)
 
         return out
 

@@ -328,6 +328,7 @@ class KfaarPipeline:
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
+        lambda_w_reg: float = 20.0,
         return_components: bool = False,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -343,6 +344,7 @@ class KfaarPipeline:
             batch_index=batch_index,
             use_face_swapper=use_face_swapper,
             swap_for_visuals_only=swap_for_visuals_only,
+            lambda_w_reg=lambda_w_reg,
             **kwargs,
         )
         
@@ -355,10 +357,11 @@ class KfaarPipeline:
                     "syn": zero,
                     "div": zero,
                     "dif": zero,
+                    "w_reg": zero,
                 }
             return zero
 
-        ano, syn, div, dif, total = comps
+        ano, syn, div, dif, w_reg, total = comps
         
         # Only backprop if total is linked to a grad_fn
         if total.requires_grad:
@@ -370,6 +373,7 @@ class KfaarPipeline:
                     "syn": syn.detach(),
                     "div": div.detach(),
                     "dif": dif.detach(),
+                    "w_reg": w_reg.detach(),
                 }
             return total
         
@@ -380,17 +384,20 @@ class KfaarPipeline:
                 "syn": syn.detach(),
                 "div": div.detach(),
                 "dif": dif.detach(),
+                "w_reg": w_reg.detach(),
             }
         return zero
 
     def hpvg_loss_components(
         self, frames, labels, seq_lens, key_1, key_2,
         margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0,
+        lambda_w_reg: float = 20.0,
         batch_index: Optional[int] = None,
         use_face_swapper: bool = False,
         swap_for_visuals_only: bool = True,
     ) -> Optional[
         tuple[
+            torch.Tensor,
             torch.Tensor,
             torch.Tensor,
             torch.Tensor,
@@ -405,6 +412,7 @@ class KfaarPipeline:
 
         sample_records: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]] = []
         proj_norm_terms = []
+        w_reg_terms: list[torch.Tensor] = []
         nondet_faces = 0
         det_failures = 0
 
@@ -431,6 +439,22 @@ class KfaarPipeline:
 
             proj_norm_terms.append(res1.projected_z.pow(2).mean())
             proj_norm_terms.append(res2.projected_z.pow(2).mean())
+
+            if lambda_w_reg > 0.0 and self.stylegan is not None and hasattr(self.stylegan, "mapping") and hasattr(self.stylegan.mapping, "w_avg"):
+                w_avg = self.stylegan.mapping.w_avg.to(device=device, dtype=res1.w_pre_boundary.dtype) if res1.w_pre_boundary is not None else self.stylegan.mapping.w_avg.to(device=device)
+
+                if res1.w_pre_boundary is not None:
+                    w_avg_res1 = w_avg
+                    while w_avg_res1.dim() < res1.w_pre_boundary.dim():
+                        w_avg_res1 = w_avg_res1.unsqueeze(0)
+                    w_reg_terms.append((res1.w_pre_boundary - w_avg_res1).pow(2).mean())
+
+                if res2.w_pre_boundary is not None:
+                    w_avg_res2 = w_avg
+                    while w_avg_res2.dim() < res2.w_pre_boundary.dim():
+                        w_avg_res2 = w_avg_res2.unsqueeze(0)
+                    w_reg_terms.append((res2.w_pre_boundary - w_avg_res2).pow(2).mean())
+
             nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
             
             mask = res1.valid_mask & res2.valid_mask
@@ -451,14 +475,15 @@ class KfaarPipeline:
                 )
 
         proj_norm = torch.stack(proj_norm_terms).mean() if proj_norm_terms else torch.tensor(0.0, device=device)
+        w_reg = torch.stack(w_reg_terms).mean() if w_reg_terms else torch.tensor(0.0, device=device)
 
         # --- VALIDATION GATE ---
         if not sample_records:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet
-            return ano, syn, div, dif, total
+            total = penalty_missing_pairs + penalty_nondet + (lambda_w_reg * w_reg)
+            return ano, syn, div, dif, w_reg, total
 
         grouped: dict[int, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = {}
         for label_int, real_e, v1_e, v2_e in sample_records:
@@ -469,8 +494,8 @@ class KfaarPipeline:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet
-            return ano, syn, div, dif, total
+            total = penalty_missing_pairs + penalty_nondet + (lambda_w_reg * w_reg)
+            return ano, syn, div, dif, w_reg, total
 
         label_a = labels_with_two[0]
         label_b = next((label for label in grouped if label != label_a and len(grouped[label]) >= 1), None)
@@ -478,8 +503,8 @@ class KfaarPipeline:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
             penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet
-            return ano, syn, div, dif, total
+            total = penalty_missing_pairs + penalty_nondet + (lambda_w_reg * w_reg)
+            return ano, syn, div, dif, w_reg, total
 
         a1_real, a1_v1, a1_v2 = grouped[label_a][0]
         _a2_real, a2_v1, _a2_v2 = grouped[label_a][1]
@@ -499,9 +524,9 @@ class KfaarPipeline:
         penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
 
         total = (lambda_ano * ano + lambda_syn * syn + 
-            lambda_div * div + lambda_dif * dif + penalty_nondet + penalty_missing_pairs)
+            lambda_div * div + lambda_dif * dif + (lambda_w_reg * w_reg) + penalty_nondet + penalty_missing_pairs)
 
-        return ano, syn, div, dif, total
+        return ano, syn, div, dif, w_reg, total
 
     @staticmethod
     def _to_sequence_tensor(frames, device):

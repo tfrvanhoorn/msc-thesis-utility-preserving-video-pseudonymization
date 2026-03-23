@@ -33,6 +33,7 @@ class KfaarTrainer:
         lambda_div: float = 1.0,
         lambda_dif: float = 1.0,
         lambda_temp: float = 0.0,
+        lambda_w_reg: float = 20.0,
         checkpoint_dir: str | Path | None = None,
         device: str | torch.device = "cuda",
         train_identities: Sequence[Any] | None = None,
@@ -57,6 +58,7 @@ class KfaarTrainer:
         self.lambda_div = lambda_div
         self.lambda_dif = lambda_dif
         self.lambda_temp = lambda_temp
+        self.lambda_w_reg = lambda_w_reg
         self.start_epoch = start_epoch
         self._memory_log_interval = 100
         self._proc = psutil.Process()
@@ -121,6 +123,7 @@ class KfaarTrainer:
             epoch_syn = 0.0
             epoch_div = 0.0
             epoch_dif = 0.0
+            epoch_w_reg = 0.0
             step_count = 0
             self._reset_interval_stats()
 
@@ -155,6 +158,7 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
+                        lambda_w_reg=self.lambda_w_reg,
                         return_components=True,
                     )
 
@@ -164,6 +168,7 @@ class KfaarTrainer:
                     epoch_syn += float(loss_components["syn"].item())
                     epoch_div += float(loss_components["div"].item())
                     epoch_dif += float(loss_components["dif"].item())
+                    epoch_w_reg += float(loss_components["w_reg"].item())
                     step_count += 1
                     progress.set_postfix({"loss": f"{loss_value:.4f}"})
 
@@ -178,14 +183,16 @@ class KfaarTrainer:
             avg_syn = epoch_syn / max(1, step_count)
             avg_div = epoch_div / max(1, step_count)
             avg_dif = epoch_dif / max(1, step_count)
+            avg_w_reg = epoch_w_reg / max(1, step_count)
             logging.info(
-                "Epoch %s complete | avg total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f",
+                "Epoch %s complete | avg total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f w_reg=%.6f",
                 epoch + 1,
                 avg_loss,
                 avg_ano,
                 avg_syn,
                 avg_div,
                 avg_dif,
+                avg_w_reg,
             )
             self._log_memory(f"train epoch {epoch + 1} end")
             sys.stdout.flush()
@@ -230,6 +237,7 @@ class KfaarTrainer:
                 "lambda_syn": self.lambda_syn,
                 "lambda_div": self.lambda_div,
                 "lambda_dif": self.lambda_dif,
+                "lambda_w_reg": self.lambda_w_reg,
                 "device": str(self.device),
                 "train_identities": self.train_identities,
                 "val_identities": self.val_identities,
@@ -261,6 +269,7 @@ class KfaarTrainer:
         total_syn = 0.0
         total_div = 0.0
         total_dif = 0.0
+        total_w_reg = 0.0
         steps = 0
 
         with torch.no_grad():
@@ -281,6 +290,7 @@ class KfaarTrainer:
                         lambda_div=self.lambda_div,
                         lambda_dif=self.lambda_dif,
                         lambda_temp=self.lambda_temp,
+                        lambda_w_reg=self.lambda_w_reg,
                         use_face_swapper=self.use_face_swapper,
                         swap_for_visuals_only=self.swap_for_visuals_only,
                     )
@@ -288,11 +298,12 @@ class KfaarTrainer:
                     if comps is None:
                         continue
 
-                    ano, syn, div, dif, loss = comps
+                    ano, syn, div, dif, w_reg, loss = comps
                     total_ano += float(ano.item())
                     total_syn += float(syn.item())
                     total_div += float(div.item())
                     total_dif += float(dif.item())
+                    total_w_reg += float(w_reg.item())
                     total_loss += float(loss.item())
                     steps += 1
 
@@ -303,14 +314,16 @@ class KfaarTrainer:
         avg_syn = total_syn / denom
         avg_div = total_div / denom
         avg_dif = total_dif / denom
+        avg_w_reg = total_w_reg / denom
         logging.info(
-            "Validation epoch=%s | total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f",
+            "Validation epoch=%s | total=%.6f ano=%.6f syn=%.6f div=%.6f dif=%.6f w_reg=%.6f",
             epoch if epoch is not None else "?",
             avg_total,
             avg_ano,
             avg_syn,
             avg_div,
             avg_dif,
+            avg_w_reg,
         )
 
         self.eval_history.append(
@@ -321,6 +334,7 @@ class KfaarTrainer:
                 "syn": avg_syn,
                 "div": avg_div,
                 "dif": avg_dif,
+                "w_reg": avg_w_reg,
             }
         )
 
@@ -333,6 +347,7 @@ class KfaarTrainer:
             "syn": avg_syn,
             "div": avg_div,
             "dif": avg_dif,
+            "w_reg": avg_w_reg,
         }
 
     def _extract_batch(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -43,6 +43,7 @@ def build_kfaar_pipeline(
         output_dim=embedder.embedding_size,
         hidden_dims=config.projector.hidden_dims,
         dropout=config.projector.dropout,
+        output_l2_normalize=config.projector.output_l2_normalize,
     ).to(target_device)
 
     if stylegan is not None:
