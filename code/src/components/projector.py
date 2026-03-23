@@ -8,7 +8,7 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
-    """Projects face embedding z + key k to an L2-normalized z'."""
+    """Projects face embedding z + key k to a new L2-normalized z'."""
 
     def __init__(
         self,
@@ -31,7 +31,7 @@ class ProjectorMLP(nn.Module):
         
         self.hidden_net = nn.Sequential(*layers)
         
-        # The output section representing the DELTA (shift)
+        # Output layer for direct embedding prediction.
         self.output_layer = nn.Linear(in_dim, output_dim)
         
         self.apply(self._init_weights)
@@ -40,13 +40,6 @@ class ProjectorMLP(nn.Module):
         """Initializes weights for networks."""
         if isinstance(m, nn.Linear):
             init.kaiming_normal_(m.weight, nonlinearity='relu')
-            if m.bias is not None:
-                init.constant_(m.bias, 0)
-                
-        # --- ZERO INITIALIZATION ---
-        # Forces the final layer to output exactly 0.0 at the start of training.
-        if m is self.output_layer:
-            init.constant_(m.weight, 0)
             if m.bias is not None:
                 init.constant_(m.bias, 0)
 
@@ -60,11 +53,8 @@ class ProjectorMLP(nn.Module):
         concat = torch.cat([z, key], dim=-1)
         x = self.hidden_net(concat)
         
-        # Calculate the shift (delta)
-        delta = self.output_layer(x)
-        
-        # --- RESIDUAL CONNECTION ---
-        out = z + delta
+        # Predict a new embedding directly from z and key.
+        out = self.output_layer(x)
 
         # L2 normalization keeps the embedding norm bounded and stable.
         out = F.normalize(out, p=2, dim=-1)
