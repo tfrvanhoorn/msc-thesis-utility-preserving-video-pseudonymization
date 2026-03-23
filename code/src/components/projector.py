@@ -8,7 +8,7 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
-    """Projects face embedding z + key k to a z' limited to (-3, 3)."""
+    """Projects face embedding z + key k to an L2-normalized z'."""
 
     def __init__(
         self,
@@ -65,6 +65,9 @@ class ProjectorMLP(nn.Module):
         
         # --- RESIDUAL CONNECTION ---
         out = z + delta
+
+        # L2 normalization keeps the embedding norm bounded and stable.
+        out = F.normalize(out, p=2, dim=-1)
 
         return out
 
