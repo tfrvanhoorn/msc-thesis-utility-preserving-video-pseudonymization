@@ -8,7 +8,7 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
-    """Projects face embedding z + key k to a new L2-normalized z'."""
+    """Projects ArcFace embedding z + key k to StyleGAN latent space."""
 
     def __init__(
         self,
@@ -16,11 +16,14 @@ class ProjectorMLP(nn.Module):
         output_dim: int = 512,
         hidden_dims: tuple[int, ...] = (1024, 512),
         dropout: float = 0.0,
-        output_l2_normalize: bool = True,
     ) -> None:
         super().__init__()
-        input_dim = output_dim + key_dim
-        self.output_l2_normalize = output_l2_normalize
+        
+        # Upscale the key to 512 dimensions to match the face feature bandwidth
+        self.key_upscaler = nn.Linear(key_dim, 512)
+        
+        # The input to the hidden network is now 512 (face) + 512 (upscaled key)
+        input_dim = 512 + 512
         
         layers: list[nn.Module] = []
         in_dim = input_dim
@@ -33,13 +36,13 @@ class ProjectorMLP(nn.Module):
         
         self.hidden_net = nn.Sequential(*layers)
         
-        # Output layer for direct embedding prediction.
+        # Output layer translates the combined features directly into the target space
         self.output_layer = nn.Linear(in_dim, output_dim)
         
         self.apply(self._init_weights)
 
     def _init_weights(self, m: nn.Module) -> None:
-        """Initializes weights for networks."""
+        """Initializes weights using Kaiming Normal for ReLU networks."""
         if isinstance(m, nn.Linear):
             init.kaiming_normal_(m.weight, nonlinearity='relu')
             if m.bias is not None:
@@ -49,19 +52,22 @@ class ProjectorMLP(nn.Module):
         if key.dim() == 1: key = key.unsqueeze(0)
         if z.dim() == 1: z = z.unsqueeze(0)
         
-        # L2 Normalization for the key to prevent Magnitude Mismatch
+        # L2 Normalize both inputs to ensure equal magnitude (energy)
         key = F.normalize(key, p=2, dim=-1)
         z = F.normalize(z, p=2, dim=-1)
         
-        concat = torch.cat([z, key], dim=-1)
+        # Upscale and unpack the key to match the face's 512-dimensional bandwidth
+        upscaled_key = self.key_upscaler(key)
+        upscaled_key = F.relu(upscaled_key) 
+        
+        # Concatenate the balanced vectors
+        concat = torch.cat([z, upscaled_key], dim=-1)
+        
+        # Pass through the hidden layers
         x = self.hidden_net(concat)
         
-        # Predict a new embedding directly from z and key.
+        # Project to the final output dimension (StyleGAN space)
         out = self.output_layer(x)
-
-        # Optional output normalization allows explicit control from training args.
-        if self.output_l2_normalize:
-            out = F.normalize(out, p=2, dim=-1)
 
         return out
 
@@ -71,6 +77,7 @@ class ProjectorMLP(nn.Module):
 
 def load_projector_state_dict(model: nn.Module, state_dict: dict[str, torch.Tensor], *, strict: bool = True) -> None:
     """Load projector weights, remapping legacy MLP checkpoint keys when needed."""
+
     def _remap_legacy_mlp_keys(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         mapped: dict[str, torch.Tensor] = {}
         legacy_found = False
@@ -98,7 +105,6 @@ def load_projector_state_dict(model: nn.Module, state_dict: dict[str, torch.Tens
 
     if isinstance(model, ProjectorMLP):
         state_dict = _remap_legacy_mlp_keys(state_dict)
-        
     try:
         model.load_state_dict(state_dict, strict=strict)
     except RuntimeError as exc:
