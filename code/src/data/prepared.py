@@ -180,10 +180,8 @@ def map_prepared_videos_by_key(
 def iter_image_paths(root: Path, patterns: tuple[str, ...] = DEFAULT_IMAGE_PATTERNS) -> Iterator[Path]:
     normalized_patterns = tuple(pattern.lower() for pattern in patterns)
 
-    # Walk the tree in a deterministic order so max-identity truncation remains stable.
+    # Assume input filenames are already grouped/sorted by identity; avoid extra sorting work.
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
-        filenames.sort()
         base_path = Path(dirpath)
         for filename in filenames:
             name_lower = filename.lower()
@@ -205,6 +203,7 @@ def collect_prepared_images(
     seen: set[tuple[str, int]] = set()
     selected_identities: set[str] = set()
     accepted_identities: set[str] = set()
+    current_identity: str | None = None
 
     if max_identities is not None and max_identities <= 0:
         raise ValueError("max_identities must be > 0 when provided")
@@ -253,13 +252,16 @@ def collect_prepared_images(
             if wanted is not None and ref.identity not in wanted:
                 continue
 
-            if wanted is None and max_identities is not None and ref.identity not in selected_identities:
-                if len(selected_identities) >= max_identities:
-                    if stop_after_max_identities:
-                        early_stop_triggered = True
-                        break
-                    continue
-                selected_identities.add(ref.identity)
+            if wanted is None and max_identities is not None:
+                # With grouped identities, a new identity after reaching cap means we can stop early.
+                if ref.identity != current_identity and ref.identity not in selected_identities:
+                    if len(selected_identities) >= max_identities:
+                        if stop_after_max_identities:
+                            early_stop_triggered = True
+                            break
+                        continue
+                    selected_identities.add(ref.identity)
+                current_identity = ref.identity
 
             if ref.key in seen:
                 raise PreparedNameError(

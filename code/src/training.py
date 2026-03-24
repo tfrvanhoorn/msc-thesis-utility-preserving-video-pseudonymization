@@ -74,6 +74,9 @@ def parse_args():
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
     parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
+    parser.add_argument("--shuffle_batches", dest="shuffle_batches", action="store_true", help="Shuffle training batches each epoch")
+    parser.add_argument("--no_shuffle_batches", dest="shuffle_batches", action="store_false", help="Disable training batch shuffling; keep identical batch composition/order across epochs")
+    parser.set_defaults(shuffle_batches=True)
     parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
 
     # Resuming
@@ -239,6 +242,7 @@ def main():
 
     # 2. Build Data Loaders
     logging.info("Building data loaders...")
+    batch_seed = None if args.shuffle_batches else args.seed
     split, train_loader, val_loader = build_train_test_loaders(
         cfg.data,
         train_fraction=args.train_fraction,
@@ -247,7 +251,8 @@ def main():
         max_samples_per_identity=args.max_samples_per_identity,
         batch_size=3,
         identity_batching=True,
-        shuffle_train=True,
+        shuffle_train=args.shuffle_batches,
+        batch_seed=batch_seed,
         shuffle_test=False,
     )
 

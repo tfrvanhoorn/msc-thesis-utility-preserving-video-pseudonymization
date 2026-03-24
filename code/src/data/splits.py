@@ -123,6 +123,7 @@ def build_dataloader_for_identities(
     *,
     batch_size: int,
     shuffle: bool = True,
+    batch_seed: int | None = None,
     num_workers: int = 0,
     collate_fn=None,
     identity_batching: bool = False,
@@ -154,6 +155,7 @@ def build_dataloader_for_identities(
             sample_index,
             identity_to_index,
             shuffle_identities=shuffle,
+            seed=batch_seed,
         )
         return DataLoader(batched_dataset, batch_size=None, shuffle=False, num_workers=num_workers)
 
@@ -178,6 +180,7 @@ def build_train_test_loaders(
     group_by_video: bool = False,
     shuffle_train: bool = True,
     shuffle_test: bool = False,
+    batch_seed: int | None = None,
     num_workers: int = 0,
     collate_fn=None,
 ) -> Tuple[IdentitySplit, DataLoader, DataLoader]:
@@ -189,6 +192,7 @@ def build_train_test_loaders(
         identity_batching=identity_batching,
         group_by_video=group_by_video,
         shuffle=shuffle_train,
+        batch_seed=batch_seed,
         num_workers=num_workers,
         collate_fn=collate_fn,
         max_samples_per_identity=max_samples_per_identity,
