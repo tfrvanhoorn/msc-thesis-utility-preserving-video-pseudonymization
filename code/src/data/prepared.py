@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import fnmatch
+import logging
+import os
+import sys
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
+
+from tqdm import tqdm
 
 DEFAULT_VIDEO_PATTERNS: tuple[str, ...] = ("*.mp4", "*.mkv", "*.avi", "*.mov")
 DEFAULT_IMAGE_PATTERNS: tuple[str, ...] = ("*.jpg", "*.jpeg", "*.png")
@@ -171,11 +177,19 @@ def map_prepared_videos_by_key(
     return mapping
 
 
-def iter_image_paths(root: Path, patterns: tuple[str, ...] = DEFAULT_IMAGE_PATTERNS) -> list[Path]:
-    images: list[Path] = []
-    for pattern in patterns:
-        images.extend([p for p in root.rglob(pattern) if p.is_file()])
-    return sorted(set(images))
+def iter_image_paths(root: Path, patterns: tuple[str, ...] = DEFAULT_IMAGE_PATTERNS) -> Iterator[Path]:
+    normalized_patterns = tuple(pattern.lower() for pattern in patterns)
+
+    # Walk the tree in a deterministic order so max-identity truncation remains stable.
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        filenames.sort()
+        base_path = Path(dirpath)
+        for filename in filenames:
+            name_lower = filename.lower()
+            if not any(fnmatch.fnmatch(name_lower, pattern) for pattern in normalized_patterns):
+                continue
+            yield base_path / filename
 
 
 def collect_prepared_images(
@@ -190,31 +204,87 @@ def collect_prepared_images(
     refs: list[PreparedImageRef] = []
     seen: set[tuple[str, int]] = set()
     selected_identities: set[str] = set()
+    accepted_identities: set[str] = set()
 
     if max_identities is not None and max_identities <= 0:
         raise ValueError("max_identities must be > 0 when provided")
 
     wanted = set(identities) if identities is not None else None
+    identity_total = len(wanted) if wanted is not None else max_identities
 
-    for path in iter_image_paths(root, patterns=patterns):
-        ref = parse_prepared_image_path(path, regex)
+    logging.info(
+        "Prepared image scan start | root=%s | max_identities=%s | explicit_identities=%s | stop_after_cap=%s",
+        root,
+        max_identities,
+        len(wanted) if wanted is not None else 0,
+        stop_after_max_identities,
+    )
 
-        if wanted is not None and ref.identity not in wanted:
-            continue
+    files_scanned = 0
+    early_stop_triggered = False
 
-        if wanted is None and max_identities is not None and ref.identity not in selected_identities:
-            if len(selected_identities) >= max_identities:
-                if stop_after_max_identities:
-                    break
-                continue
-            selected_identities.add(ref.identity)
+    identity_bar = tqdm(
+        total=identity_total,
+        desc="Loading identities",
+        unit="identity",
+        dynamic_ncols=True,
+        file=sys.stdout,
+    )
+    sample_bar = tqdm(
+        desc="Loading samples",
+        unit="sample",
+        dynamic_ncols=True,
+        file=sys.stdout,
+    )
 
-        if ref.key in seen:
-            raise PreparedNameError(
-                "Duplicate prepared sample key found "
-                f"for identity={ref.identity} sample={ref.sample_index}: {path}"
+    try:
+        for path in iter_image_paths(root, patterns=patterns):
+            files_scanned += 1
+            sample_bar.set_postfix(
+                {
+                    "files": files_scanned,
+                    "ids": len(accepted_identities),
+                },
+                refresh=False,
             )
-        seen.add(ref.key)
-        refs.append(ref)
+
+            ref = parse_prepared_image_path(path, regex)
+
+            if wanted is not None and ref.identity not in wanted:
+                continue
+
+            if wanted is None and max_identities is not None and ref.identity not in selected_identities:
+                if len(selected_identities) >= max_identities:
+                    if stop_after_max_identities:
+                        early_stop_triggered = True
+                        break
+                    continue
+                selected_identities.add(ref.identity)
+
+            if ref.key in seen:
+                raise PreparedNameError(
+                    "Duplicate prepared sample key found "
+                    f"for identity={ref.identity} sample={ref.sample_index}: {path}"
+                )
+            seen.add(ref.key)
+            refs.append(ref)
+            sample_bar.update(1)
+
+            if ref.identity not in accepted_identities:
+                accepted_identities.add(ref.identity)
+                identity_bar.update(1)
+
+    finally:
+        identity_bar.close()
+        sample_bar.close()
+
+    logging.info(
+        "Prepared image scan complete | root=%s | files_scanned=%d | accepted_samples=%d | accepted_identities=%d | early_stop=%s",
+        root,
+        files_scanned,
+        len(refs),
+        len(accepted_identities),
+        early_stop_triggered,
+    )
 
     return refs

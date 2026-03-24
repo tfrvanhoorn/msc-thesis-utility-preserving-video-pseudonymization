@@ -1,4 +1,5 @@
 import argparse
+from collections import Counter
 import logging
 import sys
 import warnings
@@ -142,6 +143,12 @@ def main():
     if not args.input_dir.exists():
         raise FileNotFoundError(f"Prepared input directory not found: {args.input_dir}")
     try:
+        logging.info(
+            "Scanning prepared inputs | input_dir=%s | max_identities=%s | filename_regex=%s",
+            args.input_dir,
+            args.max_identities,
+            args.prepared_filename_regex,
+        )
         prepared_regex = compile_prepared_regex(args.prepared_filename_regex)
         prepared_refs = collect_prepared_images(
             args.input_dir,
@@ -155,10 +162,15 @@ def main():
         raise FileNotFoundError(f"No prepared images found in input_dir: {args.input_dir}")
 
     discovered_identities = sorted({ref.identity for ref in prepared_refs})
+    per_identity_counts = Counter(ref.identity for ref in prepared_refs)
+    min_samples = min(per_identity_counts.values())
+    max_samples = max(per_identity_counts.values())
     logging.info(
-        "Prepared scan complete: files=%d identities=%d",
+        "Prepared scan complete | files=%d | identities=%d | min_samples_per_identity=%d | max_samples_per_identity=%d",
         len(prepared_refs),
         len(discovered_identities),
+        min_samples,
+        max_samples,
     )
 
     face_swapper = None

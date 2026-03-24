@@ -94,9 +94,6 @@ def split_identities(
     rng = random.Random(seed)
     rng.shuffle(identities)
 
-    if max_identities is not None:
-        identities = identities[:max_identities]
-
     cutoff = int(len(identities) * train_fraction)
     cutoff = max(1, min(cutoff, len(identities) - 1)) if len(identities) > 1 else len(identities)
 
