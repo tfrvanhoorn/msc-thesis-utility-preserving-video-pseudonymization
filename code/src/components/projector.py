@@ -51,6 +51,7 @@ class ProjectorMLP(nn.Module):
         
         # L2 Normalization for the key to prevent Magnitude Mismatch
         key = F.normalize(key, p=2, dim=-1)
+        z = F.normalize(z, p=2, dim=-1)
         
         concat = torch.cat([z, key], dim=-1)
         x = self.hidden_net(concat)
