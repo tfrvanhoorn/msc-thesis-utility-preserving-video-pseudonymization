@@ -47,6 +47,7 @@ class KfaarPipeline:
         save_max_per_epoch: Optional[int] = None,
         truncation_psi: float = 0.5,
         face_swapper: object | None = None,
+        use_stylegan_mapper: bool = False,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -54,6 +55,7 @@ class KfaarPipeline:
         self.projector = projector
         self.stylegan = stylegan
         self.face_swapper = face_swapper
+        self.use_stylegan_mapper = use_stylegan_mapper
         self.device = device or next(projector.parameters()).device
         self._warned_face_swapper = False
         
@@ -171,7 +173,7 @@ class KfaarPipeline:
                         frame_pair_generated.append(torch.empty(0, device=device))
                         continue
                     z_i = projected_seq[frame_idx : frame_idx + 1]
-                    w_i = self.stylegan.map(z_i, truncation_psi=self.truncation_psi)
+                    w_i = self._project_to_stylegan_w(z_i)
                     img_i = self.stylegan.synthesize(w_i, noise_mode="const")[0].clamp(-1, 1).add(1).div(2.0)
 
                     visual_i = img_i
@@ -192,7 +194,7 @@ class KfaarPipeline:
                     frame_pair_inputs.append(aligned_input.detach())
                     frame_pair_generated.append(visual_i.detach())
 
-            w_pre_boundary = self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
+            w_pre_boundary = self._project_to_stylegan_w(projected_z)
             images = self.stylegan.synthesize(w_pre_boundary, noise_mode="const")
             img = images[0].clamp(-1, 1).add(1).div(2.0)
             det_input_embed: Optional[torch.Tensor] = None
@@ -532,6 +534,23 @@ class KfaarPipeline:
     def _to_sequence_tensor(frames, device):
         t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
         return t.float().to(device)
+
+    def _project_to_stylegan_w(self, projected_z: torch.Tensor) -> torch.Tensor:
+        if self.stylegan is None:
+            raise RuntimeError("StyleGAN is not initialized")
+        if self.use_stylegan_mapper:
+            return self.stylegan.map(projected_z, truncation_psi=self.truncation_psi)
+
+        num_ws = getattr(self.stylegan.synthesis, "num_ws", None)
+        if num_ws is None:
+            raise RuntimeError("StyleGAN synthesis.num_ws is unavailable for mapper-disabled mode")
+
+        w_dim = getattr(self.stylegan, "w_dim", projected_z.shape[-1])
+        if projected_z.shape[-1] != int(w_dim):
+            raise ValueError(
+                f"Projected z dim ({projected_z.shape[-1]}) must equal StyleGAN w_dim ({w_dim}) when mapper is disabled"
+            )
+        return projected_z.unsqueeze(1).expand(-1, int(num_ws), -1)
 
     def _epoch_image_dir(self) -> Optional[Path]:
         if self._save_dir_images is None:

@@ -241,6 +241,9 @@ class KfaarTrainer:
                 "device": str(self.device),
                 "train_identities": self.train_identities,
                 "val_identities": self.val_identities,
+                "use_stylegan_mapper": bool(getattr(self.pipeline, "use_stylegan_mapper", False)),
+                "enable_projector_l2_reg": bool(getattr(self.pipeline.projector, "enable_input_l2_norm", False)),
+                "enable_projector_key_upscaler": bool(getattr(self.pipeline.projector, "enable_key_upscaler", False)),
             },
         }
         with json_path.open("w", encoding="utf-8") as f:

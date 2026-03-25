@@ -49,7 +49,8 @@ class ProjectorConfig:
     key_dim: int = 128
     hidden_dims: Tuple[int, ...] = (1024, 512)
     dropout: float = 0.0
-    output_l2_normalize: bool = True
+    enable_input_l2_norm: bool = True
+    enable_key_upscaler: bool = True
 
     def normalized_type(self) -> str:
         proj_type = (self.type or "mlp").lower()
@@ -68,6 +69,7 @@ class PipelineConfig:
     embedding: EmbeddingConfig
     seed: SeedConfig
     projector: ProjectorConfig = field(default_factory=ProjectorConfig)
+    use_stylegan_mapper: bool = False
 
     @staticmethod
     def _require(mapping: Mapping[str, Any], key: str) -> Any:
@@ -100,7 +102,8 @@ class PipelineConfig:
             key_dim=int(projector_cfg.get("key_dim", 128)),
             hidden_dims=tuple(projector_cfg.get("hidden_dims", (1024, 512))),
             dropout=float(projector_cfg.get("dropout", 0.0)),
-            output_l2_normalize=bool(projector_cfg.get("output_l2_normalize", True)),
+            enable_input_l2_norm=bool(projector_cfg.get("enable_input_l2_norm", projector_cfg.get("output_l2_normalize", True))),
+            enable_key_upscaler=bool(projector_cfg.get("enable_key_upscaler", True)),
         )
 
         return cls(
@@ -119,4 +122,5 @@ class PipelineConfig:
             embedding=EmbeddingConfig(**embedding_kwargs),
             seed=SeedConfig(**seed_cfg),
             projector=projector,
+            use_stylegan_mapper=bool(payload.get("use_stylegan_mapper", False)),
         )

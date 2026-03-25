@@ -67,7 +67,13 @@ def parse_args():
     parser.add_argument("--lambda_dif", type=float, default=1.0, help="Weight for Differentiation loss")
     parser.add_argument("--lambda_temp", type=float, default=0.0, help="Weight for temporal smoothness loss")
     parser.add_argument("--lambda_w_reg", type=float, default=20.0, help="Weight for StyleGAN W-space regularization loss")
-    parser.add_argument("--enable_projector_l2_reg", action="store_true", help="Enable output L2 normalization in the projector MLP")
+    parser.add_argument("--enable_projector_l2_reg", dest="enable_projector_l2_reg", action="store_true", help="Enable input L2 normalization for both key and z in the projector MLP")
+    parser.add_argument("--disable_projector_l2_reg", dest="enable_projector_l2_reg", action="store_false", help="Disable input L2 normalization for key and z in the projector MLP")
+    parser.add_argument("--enable_projector_key_upscaler", dest="enable_projector_key_upscaler", action="store_true", help="Enable projector key upscaler to map key_dim to 512 before concatenation")
+    parser.add_argument("--disable_projector_key_upscaler", dest="enable_projector_key_upscaler", action="store_false", help="Disable projector key upscaler and concatenate raw key with z")
+    parser.add_argument("--use_stylegan_mapper", dest="use_stylegan_mapper", action="store_true", help="Use StyleGAN mapping network (z->W+) before synthesis")
+    parser.add_argument("--disable_stylegan_mapper", dest="use_stylegan_mapper", action="store_false", help="Bypass StyleGAN mapping and repeat projected z across W+ layers before synthesis")
+    parser.set_defaults(enable_projector_l2_reg=True, enable_projector_key_upscaler=True, use_stylegan_mapper=False)
     parser.add_argument("--margin", type=float, default=0.5, help="Margin for triplet/cosine losses")
 
     # Dataset & Split
@@ -229,7 +235,8 @@ def main():
         key_dim=args.key_dim,
         hidden_dims=(1024, 512),
         dropout=0.0,
-        output_l2_normalize=args.enable_projector_l2_reg,
+        enable_input_l2_norm=args.enable_projector_l2_reg,
+        enable_key_upscaler=args.enable_projector_key_upscaler,
     )
     
     cfg = PipelineConfig(
@@ -238,6 +245,7 @@ def main():
         embedding=embedding_cfg, 
         seed=SeedConfig(secret_key="master_thesis_secret"), 
         projector=projector_cfg,
+        use_stylegan_mapper=args.use_stylegan_mapper,
     )
 
     # 2. Build Data Loaders

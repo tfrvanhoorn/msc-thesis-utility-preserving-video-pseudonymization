@@ -8,7 +8,7 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 class ProjectorMLP(nn.Module):
-    """Projects face embedding z + key k to a new L2-normalized z'."""
+    """Projects face embedding z + key k to a new embedding vector."""
 
     def __init__(
         self,
@@ -16,16 +16,20 @@ class ProjectorMLP(nn.Module):
         output_dim: int = 512,
         hidden_dims: tuple[int, ...] = (1024, 512),
         dropout: float = 0.0,
-        output_l2_normalize: bool = True,
+        enable_input_l2_norm: bool = True,
+        enable_key_upscaler: bool = True,
     ) -> None:
         super().__init__()
-        self.output_l2_normalize = output_l2_normalize
+        self.enable_input_l2_norm = enable_input_l2_norm
+        self.enable_key_upscaler = enable_key_upscaler
+        self.key_dim = key_dim
+        self.output_dim = output_dim
         
-        # Upscale the key to match the face feature bandwidth
-        self.key_upscaler = nn.Linear(key_dim, output_dim)
-        
-        # The input to the hidden network is now 512 (face) + 512 (upscaled key)
-        input_dim = output_dim + output_dim
+        # Optional key upscaler controls whether key is projected to feature bandwidth.
+        self.key_upscaler = nn.Linear(key_dim, output_dim) if enable_key_upscaler else None
+
+        input_key_dim = output_dim if enable_key_upscaler else key_dim
+        input_dim = output_dim + input_key_dim
         
         layers: list[nn.Module] = []
         in_dim = input_dim
@@ -54,24 +58,22 @@ class ProjectorMLP(nn.Module):
         if key.dim() == 1: key = key.unsqueeze(0)
         if z.dim() == 1: z = z.unsqueeze(0)
         
-        # L2 Normalization for the key to prevent Magnitude Mismatch
-        key = F.normalize(key, p=2, dim=-1)
-        z = F.normalize(z, p=2, dim=-1)
+        if self.enable_input_l2_norm:
+            key = F.normalize(key, p=2, dim=-1)
+            z = F.normalize(z, p=2, dim=-1)
         
-        # Upscale and unpack the key
-        upscaled_key = self.key_upscaler(key)
-        upscaled_key = F.relu(upscaled_key)
+        if self.enable_key_upscaler and self.key_upscaler is not None:
+            key_features = self.key_upscaler(key)
+            key_features = F.relu(key_features)
+        else:
+            key_features = key
         
         # Concatenate the balanced vectors
-        concat = torch.cat([z, upscaled_key], dim=-1)
+        concat = torch.cat([z, key_features], dim=-1)
         x = self.hidden_net(concat)
         
         # Predict a new embedding directly from z and upscaled key.
         out = self.output_layer(x)
-
-        # Optional output normalization allows explicit control from training args.
-        if self.output_l2_normalize:
-            out = F.normalize(out, p=2, dim=-1)
 
         return out
 
@@ -108,6 +110,14 @@ def load_projector_state_dict(model: nn.Module, state_dict: dict[str, torch.Tens
 
     if isinstance(model, ProjectorMLP):
         state_dict = _remap_legacy_mlp_keys(state_dict)
+        if not model.enable_key_upscaler:
+            removed = [k for k in state_dict if k.startswith("key_upscaler.")]
+            if removed:
+                state_dict = {k: v for k, v in state_dict.items() if not k.startswith("key_upscaler.")}
+                strict = False
+                logger.warning(
+                    "Ignoring key_upscaler weights from checkpoint because enable_key_upscaler is disabled."
+                )
         
     try:
         model.load_state_dict(state_dict, strict=strict)

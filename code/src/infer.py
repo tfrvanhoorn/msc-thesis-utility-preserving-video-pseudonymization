@@ -338,6 +338,13 @@ def parse_args() -> argparse.Namespace:
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--num_keys", type=int, default=2, help="Number of pseudonymization keys to render per source video")
+    parser.add_argument("--enable_projector_l2_reg", dest="enable_projector_l2_reg", action="store_true", help="Enable input L2 normalization for both key and z in the projector MLP")
+    parser.add_argument("--disable_projector_l2_reg", dest="enable_projector_l2_reg", action="store_false", help="Disable input L2 normalization for key and z in the projector MLP")
+    parser.add_argument("--enable_projector_key_upscaler", dest="enable_projector_key_upscaler", action="store_true", help="Enable projector key upscaler to map key_dim to 512 before concatenation")
+    parser.add_argument("--disable_projector_key_upscaler", dest="enable_projector_key_upscaler", action="store_false", help="Disable projector key upscaler and concatenate raw key with z")
+    parser.add_argument("--use_stylegan_mapper", dest="use_stylegan_mapper", action="store_true", help="Use StyleGAN mapping network (z->W+) before synthesis")
+    parser.add_argument("--disable_stylegan_mapper", dest="use_stylegan_mapper", action="store_false", help="Bypass StyleGAN mapping and repeat projected z across W+ layers before synthesis")
+    parser.set_defaults(enable_projector_l2_reg=True, enable_projector_key_upscaler=True, use_stylegan_mapper=False)
 
     # Dataset and sampling options
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities")
@@ -437,6 +444,8 @@ def main() -> None:
         key_dim=args.key_dim,
         hidden_dims=(1024, 512),
         dropout=0.0,
+        enable_input_l2_norm=args.enable_projector_l2_reg,
+        enable_key_upscaler=args.enable_projector_key_upscaler,
     )
 
     cfg = PipelineConfig(
@@ -445,6 +454,7 @@ def main() -> None:
         embedding=embedding_cfg,
         seed=SeedConfig(secret_key="master_thesis_secret"),
         projector=projector_cfg,
+        use_stylegan_mapper=args.use_stylegan_mapper,
     )
 
     logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)

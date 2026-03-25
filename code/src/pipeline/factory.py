@@ -43,7 +43,8 @@ def build_kfaar_pipeline(
         output_dim=embedder.embedding_size,
         hidden_dims=config.projector.hidden_dims,
         dropout=config.projector.dropout,
-        output_l2_normalize=config.projector.output_l2_normalize,
+        enable_input_l2_norm=config.projector.enable_input_l2_norm,
+        enable_key_upscaler=config.projector.enable_key_upscaler,
     ).to(target_device)
 
     if stylegan is not None:
@@ -63,6 +64,7 @@ def build_kfaar_pipeline(
         device=target_device,
         truncation_psi=truncation_psi,
         face_swapper=face_swapper,
+        use_stylegan_mapper=config.use_stylegan_mapper,
     )
 
 
