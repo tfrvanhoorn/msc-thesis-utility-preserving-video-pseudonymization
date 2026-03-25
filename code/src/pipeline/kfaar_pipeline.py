@@ -545,12 +545,16 @@ class KfaarPipeline:
         if num_ws is None:
             raise RuntimeError("StyleGAN synthesis.num_ws is unavailable for mapper-disabled mode")
 
-        w_dim = getattr(self.stylegan, "w_dim", projected_z.shape[-1])
-        if projected_z.shape[-1] != int(w_dim):
-            raise ValueError(
-                f"Projected z dim ({projected_z.shape[-1]}) must equal StyleGAN w_dim ({w_dim}) when mapper is disabled"
-            )
-        return projected_z.unsqueeze(1).expand(-1, int(num_ws), -1)
+        # Fetch the mathematical center of W-space
+        w_avg = self.stylegan.mapping.w_avg
+        
+        # Add the center coordinates to the MLP's raw output. 
+        # This instantly teleports your vectors out of the zero-origin wilderness 
+        # and directly onto the valid face manifold.
+        anchored_w = projected_z + w_avg
+
+        # Manually broadcast the anchored W vector into W+ space
+        return anchored_w.unsqueeze(1).expand(-1, int(num_ws), -1)
 
     def _epoch_image_dir(self) -> Optional[Path]:
         if self._save_dir_images is None:
