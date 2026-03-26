@@ -776,7 +776,7 @@ class KfaarPipeline:
         gen_mask: Sequence[bool],
         *,
         swapped_images: Optional[torch.Tensor] = None,
-        sample_label: Optional[int],
+        sample_label: Optional[int] = None,
         sample_labels: Optional[Sequence[int]] = None,
         key_tag: Optional[str],
         batch_index: Optional[int],
