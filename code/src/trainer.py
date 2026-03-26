@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 import sys
+import time
 
 import psutil
 import torch
@@ -63,6 +64,8 @@ class KfaarTrainer:
         self._memory_log_interval = 100
         self._proc = psutil.Process()
         self._interval_stats = {"discarded_batches": 0, "input_no_det": 0, "gen_no_det": 0}
+        self._interval_samples_processed = 0
+        self._interval_start_time = time.perf_counter()
         self.train_identities = list(train_identities) if train_identities else None
         self.val_identities = list(val_identities) if val_identities else None
         self.eval_history: list[dict[str, float]] = []
@@ -170,6 +173,7 @@ class KfaarTrainer:
                     epoch_dif += float(loss_components["dif"].item())
                     epoch_w_reg += float(loss_components["w_reg"].item())
                     step_count += 1
+                    self._interval_samples_processed += int(sub_frames.shape[0])
                     progress.set_postfix({"loss": f"{loss_value:.4f}"})
 
                     self._pull_interval_stats()
@@ -415,13 +419,16 @@ class KfaarTrainer:
         self.pipeline.stats["gen_no_det"] = 0
 
     def _log_interval_stats(self, epoch: int, step_count: int) -> None:
-        if not any(self._interval_stats.values()):
-            return
         rss_gb, alloc_gb, reserved_gb = self._current_memory()
+        now = time.perf_counter()
+        elapsed = max(1e-6, now - self._interval_start_time)
+        samples_per_sec = float(self._interval_samples_processed) / elapsed
         logging.info(
-            "Interval summary | epoch=%s step=%s | discarded_batches=%d | input_no_det_frames=%d | gen_no_det_frames=%d | CPU RSS=%.2f GB | CUDA alloc=%.2f GB reserved=%.2f GB",
+            "Interval summary | epoch=%s step=%s samples=%s samples_per_sec=%.2f | discarded_batches=%d | input_no_det_frames=%d | gen_no_det_frames=%d | CPU RSS=%.2f GB | CUDA alloc=%.2f GB reserved=%.2f GB",
             epoch,
             step_count,
+            self._interval_samples_processed,
+            samples_per_sec,
             self._interval_stats["discarded_batches"],
             self._interval_stats["input_no_det"],
             self._interval_stats["gen_no_det"],
@@ -435,6 +442,8 @@ class KfaarTrainer:
 
     def _reset_interval_stats(self) -> None:
         self._interval_stats = {"discarded_batches": 0, "input_no_det": 0, "gen_no_det": 0}
+        self._interval_samples_processed = 0
+        self._interval_start_time = time.perf_counter()
 
     def _current_memory(self) -> tuple[float, float, float]:
         rss_gb = self._proc.memory_info().rss / (1024 ** 3)

@@ -477,6 +477,29 @@ class KfaarPipeline:
                 virtual_1, gen_valid_1 = _extract_embeddings_from_images(images_1, with_grad=True)
                 virtual_2, gen_valid_2 = _extract_embeddings_from_images(images_2, with_grad=True)
 
+                sample_labels: list[int] = []
+                if torch.is_tensor(labels):
+                    sample_labels = [int(x) for x in labels.detach().cpu().tolist()]
+                else:
+                    sample_labels = [int(x) for x in labels]
+
+                self._maybe_save_generated(
+                    images_1,
+                    [bool(x) for x in gen_valid_1.detach().cpu().tolist()],
+                    sample_labels=sample_labels,
+                    key_tag="k1",
+                    batch_index=batch_index,
+                    input_frames=center_frames,
+                )
+                self._maybe_save_generated(
+                    images_2,
+                    [bool(x) for x in gen_valid_2.detach().cpu().tolist()],
+                    sample_labels=sample_labels,
+                    key_tag="k2",
+                    batch_index=batch_index,
+                    input_frames=center_frames,
+                )
+
                 missing_1 = (~gen_valid_1).nonzero(as_tuple=False).flatten().tolist()
                 missing_2 = (~gen_valid_2).nonzero(as_tuple=False).flatten().tolist()
                 for idx in missing_1:
@@ -754,6 +777,7 @@ class KfaarPipeline:
         *,
         swapped_images: Optional[torch.Tensor] = None,
         sample_label: Optional[int],
+        sample_labels: Optional[Sequence[int]] = None,
         key_tag: Optional[str],
         batch_index: Optional[int],
         input_frames: Optional[torch.Tensor] = None,
@@ -787,7 +811,10 @@ class KfaarPipeline:
                 if mode == "undetected" and detected:
                     continue
 
-                label_val = int(sample_label) if sample_label is not None else None
+                if sample_labels is not None and idx < len(sample_labels):
+                    label_val = int(sample_labels[idx])
+                else:
+                    label_val = int(sample_label) if sample_label is not None else None
                 label_part = f"id{label_val:06d}" if label_val is not None else "idunknown"
                 key_part = f"key{key_tag}" if key_tag else "key"
                 batch_part = f"{int(batch_index):06d}" if batch_index is not None else "000000"
