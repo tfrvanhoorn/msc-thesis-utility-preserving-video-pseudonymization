@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 from typing import Sequence
 
+import numpy as np
 import torch
 from facenet_pytorch import MTCNN
 
@@ -57,6 +58,7 @@ class MTCNNDetector(FaceDetector):
             post_process=post_process,
             device=self.device,
         )
+        self._warned_batch_fallback = False
 
     def detect(self, image: torch.Tensor) -> Sequence[Detection]:
         prepared = self._prepare_image_for_mtcnn(image)
@@ -80,19 +82,20 @@ class MTCNNDetector(FaceDetector):
 
         # MTCNN batched detect expects equal HxW. Group by shape to preserve
         # most batching benefits while supporting mixed-size inputs.
-        groups: dict[tuple[int, int], list[tuple[int, torch.Tensor]]] = defaultdict(list)
+        groups: dict[tuple[int, int, int], list[tuple[int, torch.Tensor]]] = defaultdict(list)
         for idx, img in enumerate(prepared):
             if img is None:
                 continue
-            h, w = int(img.shape[0]), int(img.shape[1])
-            groups[(h, w)].append((idx, img))
+            h, w, c = int(img.shape[0]), int(img.shape[1]), int(img.shape[2])
+            groups[(h, w, c)].append((idx, img))
 
         for _, items in groups.items():
             indices = [idx for idx, _ in items]
             tensors = [img for _, img in items]
             try:
+                batch_np = np.stack([img.numpy() for img in tensors], axis=0)
                 with torch.no_grad():
-                    boxes_b, probs_b, landmarks_b = self._mtcnn.detect(tensors, landmarks=True)
+                    boxes_b, probs_b, landmarks_b = self._mtcnn.detect(batch_np, landmarks=True)
 
                 if boxes_b is None:
                     continue
@@ -103,7 +106,11 @@ class MTCNNDetector(FaceDetector):
                     landmarks = landmarks_b[local_idx] if landmarks_b is not None and local_idx < len(landmarks_b) else None
                     result[global_idx] = self._postprocess_single_detect(boxes, probs, landmarks)
             except Exception as exc:
-                logger.warning("MTCNN shape-group batch detect failed; falling back per image: %s", exc)
+                if not self._warned_batch_fallback:
+                    logger.warning("MTCNN shape-group batch detect failed; falling back per image: %s", exc)
+                    self._warned_batch_fallback = True
+                else:
+                    logger.debug("MTCNN shape-group batch detect failed; falling back per image: %s", exc)
                 for global_idx in indices:
                     img = prepared[global_idx]
                     if img is None:
