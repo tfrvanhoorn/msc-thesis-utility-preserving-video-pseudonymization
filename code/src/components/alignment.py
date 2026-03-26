@@ -14,6 +14,9 @@ class FaceAligner(Protocol):
     def align(self, image: torch.Tensor, detection: Detection) -> torch.Tensor:
         ...
 
+    def align_batch(self, images: list[torch.Tensor], detections: list[Detection | None]) -> list[torch.Tensor]:
+        ...
+
 
 class MTCNNAligner:
     def __init__(self, output_size: int = 160) -> None:
@@ -37,6 +40,18 @@ class MTCNNAligner:
         face = torch.nn.functional.interpolate(face, size=(self.output_size, self.output_size), mode="bilinear", align_corners=False)
         face = face.squeeze(0).contiguous()
         return face
+
+    def align_batch(self, images: list[torch.Tensor], detections: list[Detection | None]) -> list[torch.Tensor]:
+        if len(images) != len(detections):
+            raise ValueError("images and detections must have equal length")
+
+        aligned_faces: list[torch.Tensor] = []
+        for image, detection in zip(images, detections):
+            if detection is None:
+                aligned_faces.append(torch.empty(0))
+                continue
+            aligned_faces.append(self.align(image, detection))
+        return aligned_faces
 
     @staticmethod
     def _to_tensor(image: torch.Tensor) -> torch.Tensor:

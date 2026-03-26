@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, MutableMapping
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 
 from .video_loaders import VoxCelebVideoDataset, DEFAULT_VIDEO_PATTERNS
 from .video_io import get_video_frame_count, load_video_window
@@ -942,4 +942,29 @@ class IdentityBatchingDataset(IterableDataset):
                 yield batch
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        yield from self._emit_tuple_batches()
+        worker_info = get_worker_info()
+        if worker_info is None:
+            yield from self._emit_tuple_batches()
+            return
+
+        worker_id = int(worker_info.id)
+        num_workers = int(worker_info.num_workers)
+
+        sharded_index: dict[str, list[SampleReference]] = {
+            identity: refs
+            for idx, (identity, refs) in enumerate(self.sample_index.items())
+            if idx % num_workers == worker_id
+        }
+        if not sharded_index:
+            return
+
+        base_seed = int(self._rng.random() * (2**31 - 1))
+        worker_seed = base_seed + worker_id
+        worker_dataset = IdentityBatchingDataset(
+            sharded_index,
+            self.identity_to_index,
+            shuffle_identities=self.shuffle_identities,
+            seed=worker_seed,
+            tuples_per_batch=self.tuples_per_batch,
+        )
+        yield from worker_dataset._emit_tuple_batches()

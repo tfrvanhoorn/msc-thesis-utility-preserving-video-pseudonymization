@@ -422,74 +422,176 @@ class KfaarPipeline:
         w_reg_terms: list[torch.Tensor] = []
         nondet_faces = 0
         det_failures = 0
+        batched_success = False
+        if (
+            not use_face_swapper
+            and self.stylegan is not None
+            and hasattr(self.detector, "detect_batch")
+            and hasattr(self.aligner, "align_batch")
+        ):
+            try:
+                center_indices = [max(0, (seq_lens_list[b] - 1) // 2) for b in range(batch_size)]
+                center_frames = torch.stack([frames[b, center_indices[b]].to(device) for b in range(batch_size)], dim=0)
 
-        for b in range(batch_size):
-            label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
-            res1 = self.forward(
-                frames[b, :seq_lens_list[b]],
-                key_1,
-                sample_label=label_int,
-                key_tag="k1",
-                batch_index=batch_index,
-                use_face_swapper=use_face_swapper,
-                swap_for_visuals_only=swap_for_visuals_only,
-            )
-            res2 = self.forward(
-                frames[b, :seq_lens_list[b]],
-                key_2,
-                sample_label=label_int,
-                key_tag="k2",
-                batch_index=batch_index,
-                use_face_swapper=use_face_swapper,
-                swap_for_visuals_only=swap_for_visuals_only,
-            )
+                def _extract_embeddings_from_images(images_b: torch.Tensor, *, with_grad: bool) -> tuple[torch.Tensor, torch.Tensor]:
+                    image_list = [images_b[i] for i in range(images_b.shape[0])]
+                    detections_b = self.detector.detect_batch(image_list)  # type: ignore[attr-defined]
+                    top_dets = [max(dets, key=lambda d: d.score) if dets else None for dets in detections_b]
+                    aligned_b = self.aligner.align_batch(image_list, top_dets)  # type: ignore[attr-defined]
 
-            proj_norm_terms.append(res1.projected_z.pow(2).mean())
-            proj_norm_terms.append(res2.projected_z.pow(2).mean())
+                    emb = torch.zeros((batch_size, 512), device=device)
+                    valid = torch.zeros(batch_size, device=device, dtype=torch.bool)
+                    valid_faces: list[torch.Tensor] = []
+                    valid_idx: list[int] = []
+                    for i, face in enumerate(aligned_b):
+                        if torch.is_tensor(face) and face.numel() > 0:
+                            valid[i] = True
+                            valid_faces.append(face.to(device))
+                            valid_idx.append(i)
 
-            if lambda_w_reg > 0.0 and self.stylegan is not None and hasattr(self.stylegan, "mapping") and hasattr(self.stylegan.mapping, "w_avg"):
-                w_avg = self.stylegan.mapping.w_avg.to(device=device, dtype=res1.w_pre_boundary.dtype) if res1.w_pre_boundary is not None else self.stylegan.mapping.w_avg.to(device=device)
+                    if valid_faces:
+                        embs = self.embedder.embed(valid_faces, with_grad=with_grad)
+                        for e, idx in zip(embs, valid_idx):
+                            emb[idx] = e
+                    return emb, valid
 
-                if res1.w_pre_boundary is not None:
-                    w_avg_res1 = w_avg
-                    while w_avg_res1.dim() < res1.w_pre_boundary.dim():
-                        w_avg_res1 = w_avg_res1.unsqueeze(0)
-                    w_reg_terms.append((res1.w_pre_boundary - w_avg_res1).pow(2).mean())
+                real_centers, input_valid = _extract_embeddings_from_images(center_frames, with_grad=False)
+                self.stats["input_no_det"] += int((~input_valid).sum().item())
 
-                if res2.w_pre_boundary is not None:
-                    w_avg_res2 = w_avg
-                    while w_avg_res2.dim() < res2.w_pre_boundary.dim():
-                        w_avg_res2 = w_avg_res2.unsqueeze(0)
-                    w_reg_terms.append((res2.w_pre_boundary - w_avg_res2).pow(2).mean())
+                key_1_b = key_1.to(device).view(1, -1).expand(batch_size, -1)
+                key_2_b = key_2.to(device).view(1, -1).expand(batch_size, -1)
+                projected_1 = self.projector.project(real_centers, key_1_b)
+                projected_2 = self.projector.project(real_centers, key_2_b)
+                proj_norm_terms.append(projected_1.pow(2).mean())
+                proj_norm_terms.append(projected_2.pow(2).mean())
 
-            nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
+                w_pre_1 = self._project_to_stylegan_w(projected_1)
+                w_pre_2 = self._project_to_stylegan_w(projected_2)
 
-            mask = res1.valid_mask & res2.valid_mask
+                images_1 = self.stylegan.synthesize(w_pre_1, noise_mode="const").clamp(-1, 1).add(1).div(2.0)
+                images_2 = self.stylegan.synthesize(w_pre_2, noise_mode="const").clamp(-1, 1).add(1).div(2.0)
 
-            # Track frames where we could not form a valid pair (input or gen missing)
-            det_failures += int((~mask).sum().item())
+                virtual_1, gen_valid_1 = _extract_embeddings_from_images(images_1, with_grad=True)
+                virtual_2, gen_valid_2 = _extract_embeddings_from_images(images_2, with_grad=True)
 
-            valid_scalar = bool(mask.any().item())
-            if valid_scalar:
-                # Collapse any frame-level detections to one representative feature
-                # vector per source sample so triplet semantics remain stable.
-                real_e = res1.real_embeddings[mask].mean(dim=0, keepdim=True)
-                v1_e = res1.virtual_embeddings[mask].mean(dim=0, keepdim=True)
-                v2_e = res2.virtual_embeddings[mask].mean(dim=0, keepdim=True)
-            else:
-                real_e = torch.zeros((1, 512), device=device)
-                v1_e = torch.zeros((1, 512), device=device)
-                v2_e = torch.zeros((1, 512), device=device)
+                missing_1 = (~gen_valid_1).nonzero(as_tuple=False).flatten().tolist()
+                missing_2 = (~gen_valid_2).nonzero(as_tuple=False).flatten().tolist()
+                for idx in missing_1:
+                    virtual_1[idx] = projected_1[idx].sum() * 0.0
+                for idx in missing_2:
+                    virtual_2[idx] = projected_2[idx].sum() * 0.0
 
-            sample_records.append(
-                (
-                    torch.tensor(valid_scalar, device=device, dtype=torch.bool),
-                    real_e,
-                    v1_e,
-                    v2_e,
-                    labels[b] if torch.is_tensor(labels) else torch.tensor(label_int, device=device, dtype=torch.long),
+                self.stats["gen_no_det"] += int((~gen_valid_1).sum().item() + (~gen_valid_2).sum().item())
+
+                if lambda_w_reg > 0.0 and hasattr(self.stylegan, "mapping") and hasattr(self.stylegan.mapping, "w_avg"):
+                    w_avg = self.stylegan.mapping.w_avg.to(device=device, dtype=w_pre_1.dtype)
+                    w_avg_1 = w_avg
+                    while w_avg_1.dim() < w_pre_1.dim():
+                        w_avg_1 = w_avg_1.unsqueeze(0)
+                    w_reg_terms.append((w_pre_1 - w_avg_1).pow(2).mean())
+
+                    w_avg_2 = w_avg
+                    while w_avg_2.dim() < w_pre_2.dim():
+                        w_avg_2 = w_avg_2.unsqueeze(0)
+                    w_reg_terms.append((w_pre_2 - w_avg_2).pow(2).mean())
+
+                nondet_faces += int((~gen_valid_1).sum().item() + (~gen_valid_2).sum().item())
+                valid_mask = input_valid & gen_valid_1 & gen_valid_2
+                det_failures += int((~valid_mask).sum().item())
+
+                for b in range(batch_size):
+                    valid_scalar = bool(valid_mask[b].item())
+                    if valid_scalar:
+                        real_e = real_centers[b : b + 1]
+                        v1_e = virtual_1[b : b + 1]
+                        v2_e = virtual_2[b : b + 1]
+                    else:
+                        real_e = torch.zeros((1, 512), device=device)
+                        v1_e = torch.zeros((1, 512), device=device)
+                        v2_e = torch.zeros((1, 512), device=device)
+
+                    label_b = labels[b] if torch.is_tensor(labels) else torch.tensor(int(labels[b]), device=device, dtype=torch.long)
+                    sample_records.append(
+                        (
+                            torch.tensor(valid_scalar, device=device, dtype=torch.bool),
+                            real_e,
+                            v1_e,
+                            v2_e,
+                            label_b,
+                        )
+                    )
+                batched_success = True
+            except Exception as exc:
+                logger.warning("Batched hpvg path failed; falling back to sequential processing: %s", exc)
+
+        if not batched_success:
+            for b in range(batch_size):
+                label_int = int(labels[b].item()) if torch.is_tensor(labels) else int(labels[b])
+                res1 = self.forward(
+                    frames[b, :seq_lens_list[b]],
+                    key_1,
+                    sample_label=label_int,
+                    key_tag="k1",
+                    batch_index=batch_index,
+                    use_face_swapper=use_face_swapper,
+                    swap_for_visuals_only=swap_for_visuals_only,
                 )
-            )
+                res2 = self.forward(
+                    frames[b, :seq_lens_list[b]],
+                    key_2,
+                    sample_label=label_int,
+                    key_tag="k2",
+                    batch_index=batch_index,
+                    use_face_swapper=use_face_swapper,
+                    swap_for_visuals_only=swap_for_visuals_only,
+                )
+
+                proj_norm_terms.append(res1.projected_z.pow(2).mean())
+                proj_norm_terms.append(res2.projected_z.pow(2).mean())
+
+                if lambda_w_reg > 0.0 and self.stylegan is not None and hasattr(self.stylegan, "mapping") and hasattr(self.stylegan.mapping, "w_avg"):
+                    w_avg = self.stylegan.mapping.w_avg.to(device=device, dtype=res1.w_pre_boundary.dtype) if res1.w_pre_boundary is not None else self.stylegan.mapping.w_avg.to(device=device)
+
+                    if res1.w_pre_boundary is not None:
+                        w_avg_res1 = w_avg
+                        while w_avg_res1.dim() < res1.w_pre_boundary.dim():
+                            w_avg_res1 = w_avg_res1.unsqueeze(0)
+                        w_reg_terms.append((res1.w_pre_boundary - w_avg_res1).pow(2).mean())
+
+                    if res2.w_pre_boundary is not None:
+                        w_avg_res2 = w_avg
+                        while w_avg_res2.dim() < res2.w_pre_boundary.dim():
+                            w_avg_res2 = w_avg_res2.unsqueeze(0)
+                        w_reg_terms.append((res2.w_pre_boundary - w_avg_res2).pow(2).mean())
+
+                nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
+
+                mask = res1.valid_mask & res2.valid_mask
+
+                # Track frames where we could not form a valid pair (input or gen missing)
+                det_failures += int((~mask).sum().item())
+
+                valid_scalar = bool(mask.any().item())
+                if valid_scalar:
+                    # Collapse any frame-level detections to one representative feature
+                    # vector per source sample so triplet semantics remain stable.
+                    real_e = res1.real_embeddings[mask].mean(dim=0, keepdim=True)
+                    v1_e = res1.virtual_embeddings[mask].mean(dim=0, keepdim=True)
+                    v2_e = res2.virtual_embeddings[mask].mean(dim=0, keepdim=True)
+                else:
+                    real_e = torch.zeros((1, 512), device=device)
+                    v1_e = torch.zeros((1, 512), device=device)
+                    v2_e = torch.zeros((1, 512), device=device)
+
+                sample_records.append(
+                    (
+                        torch.tensor(valid_scalar, device=device, dtype=torch.bool),
+                        real_e,
+                        v1_e,
+                        v2_e,
+                        labels[b] if torch.is_tensor(labels) else torch.tensor(label_int, device=device, dtype=torch.long),
+                    )
+                )
 
         proj_norm = torch.stack(proj_norm_terms).mean() if proj_norm_terms else torch.tensor(0.0, device=device)
         w_reg = torch.stack(w_reg_terms).mean() if w_reg_terms else torch.tensor(0.0, device=device)

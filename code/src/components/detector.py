@@ -23,6 +23,9 @@ class FaceDetector:
     def detect(self, image: torch.Tensor) -> Sequence[Detection]:
         raise NotImplementedError
 
+    def detect_batch(self, images: Sequence[torch.Tensor]) -> Sequence[Sequence[Detection]]:
+        raise NotImplementedError
+
 
 class MTCNNDetector(FaceDetector):
     def __init__(
@@ -55,23 +58,45 @@ class MTCNNDetector(FaceDetector):
         )
 
     def detect(self, image: torch.Tensor) -> Sequence[Detection]:
-        if image is None:
-            return []
-        
-        # 1. Ensure we have a 0-255 range for the detector
-        if image.max() <= 1.01: # Check if already normalized
-            image_for_mtcnn = (image * 255).byte()
-        else:
-            image_for_mtcnn = image.byte()
+        batched = self.detect_batch([image])
+        return batched[0] if batched else []
 
-        # 2. Re-order to (H, W, C) which facenet-pytorch prefers for tensors
-        if image_for_mtcnn.shape[0] == 3:
-            image_for_mtcnn = image_for_mtcnn.permute(1, 2, 0)
+    def detect_batch(self, images: Sequence[torch.Tensor]) -> Sequence[Sequence[Detection]]:
+        if images is None:
+            return []
+        image_list = list(images)
+        if not image_list:
+            return []
+
+        prepared: list[torch.Tensor] = []
+        for image in image_list:
+            if image is None:
+                prepared.append(torch.empty(0, device=self.device))
+                continue
+            if image.max() <= 1.01:
+                image_for_mtcnn = (image * 255).byte()
+            else:
+                image_for_mtcnn = image.byte()
+            if image_for_mtcnn.shape[0] == 3:
+                image_for_mtcnn = image_for_mtcnn.permute(1, 2, 0)
+            prepared.append(image_for_mtcnn)
 
         with torch.no_grad():
-            # Pass the 0-255 image here
-            boxes, probs, landmarks = self._mtcnn.detect(image_for_mtcnn, landmarks=True)
+            boxes_b, probs_b, landmarks_b = self._mtcnn.detect(prepared, landmarks=True)
 
+        if boxes_b is None:
+            return [[] for _ in prepared]
+
+        # facenet_pytorch returns ndarray/object arrays for batch mode.
+        result: list[list[Detection]] = []
+        for idx in range(len(prepared)):
+            boxes = boxes_b[idx] if idx < len(boxes_b) else None
+            probs = probs_b[idx] if probs_b is not None and idx < len(probs_b) else None
+            landmarks = landmarks_b[idx] if landmarks_b is not None and idx < len(landmarks_b) else None
+            result.append(self._postprocess_single_detect(boxes, probs, landmarks))
+        return result
+
+    def _postprocess_single_detect(self, boxes, probs, landmarks) -> list[Detection]:
         # Guard against empty lists returned by facenet_pytorch (causes cat() error)
         if boxes is None or (isinstance(boxes, (list, tuple)) and len(boxes) == 0):
             return []

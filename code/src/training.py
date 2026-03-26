@@ -79,6 +79,7 @@ def parse_args():
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
     parser.add_argument("--batch_size", type=int, default=1, help="Logical tuple batch size; each tuple is (x1, x2, y), so physical samples per step are 3*batch_size")
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader worker processes")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
     parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
     parser.add_argument("--shuffle_batches", dest="shuffle_batches", action="store_true", help="Shuffle training batches each epoch")
@@ -150,6 +151,8 @@ def main():
     configure_logging()
     if args.batch_size < 1:
         raise ValueError(f"--batch_size must be >= 1, got {args.batch_size}")
+    if args.num_workers < 0:
+        raise ValueError(f"--num_workers must be >= 0, got {args.num_workers}")
     device = torch.device(args.device)
 
     if not args.input_dir.exists():
@@ -265,6 +268,7 @@ def main():
         shuffle_train=args.shuffle_batches,
         batch_seed=batch_seed,
         shuffle_test=False,
+        num_workers=args.num_workers,
     )
 
     # 3. Initialize Pipeline Components
