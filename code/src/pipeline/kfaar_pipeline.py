@@ -833,7 +833,10 @@ class KfaarPipeline:
                     if save_images_dir is not None:
                         vutils.save_image(input_img, save_images_dir / f"{base}_input.png")
 
-                stylegan_img = images[idx].detach().cpu().add(1).div(2.0).clamp(0.0, 1.0)
+                stylegan_img = images[idx].detach().cpu()
+                if stylegan_img.min() < 0.0 or stylegan_img.max() > 1.0:
+                    stylegan_img = stylegan_img.add(1).div(2.0)
+                stylegan_img = stylegan_img.clamp(0.0, 1.0)
                 if save_images_dir is not None:
                     vutils.save_image(stylegan_img, save_images_dir / f"{base}_stylegan.png")
 
