@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from collections import defaultdict
 from typing import Sequence
 
 import torch
@@ -58,8 +59,14 @@ class MTCNNDetector(FaceDetector):
         )
 
     def detect(self, image: torch.Tensor) -> Sequence[Detection]:
-        batched = self.detect_batch([image])
-        return batched[0] if batched else []
+        prepared = self._prepare_image_for_mtcnn(image)
+        if prepared is None:
+            return []
+
+        with torch.no_grad():
+            boxes, probs, landmarks = self._mtcnn.detect(prepared, landmarks=True)
+
+        return self._postprocess_single_detect(boxes, probs, landmarks)
 
     def detect_batch(self, images: Sequence[torch.Tensor]) -> Sequence[Sequence[Detection]]:
         if images is None:
@@ -68,33 +75,61 @@ class MTCNNDetector(FaceDetector):
         if not image_list:
             return []
 
-        prepared: list[torch.Tensor] = []
-        for image in image_list:
-            if image is None:
-                prepared.append(torch.empty(0, device=self.device))
+        prepared: list[torch.Tensor | None] = [self._prepare_image_for_mtcnn(image) for image in image_list]
+        result: list[list[Detection]] = [[] for _ in image_list]
+
+        # MTCNN batched detect expects equal HxW. Group by shape to preserve
+        # most batching benefits while supporting mixed-size inputs.
+        groups: dict[tuple[int, int], list[tuple[int, torch.Tensor]]] = defaultdict(list)
+        for idx, img in enumerate(prepared):
+            if img is None:
                 continue
-            if image.max() <= 1.01:
-                image_for_mtcnn = (image * 255).byte()
-            else:
-                image_for_mtcnn = image.byte()
-            if image_for_mtcnn.shape[0] == 3:
-                image_for_mtcnn = image_for_mtcnn.permute(1, 2, 0)
-            prepared.append(image_for_mtcnn)
+            h, w = int(img.shape[0]), int(img.shape[1])
+            groups[(h, w)].append((idx, img))
 
-        with torch.no_grad():
-            boxes_b, probs_b, landmarks_b = self._mtcnn.detect(prepared, landmarks=True)
+        for _, items in groups.items():
+            indices = [idx for idx, _ in items]
+            tensors = [img for _, img in items]
+            try:
+                with torch.no_grad():
+                    boxes_b, probs_b, landmarks_b = self._mtcnn.detect(tensors, landmarks=True)
 
-        if boxes_b is None:
-            return [[] for _ in prepared]
+                if boxes_b is None:
+                    continue
 
-        # facenet_pytorch returns ndarray/object arrays for batch mode.
-        result: list[list[Detection]] = []
-        for idx in range(len(prepared)):
-            boxes = boxes_b[idx] if idx < len(boxes_b) else None
-            probs = probs_b[idx] if probs_b is not None and idx < len(probs_b) else None
-            landmarks = landmarks_b[idx] if landmarks_b is not None and idx < len(landmarks_b) else None
-            result.append(self._postprocess_single_detect(boxes, probs, landmarks))
+                for local_idx, global_idx in enumerate(indices):
+                    boxes = boxes_b[local_idx] if local_idx < len(boxes_b) else None
+                    probs = probs_b[local_idx] if probs_b is not None and local_idx < len(probs_b) else None
+                    landmarks = landmarks_b[local_idx] if landmarks_b is not None and local_idx < len(landmarks_b) else None
+                    result[global_idx] = self._postprocess_single_detect(boxes, probs, landmarks)
+            except Exception as exc:
+                logger.warning("MTCNN shape-group batch detect failed; falling back per image: %s", exc)
+                for global_idx in indices:
+                    img = prepared[global_idx]
+                    if img is None:
+                        continue
+                    result[global_idx] = self.detect(img)
+
         return result
+
+    def _prepare_image_for_mtcnn(self, image: torch.Tensor | None) -> torch.Tensor | None:
+        if image is None:
+            return None
+        if not torch.is_tensor(image):
+            return None
+        if image.numel() == 0:
+            return None
+
+        img = image.detach()
+        if img.max() <= 1.01:
+            img = (img * 255).byte()
+        else:
+            img = img.byte()
+        if img.dim() == 3 and img.shape[0] == 3:
+            img = img.permute(1, 2, 0)
+
+        # facenet_pytorch detect stacks to numpy internally; keep on CPU.
+        return img.contiguous().cpu()
 
     def _postprocess_single_detect(self, boxes, probs, landmarks) -> list[Detection]:
         # Guard against empty lists returned by facenet_pytorch (causes cat() error)
