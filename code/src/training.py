@@ -78,6 +78,7 @@ def parse_args():
 
     # Dataset & Split
     parser.add_argument("--train_fraction", type=float, default=0.8, help="Fraction of identities used for training")
+    parser.add_argument("--batch_size", type=int, default=1, help="Logical tuple batch size; each tuple is (x1, x2, y), so physical samples per step are 3*batch_size")
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities (useful for debugging)")
     parser.add_argument("--max_samples_per_identity", type=int, default=None, help="Cap samples per identity (images) or videos per identity (video datasets)")
     parser.add_argument("--shuffle_batches", dest="shuffle_batches", action="store_true", help="Shuffle training batches each epoch")
@@ -147,6 +148,8 @@ def parse_args():
 def main():
     args = parse_args()
     configure_logging()
+    if args.batch_size < 1:
+        raise ValueError(f"--batch_size must be >= 1, got {args.batch_size}")
     device = torch.device(args.device)
 
     if not args.input_dir.exists():
@@ -257,7 +260,7 @@ def main():
         seed=args.seed,
         max_identities=args.max_identities,
         max_samples_per_identity=args.max_samples_per_identity,
-        batch_size=3,
+        batch_size=args.batch_size,
         identity_batching=True,
         shuffle_train=args.shuffle_batches,
         batch_seed=batch_seed,

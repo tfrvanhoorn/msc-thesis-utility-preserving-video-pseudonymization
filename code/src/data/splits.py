@@ -156,6 +156,7 @@ def build_dataloader_for_identities(
             identity_to_index,
             shuffle_identities=shuffle,
             seed=batch_seed,
+            tuples_per_batch=max(1, int(batch_size)),
         )
         return DataLoader(batched_dataset, batch_size=None, shuffle=False, num_workers=num_workers)
 

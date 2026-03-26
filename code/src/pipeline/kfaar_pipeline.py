@@ -407,12 +407,17 @@ class KfaarPipeline:
             torch.Tensor,
         ]
     ]:
-        
+
         device = self.device
         batch_size = frames.shape[0]
+        if batch_size % 3 != 0:
+            raise ValueError(
+                f"Identity tuple batching expects sample count divisible by 3, got batch_size={batch_size}"
+            )
+
         seq_lens_list = [int(x) for x in (seq_lens.tolist() if torch.is_tensor(seq_lens) else seq_lens)]
 
-        sample_records: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        sample_records: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
         proj_norm_terms = []
         w_reg_terms: list[torch.Tensor] = []
         nondet_faces = 0
@@ -458,75 +463,87 @@ class KfaarPipeline:
                     w_reg_terms.append((res2.w_pre_boundary - w_avg_res2).pow(2).mean())
 
             nondet_faces += int((~res1.gen_mask).sum().item() + (~res2.gen_mask).sum().item())
-            
+
             mask = res1.valid_mask & res2.valid_mask
-            
+
             # Track frames where we could not form a valid pair (input or gen missing)
             det_failures += int((~mask).sum().item())
 
-            if mask.any():
+            valid_scalar = bool(mask.any().item())
+            if valid_scalar:
                 # Collapse any frame-level detections to one representative feature
-                # vector per source sample so batch tuple semantics remain stable.
-                sample_records.append(
-                    (
-                        label_int,
-                        res1.real_embeddings[mask].mean(dim=0, keepdim=True),
-                        res1.virtual_embeddings[mask].mean(dim=0, keepdim=True),
-                        res2.virtual_embeddings[mask].mean(dim=0, keepdim=True),
-                    )
+                # vector per source sample so triplet semantics remain stable.
+                real_e = res1.real_embeddings[mask].mean(dim=0, keepdim=True)
+                v1_e = res1.virtual_embeddings[mask].mean(dim=0, keepdim=True)
+                v2_e = res2.virtual_embeddings[mask].mean(dim=0, keepdim=True)
+            else:
+                real_e = torch.zeros((1, 512), device=device)
+                v1_e = torch.zeros((1, 512), device=device)
+                v2_e = torch.zeros((1, 512), device=device)
+
+            sample_records.append(
+                (
+                    torch.tensor(valid_scalar, device=device, dtype=torch.bool),
+                    real_e,
+                    v1_e,
+                    v2_e,
+                    labels[b] if torch.is_tensor(labels) else torch.tensor(label_int, device=device, dtype=torch.long),
                 )
+            )
 
         proj_norm = torch.stack(proj_norm_terms).mean() if proj_norm_terms else torch.tensor(0.0, device=device)
         w_reg = torch.stack(w_reg_terms).mean() if w_reg_terms else torch.tensor(0.0, device=device)
 
-        # --- VALIDATION GATE ---
-        if not sample_records:
+        tuple_ano_terms: list[torch.Tensor] = []
+        tuple_syn_terms: list[torch.Tensor] = []
+        tuple_div_terms: list[torch.Tensor] = []
+        tuple_dif_terms: list[torch.Tensor] = []
+
+        tuple_count = batch_size // 3
+        for tuple_idx in range(tuple_count):
+            i = 3 * tuple_idx
+            x1_valid, x1_real, x1_v1, x1_v2, x1_label = sample_records[i]
+            x2_valid, _x2_real, x2_v1, _x2_v2, x2_label = sample_records[i + 1]
+            y_valid, _y_real, y_v1, _y_v2, y_label = sample_records[i + 2]
+
+            # Guard semantic tuple layout: (x1, x2, y) = (same id, same id, different id)
+            if bool((x1_label != x2_label).item()) or bool((x1_label == y_label).item()):
+                raise ValueError(
+                    "Invalid tuple identity pattern; expected x1/x2 same identity and y different identity"
+                )
+
+            tuple_valid = bool((x1_valid & x2_valid & y_valid).item())
+            if not tuple_valid:
+                continue
+
+            # Losses are computed strictly within each tuple (no cross-tuple pairing).
+            tuple_ano_terms.append(cosine_loss(x1_v1, x1_real, label=-1, margin=margin))
+            tuple_div_terms.append(cosine_loss(x1_v1, x1_v2, label=-1, margin=margin))
+            tuple_syn_terms.append(cosine_loss(x1_v1, x2_v1, label=1, margin=margin))
+            tuple_dif_terms.append(cosine_loss(x1_v1, y_v1, label=-1, margin=margin))
+
+        has_valid_tuple = len(tuple_ano_terms) > 0
+        if has_valid_tuple:
+            ano = torch.stack(tuple_ano_terms).mean()
+            syn = torch.stack(tuple_syn_terms).mean()
+            div = torch.stack(tuple_div_terms).mean()
+            dif = torch.stack(tuple_dif_terms).mean()
+            penalty_missing_pairs = proj_norm * (0.1 * float(det_failures))
+        else:
             ano = syn = div = dif = torch.tensor(0.0, device=device)
             penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
-            penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet + (lambda_w_reg * w_reg)
-            return ano, syn, div, dif, w_reg, total
 
-        grouped: dict[int, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = {}
-        for label_int, real_e, v1_e, v2_e in sample_records:
-            grouped.setdefault(label_int, []).append((real_e, v1_e, v2_e))
-
-        labels_with_two = [label for label, records in grouped.items() if len(records) >= 2]
-        if not labels_with_two:
-            ano = syn = div = dif = torch.tensor(0.0, device=device)
-            penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
-            penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet + (lambda_w_reg * w_reg)
-            return ano, syn, div, dif, w_reg, total
-
-        label_a = labels_with_two[0]
-        label_b = next((label for label in grouped if label != label_a and len(grouped[label]) >= 1), None)
-        if label_b is None:
-            ano = syn = div = dif = torch.tensor(0.0, device=device)
-            penalty_missing_pairs = proj_norm * (1.0 + 0.5 * float(det_failures))
-            penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
-            total = penalty_missing_pairs + penalty_nondet + (lambda_w_reg * w_reg)
-            return ano, syn, div, dif, w_reg, total
-
-        a1_real, a1_v1, a1_v2 = grouped[label_a][0]
-        _a2_real, a2_v1, _a2_v2 = grouped[label_a][1]
-        _b1_real, b1_v1, _b1_v2 = grouped[label_b][0]
-
-        # Enforce one-pair losses for each objective on the tuple:
-        # ano: A1_k1 vs A1_real
-        # div: A1_k1 vs A1_k2
-        # syn: A1_k1 vs A2_k1
-        # dif: A1_k1 vs B1_k1
-        ano = cosine_loss(a1_v1, a1_real, label=-1, margin=margin)
-        div = cosine_loss(a1_v1, a1_v2, label=-1, margin=margin)
-        syn = cosine_loss(a1_v1, a2_v1, label=1, margin=margin)
-        dif = cosine_loss(a1_v1, b1_v1, label=-1, margin=margin)
-
-        penalty_missing_pairs = proj_norm * (0.1 * float(det_failures))
         penalty_nondet = proj_norm * (2.0 * float(nondet_faces))
 
-        total = (lambda_ano * ano + lambda_syn * syn + 
-            lambda_div * div + lambda_dif * dif + (lambda_w_reg * w_reg) + penalty_nondet + penalty_missing_pairs)
+        total = (
+            lambda_ano * ano
+            + lambda_syn * syn
+            + lambda_div * div
+            + lambda_dif * dif
+            + (lambda_w_reg * w_reg)
+            + penalty_nondet
+            + penalty_missing_pairs
+        )
 
         return ano, syn, div, dif, w_reg, total
 

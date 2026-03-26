@@ -776,10 +776,9 @@ def unified_video_collate_fn(
 class IdentityBatchingDataset(IterableDataset):
     """Emit no-reuse tuple batches for CelebA-style projector training.
 
-    Each yielded batch contains exactly three source samples arranged as:
-    two samples from identity A and one sample from identity B. The training
-    pipeline then maps those to the loss tuple
-    (A1_key1, A1_key2, A2_key1, B1_key1).
+    Each tuple contains exactly three source samples arranged as:
+    two samples from identity A and one sample from identity B. A yielded
+    batch may contain one or more such tuples.
     """
 
     def __init__(
@@ -789,11 +788,13 @@ class IdentityBatchingDataset(IterableDataset):
         *,
         shuffle_identities: bool = True,
         seed: int | None = None,
+        tuples_per_batch: int = 1,
     ) -> None:
         self.sample_index = sample_index
         self.identity_to_index = identity_to_index
         self.shuffle_identities = shuffle_identities
         self._rng = random.Random(seed)
+        self.tuples_per_batch = max(1, int(tuples_per_batch))
 
     def _pad_sequence(self, seq: torch.Tensor, target_len: int) -> torch.Tensor:
         if seq.shape[0] >= target_len:
@@ -877,55 +878,67 @@ class IdentityBatchingDataset(IterableDataset):
                 pools[identity] = refs
 
         while True:
-            candidates_a = [identity for identity, refs in pools.items() if len(refs) >= 2]
-            if not candidates_a:
-                break
+            loaded_batch_samples: list[tuple[str, torch.Tensor, str, str]] = []
+            completed_tuples = 0
 
-            if self.shuffle_identities:
-                a_identity = self._rng.choice(candidates_a)
-            else:
-                a_identity = sorted(candidates_a)[0]
-
-            candidates_b = [identity for identity, refs in pools.items() if identity != a_identity and len(refs) >= 1]
-            if not candidates_b:
-                break
-
-            if self.shuffle_identities:
-                b_identity = self._rng.choice(candidates_b)
-            else:
-                b_identity = sorted(candidates_b)[0]
-
-            requested = [(a_identity, 2), (b_identity, 1)]
-            loaded_samples: list[tuple[str, torch.Tensor, str, str]] = []
-            missing_required = False
-
-            for identity, needed in requested:
-                taken = 0
-                while taken < needed:
-                    refs = pools.get(identity, [])
-                    if not refs:
-                        missing_required = True
-                        break
-
-                    # Consume once popped, regardless of load success.
-                    ref = refs.pop()
-                    frames, ctx, source_id = self._load_reference(ref)
-                    if frames is None:
-                        continue
-                    loaded_samples.append((identity, frames, ctx, source_id))
-                    taken += 1
-
-                if missing_required:
+            while completed_tuples < self.tuples_per_batch:
+                candidates_a = [identity for identity, refs in pools.items() if len(refs) >= 2]
+                if not candidates_a:
                     break
 
-            # Keep only identities that still have remaining references.
-            pools = {identity: refs for identity, refs in pools.items() if refs}
+                if self.shuffle_identities:
+                    a_identity = self._rng.choice(candidates_a)
+                else:
+                    a_identity = sorted(candidates_a)[0]
 
-            if missing_required:
-                continue
+                candidates_b = [identity for identity, refs in pools.items() if identity != a_identity and len(refs) >= 1]
+                if not candidates_b:
+                    break
 
-            batch = self._build_tensor_batch(loaded_samples)
-            if batch is not None and int(batch["frames"].shape[0]) == 3:
+                if self.shuffle_identities:
+                    b_identity = self._rng.choice(candidates_b)
+                else:
+                    b_identity = sorted(candidates_b)[0]
+
+                requested = [(a_identity, 2), (b_identity, 1)]
+                loaded_tuple_samples: list[tuple[str, torch.Tensor, str, str]] = []
+                missing_required = False
+
+                for identity, needed in requested:
+                    taken = 0
+                    while taken < needed:
+                        refs = pools.get(identity, [])
+                        if not refs:
+                            missing_required = True
+                            break
+
+                        # Consume once popped, regardless of load success.
+                        ref = refs.pop()
+                        frames, ctx, source_id = self._load_reference(ref)
+                        if frames is None:
+                            continue
+                        loaded_tuple_samples.append((identity, frames, ctx, source_id))
+                        taken += 1
+
+                    if missing_required:
+                        break
+
+                # Keep only identities that still have remaining references.
+                pools = {identity: refs for identity, refs in pools.items() if refs}
+
+                if missing_required:
+                    continue
+
+                if len(loaded_tuple_samples) == 3:
+                    loaded_batch_samples.extend(loaded_tuple_samples)
+                    completed_tuples += 1
+
+            if completed_tuples < self.tuples_per_batch:
+                break
+
+            batch = self._build_tensor_batch(loaded_batch_samples)
+            expected_samples = 3 * self.tuples_per_batch
+            if batch is not None and int(batch["frames"].shape[0]) == expected_samples:
                 yield batch
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
