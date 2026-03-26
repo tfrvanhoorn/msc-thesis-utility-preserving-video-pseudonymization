@@ -426,8 +426,6 @@ class KfaarPipeline:
         if (
             not use_face_swapper
             and self.stylegan is not None
-            and hasattr(self.detector, "detect_batch")
-            and hasattr(self.aligner, "align_batch")
         ):
             try:
                 center_indices = [max(0, (seq_lens_list[b] - 1) // 2) for b in range(batch_size)]
@@ -435,9 +433,14 @@ class KfaarPipeline:
 
                 def _extract_embeddings_from_images(images_b: torch.Tensor, *, with_grad: bool) -> tuple[torch.Tensor, torch.Tensor]:
                     image_list = [images_b[i] for i in range(images_b.shape[0])]
-                    detections_b = self.detector.detect_batch(image_list)  # type: ignore[attr-defined]
-                    top_dets = [max(dets, key=lambda d: d.score) if dets else None for dets in detections_b]
-                    aligned_b = self.aligner.align_batch(image_list, top_dets)  # type: ignore[attr-defined]
+                    aligned_b: list[torch.Tensor] = []
+                    for image in image_list:
+                        dets = self.detector.detect(image)
+                        if dets:
+                            top = max(dets, key=lambda d: d.score)
+                            aligned_b.append(self.aligner.align(image, top).to(device))
+                        else:
+                            aligned_b.append(torch.empty(0, device=device))
 
                     emb = torch.zeros((batch_size, 512), device=device)
                     valid = torch.zeros(batch_size, device=device, dtype=torch.bool)
