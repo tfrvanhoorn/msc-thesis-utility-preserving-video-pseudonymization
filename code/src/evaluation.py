@@ -244,6 +244,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_identities", type=int, default=None, help="Optional cap on number of identities to evaluate")
     parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Optional cap on number of videos per identity to evaluate")
     parser.add_argument(
+        "--identities_per_batch",
+        type=int,
+        default=4,
+        help="Identity block size used when aggregating differentiation at the end",
+    )
+    parser.add_argument(
+        "--keys_per_batch",
+        type=int,
+        default=256,
+        help="Embedding chunk size used for diversity/differentiation aggregation",
+    )
+    parser.add_argument(
         "--metrics",
         type=str,
         default="detection,anonymization,synchronism,diversity,differentiation,geometric,lpips,ssim",
@@ -472,6 +484,10 @@ def main() -> None:
         raise ValueError("--max_identities must be > 0 when provided")
     if args.max_videos_per_identity is not None and args.max_videos_per_identity <= 0:
         raise ValueError("--max_videos_per_identity must be > 0 when provided")
+    if args.identities_per_batch <= 0:
+        raise ValueError("--identities_per_batch must be > 0")
+    if args.keys_per_batch <= 0:
+        raise ValueError("--keys_per_batch must be > 0")
 
     try:
         entries, num_keys = _load_entries_from_prepared_dirs(
@@ -520,6 +536,8 @@ def main() -> None:
         differentiation_threshold=float(args.diff_threshold),
         lpips_net=args.lpips_net,
         lpips_cache_dir=str(args.lpips_cache_dir) if args.lpips_cache_dir is not None else None,
+        identities_per_batch=int(args.identities_per_batch),
+        keys_per_batch=int(args.keys_per_batch),
     )
 
     detector = MTCNNDetector(
@@ -561,8 +579,8 @@ def main() -> None:
     batch_processing_start_time = time.perf_counter()
     total_samples = 0
 
-    diff_embeddings: list[torch.Tensor] = []
-    diff_labels: list[int] = []
+    diff_embeddings_by_label: dict[int, list[torch.Tensor]] = {}
+    diversity_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     try:
         with torch.no_grad():
@@ -654,15 +672,14 @@ def main() -> None:
                 if "synchronism" in enabled_metrics and valid_virtual.numel() > 0:
                     metrics.add_synchronism_embeddings(label, valid_virtual, source_id=entry.source_id)
                 if "differentiation" in enabled_metrics and valid_virtual.numel() > 0:
-                    diff_embeddings.append(valid_virtual.detach())
-                    diff_labels.extend([label] * valid_virtual.shape[0])
+                    diff_embeddings_by_label.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
 
                 for key_a, key_b in itertools.combinations(eval_key_names, 2):
                     emb_a, mask_a, _ = key_results[key_a]
                     emb_b, mask_b, _ = key_results[key_b]
                     pair_mask = input_mask & mask_a & mask_b
                     if diversity_enabled and pair_mask.any():
-                        metrics.update_diversity(emb_a[pair_mask], emb_b[pair_mask])
+                        diversity_pairs.append((emb_a[pair_mask].detach().to("cpu"), emb_b[pair_mask].detach().to("cpu")))
 
                 if "geometric" in enabled_metrics:
                     for key_name in eval_key_names:
@@ -682,10 +699,41 @@ def main() -> None:
 
                 total_samples += 1
 
-        if "differentiation" in enabled_metrics and diff_embeddings:
-            diff_embeds = torch.cat(diff_embeddings, dim=0)
-            diff_lbl = torch.tensor(diff_labels, device=diff_embeds.device, dtype=torch.long)
-            metrics.update_differentiation(diff_embeds, diff_lbl)
+        if "diversity" in enabled_metrics and diversity_pairs:
+            _log_pipe(
+                "diversity_aggregation_start",
+                pair_groups=len(diversity_pairs),
+                keys_per_batch=int(args.keys_per_batch),
+            )
+            diversity_progress = tqdm(diversity_pairs, desc="Aggregating diversity", unit="pair")
+            try:
+                for emb_a_cpu, emb_b_cpu in diversity_progress:
+                    metrics.update_diversity(emb_a_cpu, emb_b_cpu, chunk_size=args.keys_per_batch)
+            finally:
+                diversity_progress.close()
+            _log_pipe(
+                "diversity_aggregation_end",
+                pair_groups=len(diversity_pairs),
+            )
+
+        if "differentiation" in enabled_metrics and diff_embeddings_by_label:
+            _log_pipe(
+                "differentiation_aggregation_start",
+                identities=len(diff_embeddings_by_label),
+                identities_per_batch=int(args.identities_per_batch),
+                keys_per_batch=int(args.keys_per_batch),
+            )
+            metrics.update_differentiation_batched(
+                diff_embeddings_by_label,
+                identities_per_batch=args.identities_per_batch,
+                key_chunk_size=args.keys_per_batch,
+                show_progress=True,
+                progress_desc="Aggregating differentiation",
+            )
+            _log_pipe(
+                "differentiation_aggregation_end",
+                identities=len(diff_embeddings_by_label),
+            )
 
     finally:
         geometric_evaluator.close()

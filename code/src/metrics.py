@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 
 @dataclass
@@ -89,7 +90,13 @@ class MetricsAccumulator:
         bucket = buckets.setdefault(src, [])
         bucket.extend([e.detach().cpu() for e in embeddings])
 
-    def update_diversity(self, key1_embeddings: torch.Tensor, key2_embeddings: torch.Tensor) -> None:
+    def update_diversity(
+        self,
+        key1_embeddings: torch.Tensor,
+        key2_embeddings: torch.Tensor,
+        *,
+        chunk_size: int | None = None,
+    ) -> None:
         """Score same-identity, cross-key embedding pairs for diversity success."""
 
         if key1_embeddings is None or key2_embeddings is None:
@@ -99,14 +106,26 @@ class MetricsAccumulator:
 
         k1 = key1_embeddings
         k2 = key2_embeddings
-        cos = F.cosine_similarity(k1.unsqueeze(1), k2.unsqueeze(0), dim=-1).reshape(-1)
-        successes = (cos < self.diversity_threshold).sum().item()
-        self.diversity_success += int(successes)
-        self.diversity_total += int(cos.numel())
-        if self.compute_auc_eer:
-            self._diversity_scores.extend(cos.detach().cpu().tolist())
+        size = int(chunk_size) if chunk_size is not None else max(int(k1.shape[0]), 1)
+        size = max(size, 1)
+        for start_i in range(0, int(k1.shape[0]), size):
+            chunk_i = k1[start_i : start_i + size]
+            for start_j in range(0, int(k2.shape[0]), size):
+                chunk_j = k2[start_j : start_j + size]
+                cos = F.cosine_similarity(chunk_i.unsqueeze(1), chunk_j.unsqueeze(0), dim=-1).reshape(-1)
+                successes = (cos < self.diversity_threshold).sum().item()
+                self.diversity_success += int(successes)
+                self.diversity_total += int(cos.numel())
+                if self.compute_auc_eer:
+                    self._diversity_scores.extend(cos.detach().cpu().tolist())
 
-    def update_differentiation(self, embeddings: torch.Tensor, labels: torch.Tensor) -> None:
+    def update_differentiation(
+        self,
+        embeddings: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        chunk_size: int | None = None,
+    ) -> None:
         """Score cross-identity pairs under the same key for differentiation success."""
 
         if embeddings is None or labels is None:
@@ -122,25 +141,100 @@ class MetricsAccumulator:
         if embeds.shape[0] < 2:
             return
 
-        idx = torch.arange(embeds.shape[0], device=embeds.device)
-        pairs = torch.combinations(idx, r=2, with_replacement=False)
-        if pairs.numel() == 0:
-            return
-        label_a = lbls[pairs[:, 0]]
-        label_b = lbls[pairs[:, 1]]
-        cross_mask = label_a != label_b
-        if not cross_mask.any():
+        embeddings_by_label: Dict[int, List[torch.Tensor]] = {}
+        unique_labels = torch.unique(lbls)
+        for label in unique_labels.tolist():
+            mask = lbls == int(label)
+            selected = embeds[mask]
+            if selected.numel() == 0:
+                continue
+            embeddings_by_label[int(label)] = [selected.detach().cpu()]
+
+        self.update_differentiation_batched(
+            embeddings_by_label,
+            identities_per_batch=None,
+            key_chunk_size=chunk_size,
+            show_progress=False,
+        )
+
+    def update_differentiation_batched(
+        self,
+        embeddings_by_label: Dict[int, List[torch.Tensor]],
+        *,
+        identities_per_batch: int | None = None,
+        key_chunk_size: int | None = None,
+        show_progress: bool = False,
+        progress_desc: str = "Aggregating differentiation",
+    ) -> None:
+        if not embeddings_by_label:
             return
 
-        pairs = pairs[cross_mask]
-        a = embeds[pairs[:, 0]]
-        b = embeds[pairs[:, 1]]
-        cos = F.cosine_similarity(a, b, dim=1)
-        successes = (cos < self.differentiation_threshold).sum().item()
-        self.differentiation_success += int(successes)
-        self.differentiation_total += int(cos.numel())
-        if self.compute_auc_eer:
-            self._differentiation_scores.extend(cos.detach().cpu().tolist())
+        merged: Dict[int, torch.Tensor] = {}
+        for label, chunks in embeddings_by_label.items():
+            if not chunks:
+                continue
+            valid_chunks = [chunk for chunk in chunks if chunk is not None and chunk.numel() > 0]
+            if not valid_chunks:
+                continue
+            merged[int(label)] = torch.cat(valid_chunks, dim=0)
+
+        labels = sorted(merged.keys())
+        if len(labels) < 2:
+            return
+
+        identity_block_size = int(identities_per_batch) if identities_per_batch is not None else len(labels)
+        identity_block_size = max(identity_block_size, 1)
+
+        pair_total = (len(labels) * (len(labels) - 1)) // 2
+        progress = tqdm(total=pair_total, desc=progress_desc, unit="pair") if show_progress else None
+
+        try:
+            for block_i_start in range(0, len(labels), identity_block_size):
+                block_i = labels[block_i_start : block_i_start + identity_block_size]
+                for block_j_start in range(block_i_start, len(labels), identity_block_size):
+                    block_j = labels[block_j_start : block_j_start + identity_block_size]
+                    same_block = block_i_start == block_j_start
+
+                    for idx_i, label_i in enumerate(block_i):
+                        start_j_idx = idx_i + 1 if same_block else 0
+                        for idx_j in range(start_j_idx, len(block_j)):
+                            label_j = block_j[idx_j]
+                            emb_i = merged[label_i]
+                            emb_j = merged[label_j]
+                            self._update_differentiation_identity_pair(
+                                emb_i,
+                                emb_j,
+                                key_chunk_size=key_chunk_size,
+                            )
+                            if progress is not None:
+                                progress.update(1)
+        finally:
+            if progress is not None:
+                progress.close()
+
+    def _update_differentiation_identity_pair(
+        self,
+        emb_i: torch.Tensor,
+        emb_j: torch.Tensor,
+        *,
+        key_chunk_size: int | None = None,
+    ) -> None:
+        if emb_i.numel() == 0 or emb_j.numel() == 0:
+            return
+
+        chunk = int(key_chunk_size) if key_chunk_size is not None else max(int(emb_i.shape[0]), int(emb_j.shape[0]), 1)
+        chunk = max(chunk, 1)
+
+        for start_i in range(0, int(emb_i.shape[0]), chunk):
+            chunk_i = emb_i[start_i : start_i + chunk]
+            for start_j in range(0, int(emb_j.shape[0]), chunk):
+                chunk_j = emb_j[start_j : start_j + chunk]
+                cos = F.cosine_similarity(chunk_i.unsqueeze(1), chunk_j.unsqueeze(0), dim=-1).reshape(-1)
+                successes = (cos < self.differentiation_threshold).sum().item()
+                self.differentiation_success += int(successes)
+                self.differentiation_total += int(cos.numel())
+                if self.compute_auc_eer:
+                    self._differentiation_scores.extend(cos.detach().cpu().tolist())
 
     def update_geometric_utility(
         self,
