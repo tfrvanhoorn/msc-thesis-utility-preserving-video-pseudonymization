@@ -31,16 +31,16 @@ class MetricsAccumulator:
     differentiation_total: int = 0
     diversity_success: int = 0
     diversity_total: int = 0
-    geometric_head_posture_error_sum: float = 0.0
-    geometric_facial_expression_error_sum: float = 0.0
-    geometric_pairs_valid: int = 0
-    geometric_pairs_invalid: int = 0
+    landmark_distance_sum: float = 0.0
+    landmark_pairs_valid: int = 0
+    landmark_pairs_invalid: int = 0
     lpips_distance_sum: float = 0.0
     lpips_pairs_valid: int = 0
     lpips_pairs_invalid: int = 0
     ssim_similarity_sum: float = 0.0
     ssim_pairs_valid: int = 0
     ssim_pairs_invalid: int = 0
+    synchronism_chunk_size: int = 256
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
     _anonymization_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _synchronism_total_scores: List[float] = field(default_factory=list, init=False, repr=False)
@@ -95,7 +95,7 @@ class MetricsAccumulator:
         key1_embeddings: torch.Tensor,
         key2_embeddings: torch.Tensor,
         *,
-        chunk_size: int | None = None,
+        embedding_chunk_size: int | None = None,
     ) -> None:
         """Score same-identity, cross-key embedding pairs for diversity success."""
 
@@ -106,7 +106,7 @@ class MetricsAccumulator:
 
         k1 = key1_embeddings
         k2 = key2_embeddings
-        size = int(chunk_size) if chunk_size is not None else max(int(k1.shape[0]), 1)
+        size = int(embedding_chunk_size) if embedding_chunk_size is not None else max(int(k1.shape[0]), 1)
         size = max(size, 1)
         for start_i in range(0, int(k1.shape[0]), size):
             chunk_i = k1[start_i : start_i + size]
@@ -124,7 +124,7 @@ class MetricsAccumulator:
         embeddings: torch.Tensor,
         labels: torch.Tensor,
         *,
-        chunk_size: int | None = None,
+        embedding_chunk_size: int | None = None,
     ) -> None:
         """Score cross-identity pairs under the same key for differentiation success."""
 
@@ -152,8 +152,8 @@ class MetricsAccumulator:
 
         self.update_differentiation_batched(
             embeddings_by_label,
-            identities_per_batch=None,
-            key_chunk_size=chunk_size,
+            identity_block_size=None,
+            embedding_chunk_size=embedding_chunk_size,
             show_progress=False,
         )
 
@@ -161,8 +161,8 @@ class MetricsAccumulator:
         self,
         embeddings_by_label: Dict[int, List[torch.Tensor]],
         *,
-        identities_per_batch: int | None = None,
-        key_chunk_size: int | None = None,
+        identity_block_size: int | None = None,
+        embedding_chunk_size: int | None = None,
         show_progress: bool = False,
         progress_desc: str = "Aggregating differentiation",
     ) -> None:
@@ -182,17 +182,17 @@ class MetricsAccumulator:
         if len(labels) < 2:
             return
 
-        identity_block_size = int(identities_per_batch) if identities_per_batch is not None else len(labels)
-        identity_block_size = max(identity_block_size, 1)
+        block_size = int(identity_block_size) if identity_block_size is not None else len(labels)
+        block_size = max(block_size, 1)
 
         pair_total = (len(labels) * (len(labels) - 1)) // 2
         progress = tqdm(total=pair_total, desc=progress_desc, unit="pair") if show_progress else None
 
         try:
-            for block_i_start in range(0, len(labels), identity_block_size):
-                block_i = labels[block_i_start : block_i_start + identity_block_size]
-                for block_j_start in range(block_i_start, len(labels), identity_block_size):
-                    block_j = labels[block_j_start : block_j_start + identity_block_size]
+            for block_i_start in range(0, len(labels), block_size):
+                block_i = labels[block_i_start : block_i_start + block_size]
+                for block_j_start in range(block_i_start, len(labels), block_size):
+                    block_j = labels[block_j_start : block_j_start + block_size]
                     same_block = block_i_start == block_j_start
 
                     for idx_i, label_i in enumerate(block_i):
@@ -204,7 +204,7 @@ class MetricsAccumulator:
                             self._update_differentiation_identity_pair(
                                 emb_i,
                                 emb_j,
-                                key_chunk_size=key_chunk_size,
+                                embedding_chunk_size=embedding_chunk_size,
                             )
                             if progress is not None:
                                 progress.update(1)
@@ -217,12 +217,12 @@ class MetricsAccumulator:
         emb_i: torch.Tensor,
         emb_j: torch.Tensor,
         *,
-        key_chunk_size: int | None = None,
+        embedding_chunk_size: int | None = None,
     ) -> None:
         if emb_i.numel() == 0 or emb_j.numel() == 0:
             return
 
-        chunk = int(key_chunk_size) if key_chunk_size is not None else max(int(emb_i.shape[0]), int(emb_j.shape[0]), 1)
+        chunk = int(embedding_chunk_size) if embedding_chunk_size is not None else max(int(emb_i.shape[0]), int(emb_j.shape[0]), 1)
         chunk = max(chunk, 1)
 
         for start_i in range(0, int(emb_i.shape[0]), chunk):
@@ -236,18 +236,13 @@ class MetricsAccumulator:
                 if self.compute_auc_eer:
                     self._differentiation_scores.extend(cos.detach().cpu().tolist())
 
-    def update_geometric_utility(
-        self,
-        head_posture_error: float | None,
-        facial_expression_error: float | None,
-    ) -> None:
-        if head_posture_error is None or facial_expression_error is None:
-            self.geometric_pairs_invalid += 1
+    def update_landmark_distance(self, distance: float | None) -> None:
+        if distance is None:
+            self.landmark_pairs_invalid += 1
             return
 
-        self.geometric_head_posture_error_sum += float(head_posture_error)
-        self.geometric_facial_expression_error_sum += float(facial_expression_error)
-        self.geometric_pairs_valid += 1
+        self.landmark_distance_sum += float(distance)
+        self.landmark_pairs_valid += 1
 
     def update_perceptual_utility(
         self,
@@ -283,16 +278,7 @@ class MetricsAccumulator:
             else None if not self.diversity_enabled else 0.0
         )
         differentiation_success_rate = float(self.differentiation_success) / self.differentiation_total if self.differentiation_total else 0.0
-        geometric_head_posture_error = (
-            self.geometric_head_posture_error_sum / float(self.geometric_pairs_valid)
-            if self.geometric_pairs_valid
-            else None
-        )
-        geometric_facial_expression_error = (
-            self.geometric_facial_expression_error_sum / float(self.geometric_pairs_valid)
-            if self.geometric_pairs_valid
-            else None
-        )
+        landmark_distance = self.landmark_distance_sum / float(self.landmark_pairs_valid) if self.landmark_pairs_valid else None
         lpips_distance = self.lpips_distance_sum / float(self.lpips_pairs_valid) if self.lpips_pairs_valid else None
         ssim_similarity = self.ssim_similarity_sum / float(self.ssim_pairs_valid) if self.ssim_pairs_valid else None
 
@@ -325,8 +311,7 @@ class MetricsAccumulator:
             "synchronism_cross_success_rate": synchronism_cross_success_rate,
             "differentiation_success_rate": differentiation_success_rate,
             "diversity_success_rate": diversity_success_rate,
-            "head_posture_error": geometric_head_posture_error,
-            "facial_expression_error": geometric_facial_expression_error,
+            "landmark_distance": landmark_distance,
             "lpips_distance": lpips_distance,
             "ssim_similarity": ssim_similarity,
             "anonymization": {
@@ -395,12 +380,11 @@ class MetricsAccumulator:
                     "total": int(self.differentiation_total),
                 },
             },
-            "geometric_utility": {
-                "head_posture_error": geometric_head_posture_error,
-                "facial_expression_error": geometric_facial_expression_error,
+            "landmark_utility": {
+                "landmark_distance": landmark_distance,
                 "counts": {
-                    "valid_pairs": int(self.geometric_pairs_valid),
-                    "invalid_pairs": int(self.geometric_pairs_invalid),
+                    "valid_pairs": int(self.landmark_pairs_valid),
+                    "invalid_pairs": int(self.landmark_pairs_invalid),
                 },
             },
             "perceptual_utility": {
@@ -428,8 +412,8 @@ class MetricsAccumulator:
                 "differentiation_total": int(self.differentiation_total),
                 "diversity_success": diversity_success_count,
                 "diversity_total": diversity_total_count,
-                "geometric_pairs_valid": int(self.geometric_pairs_valid),
-                "geometric_pairs_invalid": int(self.geometric_pairs_invalid),
+                "landmark_pairs_valid": int(self.landmark_pairs_valid),
+                "landmark_pairs_invalid": int(self.landmark_pairs_invalid),
                 "lpips_pairs_valid": int(self.lpips_pairs_valid),
                 "lpips_pairs_invalid": int(self.lpips_pairs_invalid),
                 "ssim_pairs_valid": int(self.ssim_pairs_valid),
@@ -537,33 +521,19 @@ class MetricsAccumulator:
             all_embeds = [e for embeds in embeds_by_source.values() for e in embeds]
             if len(all_embeds) >= 1:
                 stack_all = torch.stack(all_embeds, dim=0)
-                idx_all = torch.combinations(torch.arange(stack_all.shape[0]), r=2, with_replacement=True)
-                if idx_all.numel() > 0:
-                    a_all = stack_all[idx_all[:, 0]]
-                    b_all = stack_all[idx_all[:, 1]]
-                    cos_all = F.cosine_similarity(a_all, b_all, dim=1)
-                    successes_all = (cos_all >= self.synchronism_threshold).sum().item()
-                    self.synchronism_success += int(successes_all)
-                    self.synchronism_total += int(cos_all.numel())
-                    if self.compute_auc_eer:
-                        self._synchronism_total_scores.extend(cos_all.detach().cpu().tolist())
+                self._update_synchronism_same_set(stack_all, score_bucket=self._synchronism_total_scores)
 
             # Within-source
             for embeds in embeds_by_source.values():
                 if len(embeds) < 1:
                     continue
                 stack = torch.stack(embeds, dim=0)
-                idx = torch.combinations(torch.arange(stack.shape[0]), r=2, with_replacement=True)
-                if idx.numel() == 0:
-                    continue
-                a = stack[idx[:, 0]]
-                b = stack[idx[:, 1]]
-                cos = F.cosine_similarity(a, b, dim=1)
-                successes = (cos >= self.synchronism_threshold).sum().item()
-                self.synchronism_within_success += int(successes)
-                self.synchronism_within_total += int(cos.numel())
-                if self.compute_auc_eer:
-                    self._synchronism_within_scores.extend(cos.detach().cpu().tolist())
+                self._update_synchronism_same_set(
+                    stack,
+                    success_attr="synchronism_within_success",
+                    total_attr="synchronism_within_total",
+                    score_bucket=self._synchronism_within_scores,
+                )
 
             # Cross-source (different videos for the same identity)
             source_keys = list(embeds_by_source.keys())
@@ -576,11 +546,68 @@ class MetricsAccumulator:
                             continue
                         stack_i = torch.stack(emb_i, dim=0)
                         stack_j = torch.stack(emb_j, dim=0)
-                        cos = F.cosine_similarity(stack_i.unsqueeze(1), stack_j.unsqueeze(0), dim=-1).reshape(-1)
-                        successes = (cos >= self.synchronism_threshold).sum().item()
-                        self.synchronism_cross_success += int(successes)
-                        self.synchronism_cross_total += int(cos.numel())
-                        if self.compute_auc_eer:
-                            self._synchronism_cross_scores.extend(cos.detach().cpu().tolist())
+                        self._update_synchronism_cross_sets(
+                            stack_i,
+                            stack_j,
+                            success_attr="synchronism_cross_success",
+                            total_attr="synchronism_cross_total",
+                            score_bucket=self._synchronism_cross_scores,
+                        )
 
         self._synchronism_computed = True
+
+    def _update_synchronism_same_set(
+        self,
+        embeds: torch.Tensor,
+        *,
+        success_attr: str = "synchronism_success",
+        total_attr: str = "synchronism_total",
+        score_bucket: List[float] | None = None,
+    ) -> None:
+        if embeds.numel() == 0:
+            return
+
+        n = int(embeds.shape[0])
+        chunk = max(int(self.synchronism_chunk_size), 1)
+        for start_i in range(0, n, chunk):
+            end_i = min(start_i + chunk, n)
+            block_i = embeds[start_i:end_i]
+            for start_j in range(start_i, n, chunk):
+                end_j = min(start_j + chunk, n)
+                block_j = embeds[start_j:end_j]
+                cos_mat = F.cosine_similarity(block_i.unsqueeze(1), block_j.unsqueeze(0), dim=-1)
+                if start_i == start_j:
+                    tri = torch.triu_indices(cos_mat.shape[0], cos_mat.shape[1], offset=0, device=cos_mat.device)
+                    vals = cos_mat[tri[0], tri[1]]
+                else:
+                    vals = cos_mat.reshape(-1)
+
+                successes = (vals >= self.synchronism_threshold).sum().item()
+                setattr(self, success_attr, int(getattr(self, success_attr)) + int(successes))
+                setattr(self, total_attr, int(getattr(self, total_attr)) + int(vals.numel()))
+                if self.compute_auc_eer and score_bucket is not None:
+                    score_bucket.extend(vals.detach().cpu().tolist())
+
+    def _update_synchronism_cross_sets(
+        self,
+        emb_a: torch.Tensor,
+        emb_b: torch.Tensor,
+        *,
+        success_attr: str,
+        total_attr: str,
+        score_bucket: List[float] | None = None,
+    ) -> None:
+        if emb_a.numel() == 0 or emb_b.numel() == 0:
+            return
+
+        chunk = max(int(self.synchronism_chunk_size), 1)
+        for start_a in range(0, int(emb_a.shape[0]), chunk):
+            block_a = emb_a[start_a : start_a + chunk]
+            for start_b in range(0, int(emb_b.shape[0]), chunk):
+                block_b = emb_b[start_b : start_b + chunk]
+                vals = F.cosine_similarity(block_a.unsqueeze(1), block_b.unsqueeze(0), dim=-1).reshape(-1)
+                successes = (vals >= self.synchronism_threshold).sum().item()
+                setattr(self, success_attr, int(getattr(self, success_attr)) + int(successes))
+                setattr(self, total_attr, int(getattr(self, total_attr)) + int(vals.numel()))
+                if self.compute_auc_eer and score_bucket is not None:
+                    score_bucket.extend(vals.detach().cpu().tolist())

@@ -34,7 +34,7 @@ if str(EXTERNAL_LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
 from components import FacenetEmbedder, MTCNNAligner, MTCNNDetector  # noqa: E402
-from geometric_metrics import GeometricUtilityEvaluator  # noqa: E402
+from landmark_metrics import LandmarkDistanceEvaluator  # noqa: E402
 from metrics import MetricsAccumulator  # noqa: E402
 from perceptual_metrics import PerceptualEvaluator  # noqa: E402
 from data.prepared import (  # noqa: E402
@@ -54,7 +54,7 @@ SUPPORTED_METRICS = {
     "synchronism",
     "diversity",
     "differentiation",
-    "geometric",
+    "landmark_distance",
     "lpips",
     "ssim",
 }
@@ -153,14 +153,12 @@ def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
         summary["counts"]["differentiation_success"] = 0
         summary["counts"]["differentiation_total"] = 0
 
-    if "geometric" not in enabled:
-        summary["head_posture_error"] = None
-        summary["facial_expression_error"] = None
-        summary["geometric_utility"]["head_posture_error"] = None
-        summary["geometric_utility"]["facial_expression_error"] = None
-        summary["geometric_utility"]["counts"] = {"valid_pairs": 0, "invalid_pairs": 0}
-        summary["counts"]["geometric_pairs_valid"] = 0
-        summary["counts"]["geometric_pairs_invalid"] = 0
+    if "landmark_distance" not in enabled:
+        summary["landmark_distance"] = None
+        summary["landmark_utility"]["landmark_distance"] = None
+        summary["landmark_utility"]["counts"] = {"valid_pairs": 0, "invalid_pairs": 0}
+        summary["counts"]["landmark_pairs_valid"] = 0
+        summary["counts"]["landmark_pairs_invalid"] = 0
 
     if "lpips" not in enabled:
         summary["lpips_distance"] = None
@@ -244,24 +242,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_identities", type=int, default=None, help="Optional cap on number of identities to evaluate")
     parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Optional cap on number of videos per identity to evaluate")
     parser.add_argument(
-        "--identities_per_batch",
+        "--differentiation_identity_block_size",
         type=int,
-        default=4,
-        help="Identity block size used when aggregating differentiation at the end",
+        default=None,
+        help="Number of identities processed per block during end-stage differentiation aggregation",
+    )
+    parser.add_argument(
+        "--diversity_embedding_chunk_size",
+        type=int,
+        default=None,
+        help="Embedding chunk size for end-stage diversity pairwise cosine computation",
+    )
+    parser.add_argument(
+        "--differentiation_embedding_chunk_size",
+        type=int,
+        default=None,
+        help="Embedding chunk size for end-stage differentiation pairwise cosine computation",
+    )
+    parser.add_argument(
+        "--identities_per_batch",
+        dest="legacy_identities_per_batch",
+        type=int,
+        default=None,
+        help="[Deprecated] Use --differentiation_identity_block_size",
     )
     parser.add_argument(
         "--keys_per_batch",
+        dest="legacy_keys_per_batch",
         type=int,
-        default=256,
-        help="Embedding chunk size used for diversity/differentiation aggregation",
+        default=None,
+        help="[Deprecated] Use --diversity_embedding_chunk_size and --differentiation_embedding_chunk_size",
+    )
+    parser.add_argument(
+        "--landmark_shape_predictor",
+        type=Path,
+        default=None,
+        help="Path to dlib shape predictor model file (e.g., shape_predictor_68_face_landmarks.dat)",
+    )
+    parser.add_argument(
+        "--landmark_detector_upsample",
+        type=int,
+        default=0,
+        help="Number of image upsample steps for dlib frontal face detector",
     )
     parser.add_argument(
         "--metrics",
         type=str,
-        default="detection,anonymization,synchronism,diversity,differentiation,geometric,lpips,ssim",
+        default="detection,anonymization,synchronism,diversity,differentiation,landmark_distance,lpips,ssim",
         help=(
             "Comma-separated metrics list (supported: detection, anonymization, synchronism, diversity, "
-            "differentiation, geometric, lpips, ssim; use 'all' for full set)"
+            "differentiation, landmark_distance, lpips, ssim; use 'all' for full set)"
         ),
     )
     parser.add_argument(
@@ -297,13 +327,13 @@ def _collect_detected_faces(
     embedder: FacenetEmbedder,
     sample_frames: torch.Tensor,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     aligned_faces: list[torch.Tensor] = []
     input_mask_list: list[bool] = []
 
     if sample_frames.numel() == 0:
         emb_dim = int(getattr(embedder, "embedding_size", 512))
-        return torch.empty((0, emb_dim), device=device), torch.empty((0,), dtype=torch.bool, device=device), aligned_faces
+        return torch.empty((0, emb_dim), device=device), torch.empty((0,), dtype=torch.bool, device=device)
 
     for frame in sample_frames:
         detections = detector.detect(frame)
@@ -328,7 +358,7 @@ def _collect_detected_faces(
     else:
         emb_dim = int(getattr(embedder, "embedding_size", 512))
         full_embeds = torch.zeros((len(aligned_faces), emb_dim), device=device, dtype=torch.float32)
-    return full_embeds, input_mask, aligned_faces
+    return full_embeds, input_mask
 
 
 def _sorted_sample_keys(keys: list[tuple[str, int]]) -> list[tuple[str, int]]:
@@ -474,8 +504,9 @@ def main() -> None:
     configure_logging()
     device = torch.device(args.device)
     enabled_metrics = _parse_metrics(args.metrics)
-    detection_branch_enabled = bool(enabled_metrics & {"detection", "anonymization", "synchronism", "differentiation", "geometric"})
+    detection_branch_enabled = bool(enabled_metrics & {"detection", "anonymization", "synchronism", "differentiation"})
     diversity_enabled = "diversity" in enabled_metrics
+    landmark_distance_enabled = "landmark_distance" in enabled_metrics
     lpips_enabled = "lpips" in enabled_metrics
     ssim_enabled = "ssim" in enabled_metrics
     perceptual_enabled = lpips_enabled or ssim_enabled
@@ -484,10 +515,42 @@ def main() -> None:
         raise ValueError("--max_identities must be > 0 when provided")
     if args.max_videos_per_identity is not None and args.max_videos_per_identity <= 0:
         raise ValueError("--max_videos_per_identity must be > 0 when provided")
-    if args.identities_per_batch <= 0:
-        raise ValueError("--identities_per_batch must be > 0")
-    if args.keys_per_batch <= 0:
-        raise ValueError("--keys_per_batch must be > 0")
+    if args.landmark_detector_upsample < 0:
+        raise ValueError("--landmark_detector_upsample must be >= 0")
+
+    if args.legacy_identities_per_batch is not None:
+        logging.warning("--identities_per_batch is deprecated; use --differentiation_identity_block_size")
+    if args.legacy_keys_per_batch is not None:
+        logging.warning(
+            "--keys_per_batch is deprecated; use --diversity_embedding_chunk_size and --differentiation_embedding_chunk_size"
+        )
+
+    differentiation_identity_block_size = args.differentiation_identity_block_size
+    if differentiation_identity_block_size is None and args.legacy_identities_per_batch is not None:
+        differentiation_identity_block_size = args.legacy_identities_per_batch
+    if differentiation_identity_block_size is None:
+        differentiation_identity_block_size = 4
+
+    diversity_embedding_chunk_size = args.diversity_embedding_chunk_size
+    differentiation_embedding_chunk_size = args.differentiation_embedding_chunk_size
+    if args.legacy_keys_per_batch is not None:
+        if diversity_embedding_chunk_size is None:
+            diversity_embedding_chunk_size = args.legacy_keys_per_batch
+        if differentiation_embedding_chunk_size is None:
+            differentiation_embedding_chunk_size = args.legacy_keys_per_batch
+    if diversity_embedding_chunk_size is None:
+        diversity_embedding_chunk_size = 256
+    if differentiation_embedding_chunk_size is None:
+        differentiation_embedding_chunk_size = 256
+
+    if differentiation_identity_block_size <= 0:
+        raise ValueError("--differentiation_identity_block_size must be > 0")
+    if diversity_embedding_chunk_size <= 0:
+        raise ValueError("--diversity_embedding_chunk_size must be > 0")
+    if differentiation_embedding_chunk_size <= 0:
+        raise ValueError("--differentiation_embedding_chunk_size must be > 0")
+    if landmark_distance_enabled and args.landmark_shape_predictor is None:
+        raise ValueError("--landmark_shape_predictor is required when landmark_distance metric is enabled")
 
     try:
         entries, num_keys = _load_entries_from_prepared_dirs(
@@ -536,8 +599,11 @@ def main() -> None:
         differentiation_threshold=float(args.diff_threshold),
         lpips_net=args.lpips_net,
         lpips_cache_dir=str(args.lpips_cache_dir) if args.lpips_cache_dir is not None else None,
-        identities_per_batch=int(args.identities_per_batch),
-        keys_per_batch=int(args.keys_per_batch),
+        differentiation_identity_block_size=int(differentiation_identity_block_size),
+        diversity_embedding_chunk_size=int(diversity_embedding_chunk_size),
+        differentiation_embedding_chunk_size=int(differentiation_embedding_chunk_size),
+        landmark_shape_predictor=str(args.landmark_shape_predictor) if args.landmark_shape_predictor is not None else None,
+        landmark_detector_upsample=int(args.landmark_detector_upsample),
     )
 
     detector = MTCNNDetector(
@@ -558,11 +624,19 @@ def main() -> None:
         synchronism_threshold=args.syn_threshold,
         diversity_threshold=args.div_threshold,
         differentiation_threshold=args.diff_threshold,
+        synchronism_chunk_size=differentiation_embedding_chunk_size,
         compute_auc_eer=args.compute_auc_eer,
         anonymization_enabled="anonymization" in enabled_metrics,
         diversity_enabled=diversity_enabled,
     )
-    geometric_evaluator = GeometricUtilityEvaluator()
+    landmark_evaluator = (
+        LandmarkDistanceEvaluator(
+            shape_predictor_path=args.landmark_shape_predictor,
+            detector_upsample=args.landmark_detector_upsample,
+        )
+        if landmark_distance_enabled
+        else None
+    )
     perceptual_evaluator = (
         PerceptualEvaluator(
             device=device,
@@ -580,7 +654,6 @@ def main() -> None:
     total_samples = 0
 
     diff_embeddings_by_label: dict[int, list[torch.Tensor]] = {}
-    diversity_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     try:
         with torch.no_grad():
@@ -610,7 +683,7 @@ def main() -> None:
                 if input_frames.shape[0] == 0:
                     continue
 
-                real_embeddings, input_mask, input_faces = _collect_detected_faces(
+                real_embeddings, input_mask = _collect_detected_faces(
                     detector,
                     aligner,
                     embedder,
@@ -618,7 +691,7 @@ def main() -> None:
                     device,
                 )
 
-                key_results: dict[str, tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]] = {}
+                key_results: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
                 eval_key_names = _sorted_key_names(available_key_names)
                 for key_name in eval_key_names:
                     output_path = entry.outputs[key_name]
@@ -626,8 +699,7 @@ def main() -> None:
                     if output_frames.shape[0] == 0:
                         virt = torch.zeros_like(real_embeddings)
                         gmask = torch.zeros_like(input_mask)
-                        gfaces = [torch.empty(0, device=device) for _ in range(int(input_mask.shape[0]))]
-                        key_results[key_name] = (virt, gmask, gfaces)
+                        key_results[key_name] = (virt, gmask)
                         continue
 
                     min_len = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
@@ -635,7 +707,6 @@ def main() -> None:
                     if real_embeddings.shape[0] != min_len:
                         real_embeddings = real_embeddings[:min_len]
                         input_mask = input_mask[:min_len]
-                        input_faces = input_faces[:min_len]
 
                     if perceptual_enabled and key_name == perceptual_key_name and perceptual_evaluator is not None:
                         aligned_inputs, aligned_outputs = perceptual_evaluator.prepare_video_pair(input_frames, output_frames)
@@ -647,20 +718,31 @@ def main() -> None:
                             )
                             metrics.update_perceptual_utility(lpips_value, ssim_value)
 
-                    virt_embeddings, gen_mask, gen_faces = _collect_detected_faces(
+                    virt_embeddings, gen_mask = _collect_detected_faces(
                         detector,
                         aligner,
                         embedder,
                         output_frames,
                         device,
                     )
-                    key_results[key_name] = (virt_embeddings, gen_mask, gen_faces)
+                    key_results[key_name] = (virt_embeddings, gen_mask)
+
+                    if landmark_distance_enabled and landmark_evaluator is not None:
+                        pair_count = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
+                        for frame_idx in range(pair_count):
+                            in_img = _to_uint8_rgb_image(input_frames[frame_idx])
+                            out_img = _to_uint8_rgb_image(output_frames[frame_idx])
+                            dist = landmark_evaluator.compute_pair_distance(in_img, out_img)
+                            metrics.update_landmark_distance(dist.distance)
+
+                    # Release per-key output tensor promptly to avoid multi-key GPU retention.
+                    del output_frames
 
                 det_embeddings = torch.empty((0, 0), device=device)
                 det_gen_mask = torch.empty((0,), dtype=torch.bool, device=device)
                 valid_mask = torch.empty((0,), dtype=torch.bool, device=device)
                 if detection_branch_enabled:
-                    det_embeddings, det_gen_mask, _ = key_results[required_detection_key]
+                    det_embeddings, det_gen_mask = key_results[required_detection_key]
                     valid_mask = input_mask & det_gen_mask
 
                 if "detection" in enabled_metrics:
@@ -675,58 +757,40 @@ def main() -> None:
                     diff_embeddings_by_label.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
 
                 for key_a, key_b in itertools.combinations(eval_key_names, 2):
-                    emb_a, mask_a, _ = key_results[key_a]
-                    emb_b, mask_b, _ = key_results[key_b]
+                    emb_a, mask_a = key_results[key_a]
+                    emb_b, mask_b = key_results[key_b]
                     pair_mask = input_mask & mask_a & mask_b
                     if diversity_enabled and pair_mask.any():
-                        diversity_pairs.append((emb_a[pair_mask].detach().to("cpu"), emb_b[pair_mask].detach().to("cpu")))
+                        metrics.update_diversity(
+                            emb_a[pair_mask].detach().to("cpu"),
+                            emb_b[pair_mask].detach().to("cpu"),
+                            embedding_chunk_size=diversity_embedding_chunk_size,
+                        )
 
-                if "geometric" in enabled_metrics:
-                    for key_name in eval_key_names:
-                        _, _, gen_faces = key_results[key_name]
-                        pair_count = min(len(input_faces), len(gen_faces))
-                        for frame_idx in range(pair_count):
-                            input_face = input_faces[frame_idx]
-                            generated_face = gen_faces[frame_idx]
-                            if input_face.numel() == 0 or generated_face.numel() == 0:
-                                metrics.update_geometric_utility(None, None)
-                            else:
-                                errs = geometric_evaluator.compute_pair_errors(
-                                    _to_uint8_rgb_image(input_face),
-                                    _to_uint8_rgb_image(generated_face),
-                                )
-                                metrics.update_geometric_utility(errs.head_posture_error, errs.facial_expression_error)
+                del key_results
+                del input_frames
+                del real_embeddings
 
                 total_samples += 1
 
-        if "diversity" in enabled_metrics and diversity_pairs:
-            _log_pipe(
-                "diversity_aggregation_start",
-                pair_groups=len(diversity_pairs),
-                keys_per_batch=int(args.keys_per_batch),
-            )
-            diversity_progress = tqdm(diversity_pairs, desc="Aggregating diversity", unit="pair")
-            try:
-                for emb_a_cpu, emb_b_cpu in diversity_progress:
-                    metrics.update_diversity(emb_a_cpu, emb_b_cpu, chunk_size=args.keys_per_batch)
-            finally:
-                diversity_progress.close()
+        if "diversity" in enabled_metrics:
             _log_pipe(
                 "diversity_aggregation_end",
-                pair_groups=len(diversity_pairs),
+                mode="streaming_inline",
+                diversity_embedding_chunk_size=int(diversity_embedding_chunk_size),
             )
 
         if "differentiation" in enabled_metrics and diff_embeddings_by_label:
             _log_pipe(
                 "differentiation_aggregation_start",
                 identities=len(diff_embeddings_by_label),
-                identities_per_batch=int(args.identities_per_batch),
-                keys_per_batch=int(args.keys_per_batch),
+                differentiation_identity_block_size=int(differentiation_identity_block_size),
+                differentiation_embedding_chunk_size=int(differentiation_embedding_chunk_size),
             )
             metrics.update_differentiation_batched(
                 diff_embeddings_by_label,
-                identities_per_batch=args.identities_per_batch,
-                key_chunk_size=args.keys_per_batch,
+                identity_block_size=differentiation_identity_block_size,
+                embedding_chunk_size=differentiation_embedding_chunk_size,
                 show_progress=True,
                 progress_desc="Aggregating differentiation",
             )
@@ -734,9 +798,11 @@ def main() -> None:
                 "differentiation_aggregation_end",
                 identities=len(diff_embeddings_by_label),
             )
+            diff_embeddings_by_label.clear()
 
     finally:
-        geometric_evaluator.close()
+        if landmark_evaluator is not None:
+            landmark_evaluator.close()
 
     batch_processing_end_time = time.perf_counter()
     batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
@@ -812,11 +878,10 @@ def main() -> None:
         total=summary["differentiation"]["counts"]["total"],
     )
     _log_pipe(
-        "metric_geometric_utility",
-        head_posture_error=summary["geometric_utility"]["head_posture_error"],
-        facial_expression_error=summary["geometric_utility"]["facial_expression_error"],
-        valid_pairs=summary["geometric_utility"]["counts"]["valid_pairs"],
-        invalid_pairs=summary["geometric_utility"]["counts"]["invalid_pairs"],
+        "metric_landmark_distance",
+        distance=summary["landmark_distance"],
+        valid_pairs=summary["landmark_utility"]["counts"]["valid_pairs"],
+        invalid_pairs=summary["landmark_utility"]["counts"]["invalid_pairs"],
     )
     _log_pipe(
         "metric_lpips",
