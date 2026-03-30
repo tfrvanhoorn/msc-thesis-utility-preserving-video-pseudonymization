@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 current_file = Path(__file__).resolve()
 SRC_ROOT = current_file.parents[0]
@@ -566,7 +567,8 @@ def main() -> None:
     try:
         with torch.no_grad():
             total_entries = len(entries)
-            for entry_idx, entry in enumerate(entries, start=1):
+            progress = tqdm(entries, total=total_entries, desc="Evaluating entries", unit="entry")
+            for entry_idx, entry in enumerate(progress, start=1):
                 _log_pipe(
                     "evaluation_entry_progress",
                     entry_index=entry_idx,
@@ -574,6 +576,7 @@ def main() -> None:
                     identity=entry.identity,
                     source_id=entry.source_id,
                 )
+                progress.set_postfix_str(f"identity={entry.identity}")
                 if entry.identity not in identity_to_label:
                     identity_to_label[entry.identity] = len(identity_to_label)
                 label = identity_to_label[entry.identity]
