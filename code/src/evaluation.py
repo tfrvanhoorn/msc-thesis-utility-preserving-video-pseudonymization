@@ -569,13 +569,6 @@ def main() -> None:
             total_entries = len(entries)
             progress = tqdm(entries, total=total_entries, desc="Evaluating entries", unit="entry")
             for entry_idx, entry in enumerate(progress, start=1):
-                _log_pipe(
-                    "evaluation_entry_progress",
-                    entry_index=entry_idx,
-                    total_entries=total_entries,
-                    identity=entry.identity,
-                    source_id=entry.source_id,
-                )
                 progress.set_postfix_str(f"identity={entry.identity}")
                 if entry.identity not in identity_to_label:
                     identity_to_label[entry.identity] = len(identity_to_label)
