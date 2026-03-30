@@ -27,6 +27,8 @@ imageio-ffmpeg        # Backend for moviepy
 onnx==1.14.1          # Pinned to match onnxruntime-gpu version
 timm==0.5.4           # Dependency for the SimSwap model architecture
 tqdm                  # Progress bar for long swap operations
+lpips==0.1.4          # Learned Perceptual Image Patch Similarity metric
+scikit-image          # Provides skimage.metrics.structural_similarity (SSIM)
 
 # --- fastai & Face-Adapter Requirements ---
 fastai                # Required by Face-Adapter pipeline module import

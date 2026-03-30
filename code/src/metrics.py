@@ -34,6 +34,12 @@ class MetricsAccumulator:
     geometric_facial_expression_error_sum: float = 0.0
     geometric_pairs_valid: int = 0
     geometric_pairs_invalid: int = 0
+    lpips_distance_sum: float = 0.0
+    lpips_pairs_valid: int = 0
+    lpips_pairs_invalid: int = 0
+    ssim_similarity_sum: float = 0.0
+    ssim_pairs_valid: int = 0
+    ssim_pairs_invalid: int = 0
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
     _anonymization_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _synchronism_total_scores: List[float] = field(default_factory=list, init=False, repr=False)
@@ -149,6 +155,23 @@ class MetricsAccumulator:
         self.geometric_facial_expression_error_sum += float(facial_expression_error)
         self.geometric_pairs_valid += 1
 
+    def update_perceptual_utility(
+        self,
+        lpips_distance: float | None,
+        ssim_similarity: float | None,
+    ) -> None:
+        if lpips_distance is None:
+            self.lpips_pairs_invalid += 1
+        else:
+            self.lpips_distance_sum += float(lpips_distance)
+            self.lpips_pairs_valid += 1
+
+        if ssim_similarity is None:
+            self.ssim_pairs_invalid += 1
+        else:
+            self.ssim_similarity_sum += float(ssim_similarity)
+            self.ssim_pairs_valid += 1
+
     def finalize(self) -> dict[str, Any]:
         self._compute_synchronism()
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
@@ -176,6 +199,8 @@ class MetricsAccumulator:
             if self.geometric_pairs_valid
             else None
         )
+        lpips_distance = self.lpips_distance_sum / float(self.lpips_pairs_valid) if self.lpips_pairs_valid else None
+        ssim_similarity = self.ssim_similarity_sum / float(self.ssim_pairs_valid) if self.ssim_pairs_valid else None
 
         auc_eer = self._compute_auc_eer() if self.compute_auc_eer else {
             "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
@@ -208,6 +233,8 @@ class MetricsAccumulator:
             "diversity_success_rate": diversity_success_rate,
             "head_posture_error": geometric_head_posture_error,
             "facial_expression_error": geometric_facial_expression_error,
+            "lpips_distance": lpips_distance,
+            "ssim_similarity": ssim_similarity,
             "anonymization": {
                 "success_rate": anonymization_success_rate,
                 "threshold": float(self.anonymization_threshold),
@@ -282,6 +309,16 @@ class MetricsAccumulator:
                     "invalid_pairs": int(self.geometric_pairs_invalid),
                 },
             },
+            "perceptual_utility": {
+                "lpips_distance": lpips_distance,
+                "ssim_similarity": ssim_similarity,
+                "counts": {
+                    "lpips_valid_pairs": int(self.lpips_pairs_valid),
+                    "lpips_invalid_pairs": int(self.lpips_pairs_invalid),
+                    "ssim_valid_pairs": int(self.ssim_pairs_valid),
+                    "ssim_invalid_pairs": int(self.ssim_pairs_invalid),
+                },
+            },
             "counts": {
                 "detected_generated": int(self.detected_generated),
                 "total_generated": int(self.total_generated),
@@ -299,6 +336,10 @@ class MetricsAccumulator:
                 "diversity_total": diversity_total_count,
                 "geometric_pairs_valid": int(self.geometric_pairs_valid),
                 "geometric_pairs_invalid": int(self.geometric_pairs_invalid),
+                "lpips_pairs_valid": int(self.lpips_pairs_valid),
+                "lpips_pairs_invalid": int(self.lpips_pairs_invalid),
+                "ssim_pairs_valid": int(self.ssim_pairs_valid),
+                "ssim_pairs_invalid": int(self.ssim_pairs_invalid),
             },
             "thresholds": {
                 "anonymization": float(self.anonymization_threshold),

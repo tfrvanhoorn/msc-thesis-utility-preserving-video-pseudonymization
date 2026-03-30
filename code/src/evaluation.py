@@ -35,6 +35,7 @@ if str(EXTERNAL_LIB_ROOT) not in sys.path:
 from components import FacenetEmbedder, MTCNNAligner, MTCNNDetector  # noqa: E402
 from geometric_metrics import GeometricUtilityEvaluator  # noqa: E402
 from metrics import MetricsAccumulator  # noqa: E402
+from perceptual_metrics import PerceptualEvaluator  # noqa: E402
 from data.prepared import (  # noqa: E402
     DEFAULT_PREPARED_REGEX,
     PreparedNameError,
@@ -53,6 +54,8 @@ SUPPORTED_METRICS = {
     "diversity",
     "differentiation",
     "geometric",
+    "lpips",
+    "ssim",
 }
 
 KEY_DIR_PATTERN = re.compile(r"^key(?P<index>\d+)$")
@@ -158,6 +161,22 @@ def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
         summary["counts"]["geometric_pairs_valid"] = 0
         summary["counts"]["geometric_pairs_invalid"] = 0
 
+    if "lpips" not in enabled:
+        summary["lpips_distance"] = None
+        summary["perceptual_utility"]["lpips_distance"] = None
+        summary["perceptual_utility"]["counts"]["lpips_valid_pairs"] = 0
+        summary["perceptual_utility"]["counts"]["lpips_invalid_pairs"] = 0
+        summary["counts"]["lpips_pairs_valid"] = 0
+        summary["counts"]["lpips_pairs_invalid"] = 0
+
+    if "ssim" not in enabled:
+        summary["ssim_similarity"] = None
+        summary["perceptual_utility"]["ssim_similarity"] = None
+        summary["perceptual_utility"]["counts"]["ssim_valid_pairs"] = 0
+        summary["perceptual_utility"]["counts"]["ssim_invalid_pairs"] = 0
+        summary["counts"]["ssim_pairs_valid"] = 0
+        summary["counts"]["ssim_pairs_invalid"] = 0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate inferred videos from prepared input/inferred folders")
@@ -226,8 +245,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metrics",
         type=str,
-        default="detection,anonymization,synchronism,diversity,differentiation,geometric",
-        help="Comma-separated metrics list (supported: detection, anonymization, synchronism, diversity, differentiation, geometric; use 'all' for full set)",
+        default="detection,anonymization,synchronism,diversity,differentiation,geometric,lpips,ssim",
+        help=(
+            "Comma-separated metrics list (supported: detection, anonymization, synchronism, diversity, "
+            "differentiation, geometric, lpips, ssim; use 'all' for full set)"
+        ),
+    )
+    parser.add_argument(
+        "--lpips_net",
+        type=str,
+        choices=["alex", "vgg", "squeeze"],
+        default="alex",
+        help="LPIPS backbone network when LPIPS metric is enabled",
+    )
+    parser.add_argument(
+        "--lpips_cache_dir",
+        type=Path,
+        default=None,
+        help="Optional cache directory for LPIPS/Torch model weights (TORCH_HOME)",
     )
 
     # Hardware
@@ -428,6 +463,9 @@ def main() -> None:
     enabled_metrics = _parse_metrics(args.metrics)
     detection_branch_enabled = bool(enabled_metrics & {"detection", "anonymization", "synchronism", "differentiation", "geometric"})
     diversity_enabled = "diversity" in enabled_metrics
+    lpips_enabled = "lpips" in enabled_metrics
+    ssim_enabled = "ssim" in enabled_metrics
+    perceptual_enabled = lpips_enabled or ssim_enabled
 
     if args.max_identities is not None and args.max_identities <= 0:
         raise ValueError("--max_identities must be > 0 when provided")
@@ -460,8 +498,11 @@ def main() -> None:
 
     key_names = [f"key{i}" for i in range(1, num_keys + 1)]
     required_detection_key = f"key{args.detection_key}"
+    perceptual_key_name = required_detection_key if args.inferred_nested_keys else "key1"
     if detection_branch_enabled and required_detection_key not in key_names:
         raise ValueError(f"--detection_key must be in [1, {num_keys}]")
+    if perceptual_enabled and perceptual_key_name not in key_names:
+        raise ValueError(f"Perceptual metric key must be available in [1, {num_keys}]")
 
     _log_pipe(
         "evaluation_start",
@@ -476,6 +517,8 @@ def main() -> None:
         synchronism_threshold=float(args.syn_threshold),
         diversity_threshold=float(args.div_threshold),
         differentiation_threshold=float(args.diff_threshold),
+        lpips_net=args.lpips_net,
+        lpips_cache_dir=str(args.lpips_cache_dir) if args.lpips_cache_dir is not None else None,
     )
 
     detector = MTCNNDetector(
@@ -501,6 +544,17 @@ def main() -> None:
         diversity_enabled=diversity_enabled,
     )
     geometric_evaluator = GeometricUtilityEvaluator()
+    perceptual_evaluator = (
+        PerceptualEvaluator(
+            device=device,
+            compute_lpips=lpips_enabled,
+            compute_ssim=ssim_enabled,
+            lpips_net=args.lpips_net,
+            lpips_cache_dir=args.lpips_cache_dir,
+        )
+        if perceptual_enabled
+        else None
+    )
 
     identity_to_label: dict[str, int] = {}
     batch_processing_start_time = time.perf_counter()
@@ -520,6 +574,10 @@ def main() -> None:
                 if detection_branch_enabled and required_detection_key not in available_key_names:
                     raise FileNotFoundError(
                         f"Entry {entry.input_video} is missing required detection branch output: {required_detection_key}"
+                    )
+                if perceptual_enabled and perceptual_key_name not in available_key_names:
+                    raise FileNotFoundError(
+                        f"Entry {entry.input_video} is missing required perceptual branch output: {perceptual_key_name}"
                     )
                 if diversity_enabled and len(available_key_names) < 2:
                     raise ValueError(
@@ -556,6 +614,16 @@ def main() -> None:
                         real_embeddings = real_embeddings[:min_len]
                         input_mask = input_mask[:min_len]
                         input_faces = input_faces[:min_len]
+
+                    if perceptual_enabled and key_name == perceptual_key_name and perceptual_evaluator is not None:
+                        aligned_inputs, aligned_outputs = perceptual_evaluator.prepare_video_pair(input_frames, output_frames)
+                        pair_count = int(aligned_inputs.shape[0])
+                        for frame_idx in range(pair_count):
+                            lpips_value, ssim_value = perceptual_evaluator.compute_frame_pair(
+                                aligned_inputs[frame_idx],
+                                aligned_outputs[frame_idx],
+                            )
+                            metrics.update_perceptual_utility(lpips_value, ssim_value)
 
                     virt_embeddings, gen_mask, gen_faces = _collect_detected_faces(
                         detector,
@@ -697,6 +765,18 @@ def main() -> None:
         facial_expression_error=summary["geometric_utility"]["facial_expression_error"],
         valid_pairs=summary["geometric_utility"]["counts"]["valid_pairs"],
         invalid_pairs=summary["geometric_utility"]["counts"]["invalid_pairs"],
+    )
+    _log_pipe(
+        "metric_lpips",
+        distance=summary["lpips_distance"],
+        valid_pairs=summary["perceptual_utility"]["counts"]["lpips_valid_pairs"],
+        invalid_pairs=summary["perceptual_utility"]["counts"]["lpips_invalid_pairs"],
+    )
+    _log_pipe(
+        "metric_ssim",
+        similarity=summary["ssim_similarity"],
+        valid_pairs=summary["perceptual_utility"]["counts"]["ssim_valid_pairs"],
+        invalid_pairs=summary["perceptual_utility"]["counts"]["ssim_invalid_pairs"],
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
