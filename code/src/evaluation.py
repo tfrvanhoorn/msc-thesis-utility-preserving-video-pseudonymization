@@ -565,7 +565,15 @@ def main() -> None:
 
     try:
         with torch.no_grad():
-            for entry in entries:
+            total_entries = len(entries)
+            for entry_idx, entry in enumerate(entries, start=1):
+                _log_pipe(
+                    "evaluation_entry_progress",
+                    entry_index=entry_idx,
+                    total_entries=total_entries,
+                    identity=entry.identity,
+                    source_id=entry.source_id,
+                )
                 if entry.identity not in identity_to_label:
                     identity_to_label[entry.identity] = len(identity_to_label)
                 label = identity_to_label[entry.identity]
