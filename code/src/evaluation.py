@@ -625,6 +625,7 @@ def main() -> None:
         diversity_threshold=args.div_threshold,
         differentiation_threshold=args.diff_threshold,
         synchronism_chunk_size=differentiation_embedding_chunk_size,
+        show_progress=True,
         compute_auc_eer=args.compute_auc_eer,
         anonymization_enabled="anonymization" in enabled_metrics,
         diversity_enabled=diversity_enabled,
@@ -807,7 +808,9 @@ def main() -> None:
     batch_processing_end_time = time.perf_counter()
     batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
 
+    _log_pipe("finalize_start")
     summary = metrics.finalize()
+    _log_pipe("finalize_end")
     _mask_disabled_metrics(summary, enabled_metrics)
     _log_pipe(
         "evaluation_summary",

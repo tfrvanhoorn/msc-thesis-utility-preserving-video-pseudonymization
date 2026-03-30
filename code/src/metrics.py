@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
@@ -41,6 +42,7 @@ class MetricsAccumulator:
     ssim_pairs_valid: int = 0
     ssim_pairs_invalid: int = 0
     synchronism_chunk_size: int = 256
+    show_progress: bool = True
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
     _anonymization_scores: List[float] = field(default_factory=list, init=False, repr=False)
     _synchronism_total_scores: List[float] = field(default_factory=list, init=False, repr=False)
@@ -262,7 +264,10 @@ class MetricsAccumulator:
             self.ssim_pairs_valid += 1
 
     def finalize(self) -> dict[str, Any]:
+        logging.info("finalize_start")
+        logging.info("finalize_synchronism_start")
         self._compute_synchronism()
+        logging.info("finalize_synchronism_end")
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
         anonymization_success_rate: float | None = (
             float(self.anonymization_success) / self.anonymization_total
@@ -282,14 +287,19 @@ class MetricsAccumulator:
         lpips_distance = self.lpips_distance_sum / float(self.lpips_pairs_valid) if self.lpips_pairs_valid else None
         ssim_similarity = self.ssim_similarity_sum / float(self.ssim_pairs_valid) if self.ssim_pairs_valid else None
 
-        auc_eer = self._compute_auc_eer() if self.compute_auc_eer else {
-            "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
-            "synchronism_total": {"auc": None, "eer": None, "eer_threshold": None},
-            "synchronism_within": {"auc": None, "eer": None, "eer_threshold": None},
-            "synchronism_cross": {"auc": None, "eer": None, "eer_threshold": None},
-            "diversity": {"auc": None, "eer": None, "eer_threshold": None},
-            "differentiation": {"auc": None, "eer": None, "eer_threshold": None},
-        }
+        if self.compute_auc_eer:
+            logging.info("finalize_auc_eer_start")
+            auc_eer = self._compute_auc_eer()
+            logging.info("finalize_auc_eer_end")
+        else:
+            auc_eer = {
+                "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
+                "synchronism_total": {"auc": None, "eer": None, "eer_threshold": None},
+                "synchronism_within": {"auc": None, "eer": None, "eer_threshold": None},
+                "synchronism_cross": {"auc": None, "eer": None, "eer_threshold": None},
+                "diversity": {"auc": None, "eer": None, "eer_threshold": None},
+                "differentiation": {"auc": None, "eer": None, "eer_threshold": None},
+            }
 
         anonymization_auc = auc_eer["anonymization"]["auc"] if self.anonymization_enabled else None
         anonymization_eer = auc_eer["anonymization"]["eer"] if self.anonymization_enabled else None
@@ -433,14 +443,32 @@ class MetricsAccumulator:
         similar_pool = list(self._synchronism_total_scores) + list(self._synchronism_within_scores) + list(self._synchronism_cross_scores)
         dissimilar_pool = list(self._anonymization_scores) + list(self._diversity_scores) + list(self._differentiation_scores)
 
-        return {
-            "anonymization": self._compute_metric_auc_eer(self._anonymization_scores, similar_pool, positive_when_lower=True),
-            "synchronism_total": self._compute_metric_auc_eer(self._synchronism_total_scores, dissimilar_pool, positive_when_lower=False),
-            "synchronism_within": self._compute_metric_auc_eer(self._synchronism_within_scores, dissimilar_pool, positive_when_lower=False),
-            "synchronism_cross": self._compute_metric_auc_eer(self._synchronism_cross_scores, dissimilar_pool, positive_when_lower=False),
-            "diversity": self._compute_metric_auc_eer(self._diversity_scores, similar_pool, positive_when_lower=True),
-            "differentiation": self._compute_metric_auc_eer(self._differentiation_scores, similar_pool, positive_when_lower=True),
-        }
+        metrics_specs = [
+            ("anonymization", self._anonymization_scores, similar_pool, True),
+            ("synchronism_total", self._synchronism_total_scores, dissimilar_pool, False),
+            ("synchronism_within", self._synchronism_within_scores, dissimilar_pool, False),
+            ("synchronism_cross", self._synchronism_cross_scores, dissimilar_pool, False),
+            ("diversity", self._diversity_scores, similar_pool, True),
+            ("differentiation", self._differentiation_scores, similar_pool, True),
+        ]
+
+        results: Dict[str, Dict[str, float | None]] = {}
+        iterator = tqdm(metrics_specs, desc="Computing AUC/EER", unit="metric") if self.show_progress else metrics_specs
+        for name, positive_scores, negative_scores, positive_when_lower in iterator:
+            logging.info(
+                "finalize_auc_eer_metric_start | metric=%s | positives=%d | negatives=%d",
+                name,
+                len(positive_scores),
+                len(negative_scores),
+            )
+            results[name] = self._compute_metric_auc_eer(
+                positive_scores,
+                negative_scores,
+                positive_when_lower=positive_when_lower,
+            )
+            logging.info("finalize_auc_eer_metric_end | metric=%s", name)
+
+        return results
 
     @staticmethod
     def _compute_metric_auc_eer(
@@ -513,7 +541,9 @@ class MetricsAccumulator:
         if self._synchronism_computed:
             return
 
-        for embeds_by_source in self._sync_buckets.values():
+        identity_items = list(self._sync_buckets.values())
+        progress = tqdm(identity_items, desc="Aggregating synchronism", unit="identity") if self.show_progress else identity_items
+        for embeds_by_source in progress:
             if not embeds_by_source:
                 continue
 
