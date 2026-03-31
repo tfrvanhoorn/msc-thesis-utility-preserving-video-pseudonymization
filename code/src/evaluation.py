@@ -119,38 +119,26 @@ def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
         summary["counts"]["total_generated"] = 0
 
     if "anonymization" not in enabled:
-        summary["anonymization_success_rate"] = None
-        summary["anonymization"].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
-        summary["anonymization"]["counts"] = {"success": 0, "total": 0}
-        summary["counts"]["anonymization_success"] = 0
+        summary["anonymization"].update({"auc": None, "eer": None, "eer_threshold": None})
+        summary["anonymization"]["counts"] = {"total": 0}
         summary["counts"]["anonymization_total"] = 0
 
     if "synchronism" not in enabled:
-        summary["synchronism_success_rate"] = None
-        summary["synchronism_within_success_rate"] = None
-        summary["synchronism_cross_success_rate"] = None
         for key in ("synchronism_total", "synchronism_within", "synchronism_cross"):
-            summary[key].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
-            summary[key]["counts"] = {"success": 0, "total": 0}
-        summary["counts"]["synchronism_success"] = 0
+            summary[key].update({"auc": None, "eer": None, "eer_threshold": None})
+            summary[key]["counts"] = {"total": 0}
         summary["counts"]["synchronism_total"] = 0
-        summary["counts"]["synchronism_within_success"] = 0
         summary["counts"]["synchronism_within_total"] = 0
-        summary["counts"]["synchronism_cross_success"] = 0
         summary["counts"]["synchronism_cross_total"] = 0
 
     if "diversity" not in enabled:
-        summary["diversity_success_rate"] = None
-        summary["diversity"].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
-        summary["diversity"]["counts"] = {"success": 0, "total": 0}
-        summary["counts"]["diversity_success"] = 0
+        summary["diversity"].update({"auc": None, "eer": None, "eer_threshold": None})
+        summary["diversity"]["counts"] = {"total": 0}
         summary["counts"]["diversity_total"] = 0
 
     if "differentiation" not in enabled:
-        summary["differentiation_success_rate"] = None
-        summary["differentiation"].update({"success_rate": None, "auc": None, "eer": None, "eer_threshold": None})
-        summary["differentiation"]["counts"] = {"success": 0, "total": 0}
-        summary["counts"]["differentiation_success"] = 0
+        summary["differentiation"].update({"auc": None, "eer": None, "eer_threshold": None})
+        summary["differentiation"]["counts"] = {"total": 0}
         summary["counts"]["differentiation_total"] = 0
 
     if "landmark_distance" not in enabled:
@@ -216,62 +204,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_keys", type=int, default=None, help="Required key count; defaults to manifest value or inferred from files")
     parser.add_argument("--detection_key", type=int, default=1, help="Key index used for detection/anonymization/synchronism/differentiation branches")
 
-    # Evaluation thresholds
-    parser.add_argument("--ano_threshold", type=float, default=0.7, help="Cosine similarity threshold for anonymization success")
-    parser.add_argument("--syn_threshold", type=float, default=0.7, help="Cosine similarity threshold for synchronism success")
-    parser.add_argument(
-        "--div_threshold",
-        dest="div_threshold",
-        type=float,
-        default=0.7,
-        help="Cosine similarity threshold for diversity success (same identity, different keys)",
-    )
-    parser.add_argument(
-        "--diff_threshold",
-        dest="diff_threshold",
-        type=float,
-        default=0.7,
-        help="Cosine similarity threshold for differentiation success (different identities, same key)",
-    )
-    parser.add_argument(
-        "--compute_auc_eer",
-        action="store_true",
-        help="Compute AUC/EER for anonymization, synchronism(all), diversity, and differentiation",
-    )
-
     parser.add_argument("--max_identities", type=int, default=None, help="Optional cap on number of identities to evaluate")
     parser.add_argument("--max_videos_per_identity", type=int, default=None, help="Optional cap on number of videos per identity to evaluate")
     parser.add_argument(
-        "--differentiation_identity_block_size",
+        "--ids_per_chunk",
         type=int,
-        default=None,
-        help="Number of identities processed per block during end-stage differentiation aggregation",
+        default=2,
+        help="Identities per chunk for chunked evaluation and differentiation aggregation",
     )
     parser.add_argument(
-        "--diversity_embedding_chunk_size",
+        "--samples_per_id_per_chunk",
         type=int,
-        default=None,
-        help="Embedding chunk size for end-stage diversity pairwise cosine computation",
+        default=2,
+        help="Sample videos per identity per chunk and embedding chunk size for synchronism/differentiation",
     )
     parser.add_argument(
-        "--differentiation_embedding_chunk_size",
+        "--keys_per_id_per_chunk",
         type=int,
-        default=None,
-        help="Embedding chunk size for end-stage differentiation pairwise cosine computation",
-    )
-    parser.add_argument(
-        "--identities_per_batch",
-        dest="legacy_identities_per_batch",
-        type=int,
-        default=None,
-        help="[Deprecated] Use --differentiation_identity_block_size",
-    )
-    parser.add_argument(
-        "--keys_per_batch",
-        dest="legacy_keys_per_batch",
-        type=int,
-        default=None,
-        help="[Deprecated] Use --diversity_embedding_chunk_size and --differentiation_embedding_chunk_size",
+        default=2,
+        help="Keys per identity per chunk (applies only when --inferred_nested_keys is set)",
     )
     parser.add_argument(
         "--landmark_shape_predictor",
@@ -499,6 +450,45 @@ def _apply_entry_caps(
     return kept
 
 
+def _build_entry_chunks(
+    entries: list[EvalEntry],
+    *,
+    ids_per_chunk: int,
+    samples_per_id_per_chunk: int,
+) -> list[tuple[list[EvalEntry], bool]]:
+    by_identity: dict[str, list[EvalEntry]] = {}
+    for entry in entries:
+        by_identity.setdefault(entry.identity, []).append(entry)
+
+    identity_order = sorted(by_identity.keys())
+    identity_queues: dict[str, list[EvalEntry]] = {identity: list(by_identity[identity]) for identity in identity_order}
+    chunks: list[tuple[list[EvalEntry], bool]] = []
+
+    while True:
+        eligible_ids = [identity for identity in identity_order if len(identity_queues[identity]) >= samples_per_id_per_chunk]
+        if len(eligible_ids) < ids_per_chunk:
+            break
+
+        selected_ids = eligible_ids[:ids_per_chunk]
+        chunk_entries: list[EvalEntry] = []
+        for identity in selected_ids:
+            take = identity_queues[identity][:samples_per_id_per_chunk]
+            identity_queues[identity] = identity_queues[identity][samples_per_id_per_chunk:]
+            chunk_entries.extend(take)
+        chunks.append((chunk_entries, True))
+
+    leftovers: list[EvalEntry] = []
+    for identity in identity_order:
+        leftovers.extend(identity_queues[identity])
+
+    if leftovers:
+        fallback_size = max(ids_per_chunk * samples_per_id_per_chunk, 1)
+        for start in range(0, len(leftovers), fallback_size):
+            chunks.append((leftovers[start : start + fallback_size], False))
+
+    return chunks
+
+
 def main() -> None:
     args = parse_args()
     configure_logging()
@@ -518,37 +508,16 @@ def main() -> None:
     if args.landmark_detector_upsample < 0:
         raise ValueError("--landmark_detector_upsample must be >= 0")
 
-    if args.legacy_identities_per_batch is not None:
-        logging.warning("--identities_per_batch is deprecated; use --differentiation_identity_block_size")
-    if args.legacy_keys_per_batch is not None:
-        logging.warning(
-            "--keys_per_batch is deprecated; use --diversity_embedding_chunk_size and --differentiation_embedding_chunk_size"
-        )
+    ids_per_chunk = int(args.ids_per_chunk)
+    samples_per_id_per_chunk = int(args.samples_per_id_per_chunk)
+    keys_per_id_per_chunk = int(args.keys_per_id_per_chunk)
 
-    differentiation_identity_block_size = args.differentiation_identity_block_size
-    if differentiation_identity_block_size is None and args.legacy_identities_per_batch is not None:
-        differentiation_identity_block_size = args.legacy_identities_per_batch
-    if differentiation_identity_block_size is None:
-        differentiation_identity_block_size = 4
-
-    diversity_embedding_chunk_size = args.diversity_embedding_chunk_size
-    differentiation_embedding_chunk_size = args.differentiation_embedding_chunk_size
-    if args.legacy_keys_per_batch is not None:
-        if diversity_embedding_chunk_size is None:
-            diversity_embedding_chunk_size = args.legacy_keys_per_batch
-        if differentiation_embedding_chunk_size is None:
-            differentiation_embedding_chunk_size = args.legacy_keys_per_batch
-    if diversity_embedding_chunk_size is None:
-        diversity_embedding_chunk_size = 256
-    if differentiation_embedding_chunk_size is None:
-        differentiation_embedding_chunk_size = 256
-
-    if differentiation_identity_block_size <= 0:
-        raise ValueError("--differentiation_identity_block_size must be > 0")
-    if diversity_embedding_chunk_size <= 0:
-        raise ValueError("--diversity_embedding_chunk_size must be > 0")
-    if differentiation_embedding_chunk_size <= 0:
-        raise ValueError("--differentiation_embedding_chunk_size must be > 0")
+    if ids_per_chunk < 2:
+        raise ValueError("--ids_per_chunk must be >= 2")
+    if samples_per_id_per_chunk < 2:
+        raise ValueError("--samples_per_id_per_chunk must be >= 2")
+    if keys_per_id_per_chunk < 2:
+        raise ValueError("--keys_per_id_per_chunk must be >= 2")
     if landmark_distance_enabled and args.landmark_shape_predictor is None:
         raise ValueError("--landmark_shape_predictor is required when landmark_distance metric is enabled")
 
@@ -575,6 +544,11 @@ def main() -> None:
         max_identities=args.max_identities,
         max_videos_per_identity=args.max_videos_per_identity,
     )
+    entry_chunks = _build_entry_chunks(
+        entries,
+        ids_per_chunk=ids_per_chunk,
+        samples_per_id_per_chunk=samples_per_id_per_chunk,
+    )
 
     key_names = [f"key{i}" for i in range(1, num_keys + 1)]
     required_detection_key = f"key{args.detection_key}"
@@ -589,19 +563,15 @@ def main() -> None:
         input_dir=str(args.input_dir),
         inferred_dir=str(args.inferred_dir),
         num_entries=len(entries),
+        num_chunks=len(entry_chunks),
         num_keys=num_keys,
         detection_key=required_detection_key,
         enabled_metrics=",".join(sorted(enabled_metrics)),
-        compute_auc_eer=bool(args.compute_auc_eer),
-        anonymization_threshold=float(args.ano_threshold),
-        synchronism_threshold=float(args.syn_threshold),
-        diversity_threshold=float(args.div_threshold),
-        differentiation_threshold=float(args.diff_threshold),
         lpips_net=args.lpips_net,
         lpips_cache_dir=str(args.lpips_cache_dir) if args.lpips_cache_dir is not None else None,
-        differentiation_identity_block_size=int(differentiation_identity_block_size),
-        diversity_embedding_chunk_size=int(diversity_embedding_chunk_size),
-        differentiation_embedding_chunk_size=int(differentiation_embedding_chunk_size),
+        ids_per_chunk=ids_per_chunk,
+        samples_per_id_per_chunk=samples_per_id_per_chunk,
+        keys_per_id_per_chunk=keys_per_id_per_chunk,
         landmark_shape_predictor=str(args.landmark_shape_predictor) if args.landmark_shape_predictor is not None else None,
         landmark_detector_upsample=int(args.landmark_detector_upsample),
     )
@@ -620,13 +590,8 @@ def main() -> None:
     embedder = FacenetEmbedder(pretrained="vggface2", device=str(device))
 
     metrics = MetricsAccumulator(
-        anonymization_threshold=args.ano_threshold,
-        synchronism_threshold=args.syn_threshold,
-        diversity_threshold=args.div_threshold,
-        differentiation_threshold=args.diff_threshold,
-        synchronism_chunk_size=differentiation_embedding_chunk_size,
-        show_progress=True,
-        compute_auc_eer=args.compute_auc_eer,
+        synchronism_chunk_size=samples_per_id_per_chunk,
+        show_progress=False,
         anonymization_enabled="anonymization" in enabled_metrics,
         diversity_enabled=diversity_enabled,
     )
@@ -654,152 +619,228 @@ def main() -> None:
     batch_processing_start_time = time.perf_counter()
     total_samples = 0
 
-    diff_embeddings_by_label: dict[int, list[torch.Tensor]] = {}
-
     try:
         with torch.no_grad():
             total_entries = len(entries)
-            progress = tqdm(entries, total=total_entries, desc="Evaluating entries", unit="entry")
-            for entry_idx, entry in enumerate(progress, start=1):
-                progress.set_postfix_str(f"identity={entry.identity}")
-                if entry.identity not in identity_to_label:
-                    identity_to_label[entry.identity] = len(identity_to_label)
-                label = identity_to_label[entry.identity]
-
-                available_key_names = [k for k in key_names if k in entry.outputs]
-                if detection_branch_enabled and required_detection_key not in available_key_names:
-                    raise FileNotFoundError(
-                        f"Entry {entry.input_video} is missing required detection branch output: {required_detection_key}"
+            progress = tqdm(
+                total=total_entries,
+                desc="Evaluating",
+                unit="entry",
+                dynamic_ncols=True,
+                smoothing=0.1,
+            )
+            processed_entries = 0
+            for chunk_idx, (chunk_entries, chunk_eligible) in enumerate(entry_chunks, start=1):
+                chunk_diff_embeddings_by_label: dict[int, list[torch.Tensor]] = {}
+                chunk_entry_total = len(chunk_entries)
+                chunk_entry_done = 0
+                if ("synchronism" in enabled_metrics or "differentiation" in enabled_metrics) and not chunk_eligible:
+                    _log_pipe(
+                        "chunk_sync_diff_skipped",
+                        chunk_index=chunk_idx,
+                        reason="requires >=2 identities and >=2 samples per identity",
+                        chunk_entries=len(chunk_entries),
                     )
-                if perceptual_enabled and perceptual_key_name not in available_key_names:
-                    raise FileNotFoundError(
-                        f"Entry {entry.input_video} is missing required perceptual branch output: {perceptual_key_name}"
-                    )
-                if diversity_enabled and len(available_key_names) < 2:
-                    raise ValueError(
-                        f"Diversity is enabled but entry {entry.input_video} has fewer than 2 outputs"
-                    )
 
-                input_frames = _load_video_tensor(entry.input_video, device)
-                if input_frames.shape[0] == 0:
-                    continue
+                for entry in chunk_entries:
+                    progress.update(1)
+                    processed_entries += 1
+                    chunk_entry_done += 1
+                    if entry.identity not in identity_to_label:
+                        identity_to_label[entry.identity] = len(identity_to_label)
+                    label = identity_to_label[entry.identity]
 
-                real_embeddings, input_mask = _collect_detected_faces(
-                    detector,
-                    aligner,
-                    embedder,
-                    input_frames,
-                    device,
-                )
+                    available_key_names = [k for k in key_names if k in entry.outputs]
+                    if detection_branch_enabled and required_detection_key not in available_key_names:
+                        raise FileNotFoundError(
+                            f"Entry {entry.input_video} is missing required detection branch output: {required_detection_key}"
+                        )
+                    if perceptual_enabled and perceptual_key_name not in available_key_names:
+                        raise FileNotFoundError(
+                            f"Entry {entry.input_video} is missing required perceptual branch output: {perceptual_key_name}"
+                        )
 
-                key_results: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-                eval_key_names = _sorted_key_names(available_key_names)
-                for key_name in eval_key_names:
-                    output_path = entry.outputs[key_name]
-                    output_frames = _load_video_tensor(output_path, device)
-                    if output_frames.shape[0] == 0:
-                        virt = torch.zeros_like(real_embeddings)
-                        gmask = torch.zeros_like(input_mask)
-                        key_results[key_name] = (virt, gmask)
+                    input_frames = _load_video_tensor(entry.input_video, device)
+                    if input_frames.shape[0] == 0:
                         continue
 
-                    min_len = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
-                    output_frames = output_frames[:min_len]
-                    if real_embeddings.shape[0] != min_len:
-                        real_embeddings = real_embeddings[:min_len]
-                        input_mask = input_mask[:min_len]
-
-                    if perceptual_enabled and key_name == perceptual_key_name and perceptual_evaluator is not None:
-                        aligned_inputs, aligned_outputs = perceptual_evaluator.prepare_video_pair(input_frames, output_frames)
-                        pair_count = int(aligned_inputs.shape[0])
-                        for frame_idx in range(pair_count):
-                            lpips_value, ssim_value = perceptual_evaluator.compute_frame_pair(
-                                aligned_inputs[frame_idx],
-                                aligned_outputs[frame_idx],
-                            )
-                            metrics.update_perceptual_utility(lpips_value, ssim_value)
-
-                    virt_embeddings, gen_mask = _collect_detected_faces(
+                    real_embeddings, input_mask = _collect_detected_faces(
                         detector,
                         aligner,
                         embedder,
-                        output_frames,
+                        input_frames,
                         device,
                     )
-                    key_results[key_name] = (virt_embeddings, gen_mask)
 
-                    if landmark_distance_enabled and landmark_evaluator is not None:
-                        pair_count = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
-                        for frame_idx in range(pair_count):
-                            in_img = _to_uint8_rgb_image(input_frames[frame_idx])
-                            out_img = _to_uint8_rgb_image(output_frames[frame_idx])
-                            dist = landmark_evaluator.compute_pair_distance(in_img, out_img)
-                            metrics.update_landmark_distance(dist.distance)
+                    base_real_embeddings = real_embeddings
+                    base_input_mask = input_mask
+                    key_results: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+                    sorted_key_names = _sorted_key_names(available_key_names)
+                    if args.inferred_nested_keys:
+                        selected: list[str] = []
+                        for required_key in (required_detection_key, perceptual_key_name):
+                            if required_key in sorted_key_names and required_key not in selected:
+                                selected.append(required_key)
+                        for key_name in sorted_key_names:
+                            if key_name not in selected:
+                                selected.append(key_name)
+                            if len(selected) >= keys_per_id_per_chunk:
+                                break
+                        eval_key_names = selected
+                    else:
+                        eval_key_names = sorted_key_names
 
-                    # Release per-key output tensor promptly to avoid multi-key GPU retention.
-                    del output_frames
+                    if detection_branch_enabled and required_detection_key not in eval_key_names:
+                        eval_key_names = [required_detection_key] + [k for k in eval_key_names if k != required_detection_key]
+                    if diversity_enabled and len(eval_key_names) < 2:
+                        raise ValueError(f"Diversity is enabled but entry {entry.input_video} has fewer than 2 selected outputs")
 
-                det_embeddings = torch.empty((0, 0), device=device)
-                det_gen_mask = torch.empty((0,), dtype=torch.bool, device=device)
-                valid_mask = torch.empty((0,), dtype=torch.bool, device=device)
-                if detection_branch_enabled:
-                    det_embeddings, det_gen_mask = key_results[required_detection_key]
-                    valid_mask = input_mask & det_gen_mask
+                    progress.set_postfix(
+                        {
+                            "chunk": f"{chunk_idx}/{len(entry_chunks)}",
+                            "chunk_pos": f"{chunk_entry_done}/{chunk_entry_total}",
+                            "eligible": "Y" if chunk_eligible else "N",
+                            "id": entry.identity,
+                            "keys": len(eval_key_names),
+                            "seen": processed_entries,
+                        },
+                        refresh=False,
+                    )
 
-                if "detection" in enabled_metrics:
-                    metrics.update_detection(det_gen_mask)
-                if "anonymization" in enabled_metrics:
-                    metrics.update_anonymization(real_embeddings, det_embeddings, valid_mask)
+                    for key_name in eval_key_names:
+                        output_path = entry.outputs[key_name]
+                        output_frames = _load_video_tensor(output_path, device)
+                        if output_frames.shape[0] == 0:
+                            empty_real = base_real_embeddings[:0]
+                            empty_mask = base_input_mask[:0]
+                            virt = torch.zeros_like(empty_real)
+                            gmask = torch.zeros((0,), dtype=torch.bool, device=device)
+                            key_results[key_name] = (empty_real, empty_mask, virt, gmask)
+                            continue
 
-                valid_virtual = det_embeddings[valid_mask] if detection_branch_enabled else torch.empty((0, 0), device=device)
-                if "synchronism" in enabled_metrics and valid_virtual.numel() > 0:
-                    metrics.add_synchronism_embeddings(label, valid_virtual, source_id=entry.source_id)
-                if "differentiation" in enabled_metrics and valid_virtual.numel() > 0:
-                    diff_embeddings_by_label.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
+                        min_len = min(int(base_real_embeddings.shape[0]), int(output_frames.shape[0]))
+                        key_real_embeddings = base_real_embeddings[:min_len]
+                        key_input_mask = base_input_mask[:min_len]
+                        key_input_frames = input_frames[:min_len]
+                        output_frames = output_frames[:min_len]
 
-                for key_a, key_b in itertools.combinations(eval_key_names, 2):
-                    emb_a, mask_a = key_results[key_a]
-                    emb_b, mask_b = key_results[key_b]
-                    pair_mask = input_mask & mask_a & mask_b
-                    if diversity_enabled and pair_mask.any():
-                        metrics.update_diversity(
-                            emb_a[pair_mask].detach().to("cpu"),
-                            emb_b[pair_mask].detach().to("cpu"),
-                            embedding_chunk_size=diversity_embedding_chunk_size,
+                        if perceptual_enabled and key_name == perceptual_key_name and perceptual_evaluator is not None:
+                            aligned_inputs, aligned_outputs = perceptual_evaluator.prepare_video_pair(key_input_frames, output_frames)
+                            pair_count = int(aligned_inputs.shape[0])
+                            for frame_idx in range(pair_count):
+                                lpips_value, ssim_value = perceptual_evaluator.compute_frame_pair(
+                                    aligned_inputs[frame_idx],
+                                    aligned_outputs[frame_idx],
+                                )
+                                metrics.update_perceptual_utility(lpips_value, ssim_value)
+
+                        virt_embeddings, gen_mask = _collect_detected_faces(
+                            detector,
+                            aligner,
+                            embedder,
+                            output_frames,
+                            device,
                         )
+                        key_results[key_name] = (key_real_embeddings, key_input_mask, virt_embeddings, gen_mask)
 
-                del key_results
-                del input_frames
-                del real_embeddings
+                        if landmark_distance_enabled and landmark_evaluator is not None:
+                            pair_count = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
+                            for frame_idx in range(pair_count):
+                                in_img = _to_uint8_rgb_image(input_frames[frame_idx])
+                                out_img = _to_uint8_rgb_image(output_frames[frame_idx])
+                                dist = landmark_evaluator.compute_pair_distance(in_img, out_img)
+                                metrics.update_landmark_distance(dist.distance)
 
-                total_samples += 1
+                        del output_frames
 
-        if "diversity" in enabled_metrics:
-            _log_pipe(
-                "diversity_aggregation_end",
-                mode="streaming_inline",
-                diversity_embedding_chunk_size=int(diversity_embedding_chunk_size),
-            )
+                    det_real_embeddings = torch.empty((0, 0), device=device)
+                    det_input_mask = torch.empty((0,), dtype=torch.bool, device=device)
+                    det_embeddings = torch.empty((0, 0), device=device)
+                    det_gen_mask = torch.empty((0,), dtype=torch.bool, device=device)
+                    valid_mask = torch.empty((0,), dtype=torch.bool, device=device)
+                    if detection_branch_enabled:
+                        det_real_embeddings, det_input_mask, det_embeddings, det_gen_mask = key_results[required_detection_key]
+                        valid_mask = det_input_mask & det_gen_mask
 
-        if "differentiation" in enabled_metrics and diff_embeddings_by_label:
-            _log_pipe(
-                "differentiation_aggregation_start",
-                identities=len(diff_embeddings_by_label),
-                differentiation_identity_block_size=int(differentiation_identity_block_size),
-                differentiation_embedding_chunk_size=int(differentiation_embedding_chunk_size),
-            )
-            metrics.update_differentiation_batched(
-                diff_embeddings_by_label,
-                identity_block_size=differentiation_identity_block_size,
-                embedding_chunk_size=differentiation_embedding_chunk_size,
-                show_progress=True,
-                progress_desc="Aggregating differentiation",
-            )
-            _log_pipe(
-                "differentiation_aggregation_end",
-                identities=len(diff_embeddings_by_label),
-            )
-            diff_embeddings_by_label.clear()
+                    if "detection" in enabled_metrics:
+                        metrics.update_detection(det_gen_mask)
+                    if "anonymization" in enabled_metrics:
+                        metrics.update_anonymization(det_real_embeddings, det_embeddings, valid_mask)
+
+                    valid_virtual = det_embeddings[valid_mask] if detection_branch_enabled else torch.empty((0, 0), device=device)
+                    if chunk_eligible and "synchronism" in enabled_metrics and valid_virtual.numel() > 0:
+                        metrics.add_synchronism_embeddings(label, valid_virtual, source_id=entry.source_id)
+                    if chunk_eligible and "differentiation" in enabled_metrics and valid_virtual.numel() > 0:
+                        chunk_diff_embeddings_by_label.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
+
+                    for key_a, key_b in itertools.combinations(eval_key_names, 2):
+                        _, input_mask_a, emb_a, mask_a = key_results[key_a]
+                        _, input_mask_b, emb_b, mask_b = key_results[key_b]
+                        pair_len = min(
+                            int(input_mask_a.shape[0]),
+                            int(input_mask_b.shape[0]),
+                            int(mask_a.shape[0]),
+                            int(mask_b.shape[0]),
+                            int(emb_a.shape[0]),
+                            int(emb_b.shape[0]),
+                        )
+                        if pair_len <= 0:
+                            continue
+                        pair_mask = (
+                            input_mask_a[:pair_len]
+                            & input_mask_b[:pair_len]
+                            & mask_a[:pair_len]
+                            & mask_b[:pair_len]
+                        )
+                        if diversity_enabled and pair_mask.any():
+                            metrics.update_diversity(
+                                emb_a[:pair_len][pair_mask].detach().to("cpu"),
+                                emb_b[:pair_len][pair_mask].detach().to("cpu"),
+                                embedding_chunk_size=samples_per_id_per_chunk,
+                            )
+
+                    del key_results
+                    del input_frames
+                    del base_real_embeddings
+
+                    total_samples += 1
+
+                    valid_frames = int(valid_mask.sum().item()) if detection_branch_enabled else 0
+                    progress.set_postfix(
+                        {
+                            "chunk": f"{chunk_idx}/{len(entry_chunks)}",
+                            "chunk_pos": f"{chunk_entry_done}/{chunk_entry_total}",
+                            "eligible": "Y" if chunk_eligible else "N",
+                            "id": entry.identity,
+                            "keys": len(eval_key_names),
+                            "valid": valid_frames,
+                            "samples": total_samples,
+                        },
+                        refresh=False,
+                    )
+
+                if chunk_eligible and "differentiation" in enabled_metrics and len(chunk_diff_embeddings_by_label) >= 2:
+                    _log_pipe(
+                        "differentiation_chunk_start",
+                        chunk_index=chunk_idx,
+                        identities=len(chunk_diff_embeddings_by_label),
+                        ids_per_chunk=ids_per_chunk,
+                        samples_per_id_per_chunk=samples_per_id_per_chunk,
+                    )
+                    metrics.update_differentiation_batched(
+                        chunk_diff_embeddings_by_label,
+                        identity_block_size=ids_per_chunk,
+                        embedding_chunk_size=samples_per_id_per_chunk,
+                        show_progress=False,
+                    )
+                    _log_pipe("differentiation_chunk_end", chunk_index=chunk_idx)
+
+                if chunk_eligible and "synchronism" in enabled_metrics:
+                    _log_pipe("synchronism_chunk_start", chunk_index=chunk_idx)
+                    metrics.flush_synchronism_chunk()
+                    _log_pipe("synchronism_chunk_end", chunk_index=chunk_idx)
+
+            progress.close()
 
     finally:
         if landmark_evaluator is not None:
@@ -808,7 +849,6 @@ def main() -> None:
     batch_processing_end_time = time.perf_counter()
     batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
 
-    _log_pipe("finalize_start")
     summary = metrics.finalize()
     _log_pipe("finalize_end")
     _mask_disabled_metrics(summary, enabled_metrics)
@@ -822,62 +862,44 @@ def main() -> None:
     )
     _log_pipe(
         "metric_anonymization",
-        success_rate=summary["anonymization"]["success_rate"],
-        threshold=summary["anonymization"]["threshold"],
         auc=summary["anonymization"]["auc"],
         eer=summary["anonymization"]["eer"],
         eer_threshold=summary["anonymization"]["eer_threshold"],
-        success=summary["anonymization"]["counts"]["success"],
         total=summary["anonymization"]["counts"]["total"],
     )
     _log_pipe(
         "metric_synchronism_total",
-        success_rate=summary["synchronism_total"]["success_rate"],
-        threshold=summary["synchronism_total"]["threshold"],
         auc=summary["synchronism_total"]["auc"],
         eer=summary["synchronism_total"]["eer"],
         eer_threshold=summary["synchronism_total"]["eer_threshold"],
-        success=summary["synchronism_total"]["counts"]["success"],
         total=summary["synchronism_total"]["counts"]["total"],
     )
     _log_pipe(
         "metric_synchronism_within",
-        success_rate=summary["synchronism_within"]["success_rate"],
-        threshold=summary["synchronism_within"]["threshold"],
         auc=summary["synchronism_within"]["auc"],
         eer=summary["synchronism_within"]["eer"],
         eer_threshold=summary["synchronism_within"]["eer_threshold"],
-        success=summary["synchronism_within"]["counts"]["success"],
         total=summary["synchronism_within"]["counts"]["total"],
     )
     _log_pipe(
         "metric_synchronism_cross",
-        success_rate=summary["synchronism_cross"]["success_rate"],
-        threshold=summary["synchronism_cross"]["threshold"],
         auc=summary["synchronism_cross"]["auc"],
         eer=summary["synchronism_cross"]["eer"],
         eer_threshold=summary["synchronism_cross"]["eer_threshold"],
-        success=summary["synchronism_cross"]["counts"]["success"],
         total=summary["synchronism_cross"]["counts"]["total"],
     )
     _log_pipe(
         "metric_diversity",
-        success_rate=summary["diversity"]["success_rate"],
-        threshold=summary["diversity"]["threshold"],
         auc=summary["diversity"]["auc"],
         eer=summary["diversity"]["eer"],
         eer_threshold=summary["diversity"]["eer_threshold"],
-        success=summary["diversity"]["counts"]["success"],
         total=summary["diversity"]["counts"]["total"],
     )
     _log_pipe(
         "metric_differentiation",
-        success_rate=summary["differentiation"]["success_rate"],
-        threshold=summary["differentiation"]["threshold"],
         auc=summary["differentiation"]["auc"],
         eer=summary["differentiation"]["eer"],
         eer_threshold=summary["differentiation"]["eer_threshold"],
-        success=summary["differentiation"]["counts"]["success"],
         total=summary["differentiation"]["counts"]["total"],
     )
     _log_pipe(

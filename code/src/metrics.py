@@ -10,27 +10,57 @@ from tqdm import tqdm
 
 
 @dataclass
+class HistogramAggregator:
+    num_bins: int = 4096
+    min_score: float = -1.0
+    max_score: float = 1.0
+    counts: torch.Tensor = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.counts = torch.zeros(self.num_bins, dtype=torch.int64)
+
+    @property
+    def total_count(self) -> int:
+        return int(self.counts.sum().item())
+
+    def update(self, scores: torch.Tensor) -> None:
+        if scores is None or scores.numel() == 0:
+            return
+        vals = scores.detach().to("cpu", dtype=torch.float32).reshape(-1)
+        vals = vals.clamp(self.min_score, self.max_score)
+        scale = float(self.num_bins) / float(self.max_score - self.min_score)
+        idx = torch.floor((vals - self.min_score) * scale).to(torch.int64)
+        idx = idx.clamp(min=0, max=self.num_bins - 1)
+        self.counts += torch.bincount(idx, minlength=self.num_bins)
+
+    def add_inplace(self, other: "HistogramAggregator") -> None:
+        self.counts += other.counts
+
+    @classmethod
+    def merged(cls, histograms: List["HistogramAggregator"]) -> "HistogramAggregator":
+        if not histograms:
+            return cls()
+        merged_hist = cls(
+            num_bins=histograms[0].num_bins,
+            min_score=histograms[0].min_score,
+            max_score=histograms[0].max_score,
+        )
+        for hist in histograms:
+            merged_hist.add_inplace(hist)
+        return merged_hist
+
+
+@dataclass
 class MetricsAccumulator:
-    anonymization_threshold: float = 0.7
-    synchronism_threshold: float = 0.7
-    diversity_threshold: float = 0.7
-    differentiation_threshold: float = 0.7
-    compute_auc_eer: bool = False
     anonymization_enabled: bool = True
     diversity_enabled: bool = True
     detected_generated: int = 0
     total_generated: int = 0
-    anonymization_success: int = 0
     anonymization_total: int = 0
-    synchronism_success: int = 0
     synchronism_total: int = 0
-    synchronism_within_success: int = 0
     synchronism_within_total: int = 0
-    synchronism_cross_success: int = 0
     synchronism_cross_total: int = 0
-    differentiation_success: int = 0
     differentiation_total: int = 0
-    diversity_success: int = 0
     diversity_total: int = 0
     landmark_distance_sum: float = 0.0
     landmark_pairs_valid: int = 0
@@ -43,14 +73,23 @@ class MetricsAccumulator:
     ssim_pairs_invalid: int = 0
     synchronism_chunk_size: int = 256
     show_progress: bool = True
+    histogram_bins: int = 4096
     _sync_buckets: Dict[int, Dict[str, List[torch.Tensor]]] = field(default_factory=dict)
-    _anonymization_scores: List[float] = field(default_factory=list, init=False, repr=False)
-    _synchronism_total_scores: List[float] = field(default_factory=list, init=False, repr=False)
-    _synchronism_within_scores: List[float] = field(default_factory=list, init=False, repr=False)
-    _synchronism_cross_scores: List[float] = field(default_factory=list, init=False, repr=False)
-    _diversity_scores: List[float] = field(default_factory=list, init=False, repr=False)
-    _differentiation_scores: List[float] = field(default_factory=list, init=False, repr=False)
+    _anonymization_hist: HistogramAggregator = field(init=False, repr=False)
+    _synchronism_total_hist: HistogramAggregator = field(init=False, repr=False)
+    _synchronism_within_hist: HistogramAggregator = field(init=False, repr=False)
+    _synchronism_cross_hist: HistogramAggregator = field(init=False, repr=False)
+    _diversity_hist: HistogramAggregator = field(init=False, repr=False)
+    _differentiation_hist: HistogramAggregator = field(init=False, repr=False)
     _synchronism_computed: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._anonymization_hist = HistogramAggregator(num_bins=self.histogram_bins)
+        self._synchronism_total_hist = HistogramAggregator(num_bins=self.histogram_bins)
+        self._synchronism_within_hist = HistogramAggregator(num_bins=self.histogram_bins)
+        self._synchronism_cross_hist = HistogramAggregator(num_bins=self.histogram_bins)
+        self._diversity_hist = HistogramAggregator(num_bins=self.histogram_bins)
+        self._differentiation_hist = HistogramAggregator(num_bins=self.histogram_bins)
 
     def update_detection(self, gen_mask: torch.Tensor | List[bool]) -> None:
         mask = torch.as_tensor(gen_mask, dtype=torch.bool)
@@ -63,34 +102,32 @@ class MetricsAccumulator:
         virtual_embeddings: torch.Tensor,
         valid_mask: torch.Tensor | List[bool],
     ) -> None:
+        if not self.anonymization_enabled:
+            return
+
         mask = torch.as_tensor(valid_mask, dtype=torch.bool, device=real_embeddings.device)
         if not mask.any():
             return
         real_valid = real_embeddings[mask]
         virt_valid = virtual_embeddings[mask]
         cos = F.cosine_similarity(real_valid, virt_valid, dim=1)
-        successes = (cos < self.anonymization_threshold).sum().item()
-        self.anonymization_success += int(successes)
         self.anonymization_total += int(cos.numel())
-        if self.compute_auc_eer:
-            self._anonymization_scores.extend(cos.detach().cpu().tolist())
+        self._anonymization_hist.update(cos)
 
     def add_synchronism_embeddings(self, identity: int, embeddings: torch.Tensor, source_id: str | None = None) -> None:
-        """Accumulate frame-level embeddings for an identity grouped by source (e.g., video).
-
-        source_id differentiates windows from different videos of the same identity, enabling
-        within-video vs cross-video synchronism metrics. Self-pairs remain included for
-        continuity with the previous aggregate metric.
-        """
-
-        if embeddings is None:
-            return
-        if embeddings.numel() == 0:
+        if embeddings is None or embeddings.numel() == 0:
             return
         src = str(source_id) if source_id is not None else ""
         buckets = self._sync_buckets.setdefault(int(identity), {})
         bucket = buckets.setdefault(src, [])
         bucket.extend([e.detach().cpu() for e in embeddings])
+
+    def flush_synchronism_chunk(self) -> None:
+        if not self._sync_buckets:
+            return
+        self._compute_synchronism()
+        self._sync_buckets.clear()
+        self._synchronism_computed = False
 
     def update_diversity(
         self,
@@ -99,8 +136,8 @@ class MetricsAccumulator:
         *,
         embedding_chunk_size: int | None = None,
     ) -> None:
-        """Score same-identity, cross-key embedding pairs for diversity success."""
-
+        if not self.diversity_enabled:
+            return
         if key1_embeddings is None or key2_embeddings is None:
             return
         if key1_embeddings.numel() == 0 or key2_embeddings.numel() == 0:
@@ -115,49 +152,8 @@ class MetricsAccumulator:
             for start_j in range(0, int(k2.shape[0]), size):
                 chunk_j = k2[start_j : start_j + size]
                 cos = F.cosine_similarity(chunk_i.unsqueeze(1), chunk_j.unsqueeze(0), dim=-1).reshape(-1)
-                successes = (cos < self.diversity_threshold).sum().item()
-                self.diversity_success += int(successes)
                 self.diversity_total += int(cos.numel())
-                if self.compute_auc_eer:
-                    self._diversity_scores.extend(cos.detach().cpu().tolist())
-
-    def update_differentiation(
-        self,
-        embeddings: torch.Tensor,
-        labels: torch.Tensor,
-        *,
-        embedding_chunk_size: int | None = None,
-    ) -> None:
-        """Score cross-identity pairs under the same key for differentiation success."""
-
-        if embeddings is None or labels is None:
-            return
-        if embeddings.numel() == 0:
-            return
-
-        embeds = embeddings
-        lbls = labels
-        if embeds.shape[0] != lbls.shape[0]:
-            raise ValueError("Embeddings and labels must have matching batch dimension for differentiation scoring")
-
-        if embeds.shape[0] < 2:
-            return
-
-        embeddings_by_label: Dict[int, List[torch.Tensor]] = {}
-        unique_labels = torch.unique(lbls)
-        for label in unique_labels.tolist():
-            mask = lbls == int(label)
-            selected = embeds[mask]
-            if selected.numel() == 0:
-                continue
-            embeddings_by_label[int(label)] = [selected.detach().cpu()]
-
-        self.update_differentiation_batched(
-            embeddings_by_label,
-            identity_block_size=None,
-            embedding_chunk_size=embedding_chunk_size,
-            show_progress=False,
-        )
+                self._diversity_hist.update(cos)
 
     def update_differentiation_batched(
         self,
@@ -173,8 +169,6 @@ class MetricsAccumulator:
 
         merged: Dict[int, torch.Tensor] = {}
         for label, chunks in embeddings_by_label.items():
-            if not chunks:
-                continue
             valid_chunks = [chunk for chunk in chunks if chunk is not None and chunk.numel() > 0]
             if not valid_chunks:
                 continue
@@ -232,11 +226,8 @@ class MetricsAccumulator:
             for start_j in range(0, int(emb_j.shape[0]), chunk):
                 chunk_j = emb_j[start_j : start_j + chunk]
                 cos = F.cosine_similarity(chunk_i.unsqueeze(1), chunk_j.unsqueeze(0), dim=-1).reshape(-1)
-                successes = (cos < self.differentiation_threshold).sum().item()
-                self.differentiation_success += int(successes)
                 self.differentiation_total += int(cos.numel())
-                if self.compute_auc_eer:
-                    self._differentiation_scores.extend(cos.detach().cpu().tolist())
+                self._differentiation_hist.update(cos)
 
     def update_landmark_distance(self, distance: float | None) -> None:
         if distance is None:
@@ -246,11 +237,7 @@ class MetricsAccumulator:
         self.landmark_distance_sum += float(distance)
         self.landmark_pairs_valid += 1
 
-    def update_perceptual_utility(
-        self,
-        lpips_distance: float | None,
-        ssim_similarity: float | None,
-    ) -> None:
+    def update_perceptual_utility(self, lpips_distance: float | None, ssim_similarity: float | None) -> None:
         if lpips_distance is None:
             self.lpips_pairs_invalid += 1
         else:
@@ -268,127 +255,58 @@ class MetricsAccumulator:
         logging.info("finalize_synchronism_start")
         self._compute_synchronism()
         logging.info("finalize_synchronism_end")
+        logging.info("finalize_auc_eer_start")
+        auc_eer = self._compute_auc_eer()
+        logging.info("finalize_auc_eer_end")
+
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
-        anonymization_success_rate: float | None = (
-            float(self.anonymization_success) / self.anonymization_total
-            if self.anonymization_total and self.anonymization_enabled
-            else None if not self.anonymization_enabled else 0.0
-        )
-        synchronism_success_rate = float(self.synchronism_success) / self.synchronism_total if self.synchronism_total else 0.0
-        synchronism_within_success_rate = float(self.synchronism_within_success) / self.synchronism_within_total if self.synchronism_within_total else 0.0
-        synchronism_cross_success_rate = float(self.synchronism_cross_success) / self.synchronism_cross_total if self.synchronism_cross_total else 0.0
-        diversity_success_rate: float | None = (
-            float(self.diversity_success) / self.diversity_total
-            if self.diversity_total and self.diversity_enabled
-            else None if not self.diversity_enabled else 0.0
-        )
-        differentiation_success_rate = float(self.differentiation_success) / self.differentiation_total if self.differentiation_total else 0.0
         landmark_distance = self.landmark_distance_sum / float(self.landmark_pairs_valid) if self.landmark_pairs_valid else None
         lpips_distance = self.lpips_distance_sum / float(self.lpips_pairs_valid) if self.lpips_pairs_valid else None
         ssim_similarity = self.ssim_similarity_sum / float(self.ssim_pairs_valid) if self.ssim_pairs_valid else None
 
-        if self.compute_auc_eer:
-            logging.info("finalize_auc_eer_start")
-            auc_eer = self._compute_auc_eer()
-            logging.info("finalize_auc_eer_end")
-        else:
-            auc_eer = {
-                "anonymization": {"auc": None, "eer": None, "eer_threshold": None},
-                "synchronism_total": {"auc": None, "eer": None, "eer_threshold": None},
-                "synchronism_within": {"auc": None, "eer": None, "eer_threshold": None},
-                "synchronism_cross": {"auc": None, "eer": None, "eer_threshold": None},
-                "diversity": {"auc": None, "eer": None, "eer_threshold": None},
-                "differentiation": {"auc": None, "eer": None, "eer_threshold": None},
-            }
-
-        anonymization_auc = auc_eer["anonymization"]["auc"] if self.anonymization_enabled else None
-        anonymization_eer = auc_eer["anonymization"]["eer"] if self.anonymization_enabled else None
-        anonymization_eer_threshold = auc_eer["anonymization"]["eer_threshold"] if self.anonymization_enabled else None
-        diversity_auc = auc_eer["diversity"]["auc"] if self.diversity_enabled else None
-        diversity_eer = auc_eer["diversity"]["eer"] if self.diversity_enabled else None
-        diversity_eer_threshold = auc_eer["diversity"]["eer_threshold"] if self.diversity_enabled else None
-
-        anonymization_success_count = int(self.anonymization_success) if self.anonymization_enabled else 0
         anonymization_total_count = int(self.anonymization_total) if self.anonymization_enabled else 0
-        diversity_success_count = int(self.diversity_success) if self.diversity_enabled else 0
         diversity_total_count = int(self.diversity_total) if self.diversity_enabled else 0
 
         return {
             "detection_rate": detection_rate,
-            "anonymization_success_rate": anonymization_success_rate,
-            "synchronism_success_rate": synchronism_success_rate,
-            "synchronism_within_success_rate": synchronism_within_success_rate,
-            "synchronism_cross_success_rate": synchronism_cross_success_rate,
-            "differentiation_success_rate": differentiation_success_rate,
-            "diversity_success_rate": diversity_success_rate,
             "landmark_distance": landmark_distance,
             "lpips_distance": lpips_distance,
             "ssim_similarity": ssim_similarity,
             "anonymization": {
-                "success_rate": anonymization_success_rate,
-                "threshold": float(self.anonymization_threshold),
-                "auc": anonymization_auc,
-                "eer": anonymization_eer,
-                "eer_threshold": anonymization_eer_threshold,
-                "counts": {
-                    "success": anonymization_success_count,
-                    "total": anonymization_total_count,
-                },
+                "auc": auc_eer["anonymization"]["auc"] if self.anonymization_enabled else None,
+                "eer": auc_eer["anonymization"]["eer"] if self.anonymization_enabled else None,
+                "eer_threshold": auc_eer["anonymization"]["eer_threshold"] if self.anonymization_enabled else None,
+                "counts": {"total": anonymization_total_count},
             },
             "synchronism_total": {
-                "success_rate": synchronism_success_rate,
-                "threshold": float(self.synchronism_threshold),
                 "auc": auc_eer["synchronism_total"]["auc"],
                 "eer": auc_eer["synchronism_total"]["eer"],
                 "eer_threshold": auc_eer["synchronism_total"]["eer_threshold"],
-                "counts": {
-                    "success": int(self.synchronism_success),
-                    "total": int(self.synchronism_total),
-                },
+                "counts": {"total": int(self.synchronism_total)},
             },
             "synchronism_within": {
-                "success_rate": synchronism_within_success_rate,
-                "threshold": float(self.synchronism_threshold),
                 "auc": auc_eer["synchronism_within"]["auc"],
                 "eer": auc_eer["synchronism_within"]["eer"],
                 "eer_threshold": auc_eer["synchronism_within"]["eer_threshold"],
-                "counts": {
-                    "success": int(self.synchronism_within_success),
-                    "total": int(self.synchronism_within_total),
-                },
+                "counts": {"total": int(self.synchronism_within_total)},
             },
             "synchronism_cross": {
-                "success_rate": synchronism_cross_success_rate,
-                "threshold": float(self.synchronism_threshold),
                 "auc": auc_eer["synchronism_cross"]["auc"],
                 "eer": auc_eer["synchronism_cross"]["eer"],
                 "eer_threshold": auc_eer["synchronism_cross"]["eer_threshold"],
-                "counts": {
-                    "success": int(self.synchronism_cross_success),
-                    "total": int(self.synchronism_cross_total),
-                },
+                "counts": {"total": int(self.synchronism_cross_total)},
             },
             "diversity": {
-                "success_rate": diversity_success_rate,
-                "threshold": float(self.diversity_threshold),
-                "auc": diversity_auc,
-                "eer": diversity_eer,
-                "eer_threshold": diversity_eer_threshold,
-                "counts": {
-                    "success": diversity_success_count,
-                    "total": diversity_total_count,
-                },
+                "auc": auc_eer["diversity"]["auc"] if self.diversity_enabled else None,
+                "eer": auc_eer["diversity"]["eer"] if self.diversity_enabled else None,
+                "eer_threshold": auc_eer["diversity"]["eer_threshold"] if self.diversity_enabled else None,
+                "counts": {"total": diversity_total_count},
             },
             "differentiation": {
-                "success_rate": differentiation_success_rate,
-                "threshold": float(self.differentiation_threshold),
                 "auc": auc_eer["differentiation"]["auc"],
                 "eer": auc_eer["differentiation"]["eer"],
                 "eer_threshold": auc_eer["differentiation"]["eer_threshold"],
-                "counts": {
-                    "success": int(self.differentiation_success),
-                    "total": int(self.differentiation_total),
-                },
+                "counts": {"total": int(self.differentiation_total)},
             },
             "landmark_utility": {
                 "landmark_distance": landmark_distance,
@@ -410,17 +328,11 @@ class MetricsAccumulator:
             "counts": {
                 "detected_generated": int(self.detected_generated),
                 "total_generated": int(self.total_generated),
-                "anonymization_success": anonymization_success_count,
                 "anonymization_total": anonymization_total_count,
-                "synchronism_success": int(self.synchronism_success),
                 "synchronism_total": int(self.synchronism_total),
-                "synchronism_within_success": int(self.synchronism_within_success),
                 "synchronism_within_total": int(self.synchronism_within_total),
-                "synchronism_cross_success": int(self.synchronism_cross_success),
                 "synchronism_cross_total": int(self.synchronism_cross_total),
-                "differentiation_success": int(self.differentiation_success),
                 "differentiation_total": int(self.differentiation_total),
-                "diversity_success": diversity_success_count,
                 "diversity_total": diversity_total_count,
                 "landmark_pairs_valid": int(self.landmark_pairs_valid),
                 "landmark_pairs_invalid": int(self.landmark_pairs_invalid),
@@ -429,41 +341,37 @@ class MetricsAccumulator:
                 "ssim_pairs_valid": int(self.ssim_pairs_valid),
                 "ssim_pairs_invalid": int(self.ssim_pairs_invalid),
             },
-            "thresholds": {
-                "anonymization": float(self.anonymization_threshold),
-                "synchronism_total": float(self.synchronism_threshold),
-                "synchronism_within": float(self.synchronism_threshold),
-                "synchronism_cross": float(self.synchronism_threshold),
-                "diversity": float(self.diversity_threshold),
-                "differentiation": float(self.differentiation_threshold),
-            },
         }
 
     def _compute_auc_eer(self) -> Dict[str, Dict[str, float | None]]:
-        similar_pool = list(self._synchronism_total_scores) + list(self._synchronism_within_scores) + list(self._synchronism_cross_scores)
-        dissimilar_pool = list(self._anonymization_scores) + list(self._diversity_scores) + list(self._differentiation_scores)
+        similar_pool = HistogramAggregator.merged(
+            [self._synchronism_total_hist, self._synchronism_within_hist, self._synchronism_cross_hist]
+        )
+        dissimilar_pool = HistogramAggregator.merged(
+            [self._anonymization_hist, self._diversity_hist, self._differentiation_hist]
+        )
 
         metrics_specs = [
-            ("anonymization", self._anonymization_scores, similar_pool, True),
-            ("synchronism_total", self._synchronism_total_scores, dissimilar_pool, False),
-            ("synchronism_within", self._synchronism_within_scores, dissimilar_pool, False),
-            ("synchronism_cross", self._synchronism_cross_scores, dissimilar_pool, False),
-            ("diversity", self._diversity_scores, similar_pool, True),
-            ("differentiation", self._differentiation_scores, similar_pool, True),
+            ("anonymization", self._anonymization_hist, similar_pool, True),
+            ("synchronism_total", self._synchronism_total_hist, dissimilar_pool, False),
+            ("synchronism_within", self._synchronism_within_hist, dissimilar_pool, False),
+            ("synchronism_cross", self._synchronism_cross_hist, dissimilar_pool, False),
+            ("diversity", self._diversity_hist, similar_pool, True),
+            ("differentiation", self._differentiation_hist, similar_pool, True),
         ]
 
         results: Dict[str, Dict[str, float | None]] = {}
         iterator = tqdm(metrics_specs, desc="Computing AUC/EER", unit="metric") if self.show_progress else metrics_specs
-        for name, positive_scores, negative_scores, positive_when_lower in iterator:
+        for name, positive_hist, negative_hist, positive_when_lower in iterator:
             logging.info(
                 "finalize_auc_eer_metric_start | metric=%s | positives=%d | negatives=%d",
                 name,
-                len(positive_scores),
-                len(negative_scores),
+                positive_hist.total_count,
+                negative_hist.total_count,
             )
-            results[name] = self._compute_metric_auc_eer(
-                positive_scores,
-                negative_scores,
+            results[name] = self._compute_metric_auc_eer_from_hist(
+                positive_hist,
+                negative_hist,
                 positive_when_lower=positive_when_lower,
             )
             logging.info("finalize_auc_eer_metric_end | metric=%s", name)
@@ -471,71 +379,42 @@ class MetricsAccumulator:
         return results
 
     @staticmethod
-    def _compute_metric_auc_eer(
-        positive_scores: List[float],
-        negative_scores: List[float],
+    def _compute_metric_auc_eer_from_hist(
+        positive_hist: HistogramAggregator,
+        negative_hist: HistogramAggregator,
         *,
         positive_when_lower: bool,
     ) -> Dict[str, float | None]:
-        if not positive_scores or not negative_scores:
+        pos_total = positive_hist.total_count
+        neg_total = negative_hist.total_count
+        if pos_total == 0 or neg_total == 0:
             return {"auc": None, "eer": None, "eer_threshold": None}
 
-        pos = torch.tensor(positive_scores, dtype=torch.float32)
-        neg = torch.tensor(negative_scores, dtype=torch.float32)
-        scores = torch.cat([pos, neg], dim=0)
-        labels = torch.cat([torch.ones_like(pos, dtype=torch.bool), torch.zeros_like(neg, dtype=torch.bool)], dim=0)
+        pos = positive_hist.counts.to(torch.float64)
+        neg = negative_hist.counts.to(torch.float64)
+        if positive_when_lower:
+            tp = torch.cat([torch.zeros(1, dtype=torch.float64), torch.cumsum(pos, dim=0)])
+            fp = torch.cat([torch.zeros(1, dtype=torch.float64), torch.cumsum(neg, dim=0)])
+        else:
+            tp = torch.cat([torch.flip(torch.cumsum(torch.flip(pos, dims=[0]), dim=0), dims=[0]), torch.zeros(1, dtype=torch.float64)])
+            fp = torch.cat([torch.flip(torch.cumsum(torch.flip(neg, dims=[0]), dim=0), dims=[0]), torch.zeros(1, dtype=torch.float64)])
 
-        thresholds = torch.unique(scores)
-        thresholds, _ = torch.sort(thresholds)
-        if thresholds.numel() == 0:
-            return {"auc": None, "eer": None, "eer_threshold": None}
+        tpr = tp / float(pos_total)
+        fpr = fp / float(neg_total)
+        fnr = 1.0 - tpr
 
-        eps = torch.tensor(1e-6, dtype=thresholds.dtype)
-        thresholds = torch.cat([thresholds[:1] - eps, thresholds, thresholds[-1:] + eps], dim=0)
-
-        fprs: List[float] = []
-        tprs: List[float] = []
-        fnrs: List[float] = []
-
-        pos_total = float(labels.sum().item())
-        neg_total = float((~labels).sum().item())
-        if pos_total == 0.0 or neg_total == 0.0:
-            return {"auc": None, "eer": None, "eer_threshold": None}
-
-        for thr in thresholds:
-            if positive_when_lower:
-                pred_pos = scores < thr
-            else:
-                pred_pos = scores >= thr
-
-            tp = float((pred_pos & labels).sum().item())
-            fp = float((pred_pos & ~labels).sum().item())
-            tpr = tp / pos_total
-            fpr = fp / neg_total
-            fnr = 1.0 - tpr
-
-            tprs.append(tpr)
-            fprs.append(fpr)
-            fnrs.append(fnr)
-
-        fpr_tensor = torch.tensor(fprs, dtype=torch.float32)
-        tpr_tensor = torch.tensor(tprs, dtype=torch.float32)
-        order = torch.argsort(fpr_tensor)
-        fpr_sorted = fpr_tensor[order]
-        tpr_sorted = tpr_tensor[order]
+        order = torch.argsort(fpr)
+        fpr_sorted = fpr[order]
+        tpr_sorted = tpr[order]
         auc = float(torch.trapz(tpr_sorted, fpr_sorted).item())
 
-        fnr_tensor = torch.tensor(fnrs, dtype=torch.float32)
-        diff = torch.abs(fpr_tensor - fnr_tensor)
+        diff = torch.abs(fpr - fnr)
         eer_idx = int(torch.argmin(diff).item())
-        eer = float(((fpr_tensor[eer_idx] + fnr_tensor[eer_idx]) * 0.5).item())
-        eer_threshold = float(thresholds[eer_idx].item())
+        eer = float(((fpr[eer_idx] + fnr[eer_idx]) * 0.5).item())
 
-        return {
-            "auc": auc,
-            "eer": eer,
-            "eer_threshold": eer_threshold,
-        }
+        threshold_edges = torch.linspace(positive_hist.min_score, positive_hist.max_score, positive_hist.num_bins + 1)
+        eer_threshold = float(threshold_edges[eer_idx].item())
+        return {"auc": auc, "eer": eer, "eer_threshold": eer_threshold}
 
     def _compute_synchronism(self) -> None:
         if self._synchronism_computed:
@@ -547,25 +426,25 @@ class MetricsAccumulator:
             if not embeds_by_source:
                 continue
 
-            # Overall (all sources combined, includes self-pairs)
             all_embeds = [e for embeds in embeds_by_source.values() for e in embeds]
-            if len(all_embeds) >= 1:
+            if len(all_embeds) >= 2:
                 stack_all = torch.stack(all_embeds, dim=0)
-                self._update_synchronism_same_set(stack_all, score_bucket=self._synchronism_total_scores)
+                self._update_synchronism_same_set(
+                    stack_all,
+                    total_attr="synchronism_total",
+                    score_hist=self._synchronism_total_hist,
+                )
 
-            # Within-source
             for embeds in embeds_by_source.values():
-                if len(embeds) < 1:
+                if len(embeds) < 2:
                     continue
                 stack = torch.stack(embeds, dim=0)
                 self._update_synchronism_same_set(
                     stack,
-                    success_attr="synchronism_within_success",
                     total_attr="synchronism_within_total",
-                    score_bucket=self._synchronism_within_scores,
+                    score_hist=self._synchronism_within_hist,
                 )
 
-            # Cross-source (different videos for the same identity)
             source_keys = list(embeds_by_source.keys())
             if len(source_keys) >= 2:
                 for i in range(len(source_keys)):
@@ -579,9 +458,8 @@ class MetricsAccumulator:
                         self._update_synchronism_cross_sets(
                             stack_i,
                             stack_j,
-                            success_attr="synchronism_cross_success",
                             total_attr="synchronism_cross_total",
-                            score_bucket=self._synchronism_cross_scores,
+                            score_hist=self._synchronism_cross_hist,
                         )
 
         self._synchronism_computed = True
@@ -590,14 +468,15 @@ class MetricsAccumulator:
         self,
         embeds: torch.Tensor,
         *,
-        success_attr: str = "synchronism_success",
-        total_attr: str = "synchronism_total",
-        score_bucket: List[float] | None = None,
+        total_attr: str,
+        score_hist: HistogramAggregator,
     ) -> None:
         if embeds.numel() == 0:
             return
 
         n = int(embeds.shape[0])
+        if n < 2:
+            return
         chunk = max(int(self.synchronism_chunk_size), 1)
         for start_i in range(0, n, chunk):
             end_i = min(start_i + chunk, n)
@@ -607,25 +486,21 @@ class MetricsAccumulator:
                 block_j = embeds[start_j:end_j]
                 cos_mat = F.cosine_similarity(block_i.unsqueeze(1), block_j.unsqueeze(0), dim=-1)
                 if start_i == start_j:
-                    tri = torch.triu_indices(cos_mat.shape[0], cos_mat.shape[1], offset=0, device=cos_mat.device)
+                    tri = torch.triu_indices(cos_mat.shape[0], cos_mat.shape[1], offset=1, device=cos_mat.device)
                     vals = cos_mat[tri[0], tri[1]]
                 else:
                     vals = cos_mat.reshape(-1)
 
-                successes = (vals >= self.synchronism_threshold).sum().item()
-                setattr(self, success_attr, int(getattr(self, success_attr)) + int(successes))
                 setattr(self, total_attr, int(getattr(self, total_attr)) + int(vals.numel()))
-                if self.compute_auc_eer and score_bucket is not None:
-                    score_bucket.extend(vals.detach().cpu().tolist())
+                score_hist.update(vals)
 
     def _update_synchronism_cross_sets(
         self,
         emb_a: torch.Tensor,
         emb_b: torch.Tensor,
         *,
-        success_attr: str,
         total_attr: str,
-        score_bucket: List[float] | None = None,
+        score_hist: HistogramAggregator,
     ) -> None:
         if emb_a.numel() == 0 or emb_b.numel() == 0:
             return
@@ -636,8 +511,5 @@ class MetricsAccumulator:
             for start_b in range(0, int(emb_b.shape[0]), chunk):
                 block_b = emb_b[start_b : start_b + chunk]
                 vals = F.cosine_similarity(block_a.unsqueeze(1), block_b.unsqueeze(0), dim=-1).reshape(-1)
-                successes = (vals >= self.synchronism_threshold).sum().item()
-                setattr(self, success_attr, int(getattr(self, success_attr)) + int(successes))
                 setattr(self, total_attr, int(getattr(self, total_attr)) + int(vals.numel()))
-                if self.compute_auc_eer and score_bucket is not None:
-                    score_bucket.extend(vals.detach().cpu().tolist())
+                score_hist.update(vals)
