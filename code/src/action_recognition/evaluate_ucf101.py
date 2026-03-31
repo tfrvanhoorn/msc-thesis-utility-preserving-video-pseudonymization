@@ -28,7 +28,7 @@ from data.video_io import load_video_frames  # noqa: E402
 from utils.logging import configure_logging  # noqa: E402
 
 DEFAULT_VIDEO_PATTERNS = ("*.mp4", "*.avi", "*.mov", "*.mkv", "*.webm")
-DEFAULT_MODEL_ID = "nateraw/videomae-base-finetuned-ucf101-subset"
+DEFAULT_MODEL_ID = "nateraw/videomae-base-finetuned-ucf101"
 DEFAULT_FAIL_ON_INFERENCE_ERROR = True
 DEFAULT_UNKNOWN_LABELS_LOG_LIMIT = 25
 
