@@ -6,6 +6,7 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 
 %post
     export DEBIAN_FRONTEND=noninteractive
+    set -eux
 
     # 1. Install system dependencies for Python 3.8 (no recommends to avoid openssh-client pull-in)
     apt-get update && apt-get install -y --no-install-recommends \
@@ -39,9 +40,21 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
         torchvision==0.9.1+cu111 \
         torchaudio==0.8.1 \
         -f https://download.pytorch.org/whl/torch_stable.html
+
+    # 5. Install dlib with conservative build settings to avoid OOM during image build.
+    # Try wheel first; if source build is needed, force low parallelism and disable CUDA for dlib.
+    export CMAKE_BUILD_PARALLEL_LEVEL=2
+    export MAX_JOBS=2
+    export CMAKE_ARGS="-DDLIB_USE_CUDA=OFF"
+    pip install --no-cache-dir dlib || pip install --no-cache-dir --no-binary=:all: dlib
+
+    # 6. Install the remaining requirements (skip dlib to prevent reinstall).
+    grep -vE '^[[:space:]]*dlib([[:space:]]*(#.*)?)?$' /opt/requirements.txt > /tmp/requirements.no-dlib.txt
+    pip install --no-cache-dir -r /tmp/requirements.no-dlib.txt
+    rm -f /tmp/requirements.no-dlib.txt
     
-    # 5. Install the rest of your requirements
-    pip install --no-cache-dir -r /opt/requirements.txt
+    # 7. Cleanup
+    unset CMAKE_BUILD_PARALLEL_LEVEL MAX_JOBS CMAKE_ARGS
 
 %environment
     export LC_ALL=C
