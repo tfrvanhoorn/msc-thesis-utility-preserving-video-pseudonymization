@@ -79,6 +79,11 @@ def parse_args() -> argparse.Namespace:
         default="video",
         help="Shared identity name used for all videos when --type video_folder",
     )
+    parser.add_argument(
+        "--video_folder_preserve_subfolders",
+        action="store_true",
+        help="When --type video_folder, preserve source subfolder layout under output_dir",
+    )
 
     parser.add_argument("--max_identities", type=int, default=None, help="Limit number of identities")
     parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max videos per YouTube ID")
@@ -150,6 +155,16 @@ def _collect_video_folder_sources(args: argparse.Namespace) -> list[SourceVideo]
     ]
 
 
+def _build_video_output_path(args: argparse.Namespace, output_dir: Path, source_video_path: Path, prepared_name: str) -> Path:
+    if args.type == "video_folder" and args.video_folder_preserve_subfolders:
+        try:
+            relative_parent = source_video_path.relative_to(args.data_path).parent
+        except ValueError:
+            relative_parent = Path()
+        return output_dir / relative_parent / prepared_name
+    return output_dir / prepared_name
+
+
 def _collect_celeba_sources(args: argparse.Namespace) -> list[SourceImage]:
     if not args.data_path.exists():
         raise FileNotFoundError(f"CelebA path not found: {args.data_path}")
@@ -213,6 +228,8 @@ def main() -> None:
         raise ValueError("--max_videos_per_youtube_id must be > 0 when provided")
     if args.max_videos_per_id is not None and args.max_videos_per_id <= 0:
         raise ValueError("--max_videos_per_id must be > 0 when provided")
+    if args.video_folder_preserve_subfolders and args.type != "video_folder":
+        raise ValueError("--video_folder_preserve_subfolders can only be used with --type video_folder")
     if args.type in {"voxceleb", "video_folder"}:
         if args.max_frames_per_video <= 0:
             raise ValueError("--max_frames_per_video must be > 0")
@@ -262,7 +279,8 @@ def main() -> None:
                 src.video_path.stem,
                 extension=".mp4",
             )
-            output_path = output_dir / prepared_name
+            output_path = _build_video_output_path(args, output_dir, src.video_path, prepared_name)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             frames = [sampled[i] for i in range(sampled.shape[0])]
             codec = write_mp4(output_path, frames, fps=float(args.fps))
 
@@ -329,6 +347,7 @@ def main() -> None:
                     "max_identities": args.max_identities,
                     "max_videos_per_youtube_id": args.max_videos_per_youtube_id,
                     "max_videos_per_id": args.max_videos_per_id,
+                    "video_folder_preserve_subfolders": args.video_folder_preserve_subfolders,
                     "celeba_identity_file": args.celeba_identity_file,
                     "celeba_images_subdir": args.celeba_images_subdir,
                     "max_frames_per_video": args.max_frames_per_video,
