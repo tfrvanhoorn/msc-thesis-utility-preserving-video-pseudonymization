@@ -6,6 +6,7 @@ import logging
 import re
 import sys
 import time
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,8 @@ from utils.logging import configure_logging  # noqa: E402
 
 DEFAULT_VIDEO_PATTERNS = ("*.mp4", "*.avi", "*.mov", "*.mkv", "*.webm")
 DEFAULT_MODEL_ID = "sayakpaul/videomae-base-finetuned-kinetics-finetuned-ucf101-subset"
+DEFAULT_FAIL_ON_INFERENCE_ERROR = True
+DEFAULT_UNKNOWN_LABELS_LOG_LIMIT = 25
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     configure_logging()
+    fail_on_inference_error = DEFAULT_FAIL_ON_INFERENCE_ERROR
+    unknown_labels_log_limit = DEFAULT_UNKNOWN_LABELS_LOG_LIMIT
 
     if not args.input_dir.exists() or not args.input_dir.is_dir():
         raise FileNotFoundError(f"Input directory does not exist: {args.input_dir}")
@@ -227,6 +232,8 @@ def main() -> None:
     extensions = tuple(part.strip() for part in args.video_extensions.split(",") if part.strip())
     if not extensions:
         raise ValueError("--video_extensions must provide at least one extension pattern")
+    if unknown_labels_log_limit < 1:
+        raise ValueError("DEFAULT_UNKNOWN_LABELS_LOG_LIMIT must be >= 1")
 
     device = torch.device(args.device)
 
@@ -253,6 +260,7 @@ def main() -> None:
 
     id2label: dict[int, str] = {int(k): str(v) for k, v in id2label_raw.items()}
     label_index = _build_label_index(id2label)
+    _log_pipe("action_eval_model_labels", num_labels=len(id2label))
 
     entries = _iter_video_entries(args.input_dir, extensions=extensions, recursive=bool(args.recursive))
     if args.max_videos is not None:
@@ -312,15 +320,30 @@ def main() -> None:
             )
         except Exception as exc:  # noqa: BLE001
             counters["inference_errors"] += 1
+            readable_error = f"{type(exc).__name__}: {exc}"
             per_video_records.append(
                 {
                     "video_path": str(entry.video_path),
                     "true_folder_label": entry.true_folder_label,
                     "resolved_true_label": resolved_true_label,
                     "status": "inference_error",
-                    "error_reason": str(exc),
+                    "error_reason": readable_error,
                 }
             )
+            logging.error(
+                "action_eval_inference_error | video_path=%s | true_folder_label=%s | resolved_true_label=%s | error=%s",
+                str(entry.video_path),
+                entry.true_folder_label,
+                resolved_true_label,
+                readable_error,
+            )
+            if fail_on_inference_error:
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                raise RuntimeError(
+                    "Inference failed and fail-on-inference-error default is enabled | "
+                    f"video_path={entry.video_path} | true_folder_label={entry.true_folder_label} | "
+                    f"resolved_true_label={resolved_true_label} | error={readable_error}\n{tb}"
+                ) from exc
             continue
 
         counters["evaluated"] += 1
@@ -375,6 +398,20 @@ def main() -> None:
         "inference_errors": int(counters["inference_errors"]),
         "elapsed_seconds": elapsed_seconds,
     }
+
+    if unknown_label_folders:
+        unknown_items = sorted(unknown_label_folders.items(), key=lambda item: (-item[1], item[0]))
+        shown = unknown_items[: unknown_labels_log_limit]
+        for label, count in shown:
+            _log_pipe("action_eval_unknown_label", label=label, skipped_videos=int(count))
+        hidden_count = max(0, len(unknown_items) - len(shown))
+        _log_pipe(
+            "action_eval_unknown_labels_summary",
+            unique_unknown_labels=len(unknown_items),
+            shown=len(shown),
+            hidden=hidden_count,
+            skipped_unknown_label_total=int(counters["skipped_unknown_label"]),
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report_path = args.output_dir / args.output_filename
