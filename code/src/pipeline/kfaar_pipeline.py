@@ -420,6 +420,59 @@ class KfaarPipeline:
             w = self._project_to_stylegan_w(projected)
             generated = self.stylegan.synthesize(w, noise_mode="const").clamp(-1, 1).add(1).div(2.0)
 
+            aligned_stylegan_faces: list[torch.Tensor | None] = []
+            for idx in range(len(valid_records)):
+                generated_face = generated[idx]
+                stylegan_dets = self.detector.detect(generated_face)
+                if not stylegan_dets:
+                    aligned_stylegan_faces.append(None)
+                    continue
+                stylegan_top = max(stylegan_dets, key=lambda d: d.score)
+                aligned_stylegan_faces.append(self.aligner.align(generated_face, stylegan_top).to(device))
+
+            is_diffusion = (
+                use_face_swapper
+                and self.face_swapper is not None
+                and type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+            )
+            diffusion_composited = [False] * len(valid_records)
+
+            if is_diffusion and hasattr(self.face_swapper, "swap_batch"):
+                records_by_frame: dict[int, list[int]] = {}
+                for rec_idx, record in enumerate(valid_records):
+                    frame_idx = int(record["frame_idx"])
+                    records_by_frame.setdefault(frame_idx, []).append(rec_idx)
+
+                max_faces_per_frame = max((len(v) for v in records_by_frame.values()), default=0)
+                for rank_idx in range(max_faces_per_frame):
+                    batch_sources: list[torch.Tensor] = []
+                    batch_targets: list[torch.Tensor] = []
+                    batch_meta: list[tuple[int, int]] = []
+
+                    for frame_idx in range(frames_t.shape[0]):
+                        frame_records = records_by_frame.get(frame_idx, [])
+                        if rank_idx >= len(frame_records):
+                            continue
+                        rec_idx = frame_records[rank_idx]
+                        aligned_stylegan = aligned_stylegan_faces[rec_idx]
+                        if aligned_stylegan is None:
+                            continue
+
+                        batch_sources.append(aligned_stylegan)
+                        batch_targets.append(output_frames[frame_idx])
+                        batch_meta.append((frame_idx, rec_idx))
+
+                    if not batch_sources:
+                        continue
+
+                    swapped_batch = self.face_swapper.swap_batch(batch_sources, batch_targets)
+                    for (frame_idx, rec_idx), swapped in zip(batch_meta, swapped_batch):
+                        if swapped is None:
+                            continue
+                        output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
+                        diffusion_composited[rec_idx] = True
+                        stats["composited_faces"] += 1
+
             for idx, record in enumerate(valid_records):
                 frame_idx = int(record["frame_idx"])
                 region = record["region"]
@@ -434,6 +487,9 @@ class KfaarPipeline:
                     stats["skipped_faces"] += 1
                     continue
 
+                if diffusion_composited[idx]:
+                    continue
+
                 generated_face = generated[idx]
                 visual = generated_face
 
@@ -442,20 +498,20 @@ class KfaarPipeline:
                         logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
                         self._warned_face_swapper = True
                     elif self.face_swapper is not None:
-                        stylegan_dets = self.detector.detect(generated_face)
-                        if stylegan_dets:
-                            stylegan_top = max(stylegan_dets, key=lambda d: d.score)
-                            aligned_stylegan = self.aligner.align(generated_face, stylegan_top).to(device)
-
-                            is_diffusion = type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
-                            target_to_swap = output_frames[frame_idx] if is_diffusion else aligned_inputs[idx]
-                            swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
-                            if swapped is not None:
-                                if is_diffusion:
+                        aligned_stylegan = aligned_stylegan_faces[idx]
+                        if aligned_stylegan is not None:
+                            if is_diffusion:
+                                target_to_swap = output_frames[frame_idx]
+                                swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
+                                if swapped is not None:
                                     output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
                                     stats["composited_faces"] += 1
                                     continue
-                                visual = swapped
+                            else:
+                                target_to_swap = aligned_inputs[idx]
+                                swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
+                                if swapped is not None:
+                                    visual = swapped
 
                 patch = self._normalize_visual_frame(visual)
                 patch = torch.nn.functional.interpolate(

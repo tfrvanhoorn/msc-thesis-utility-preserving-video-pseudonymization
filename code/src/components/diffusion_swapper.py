@@ -371,96 +371,141 @@ class DiffusionFaceSwapper:
         blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
         return blend_mask[:, :, 16:528, 16:528]
 
-    def swap(self, source_aligned: torch.Tensor, target_aligned: torch.Tensor) -> torch.Tensor | None:
+    def swap_batch(self, source_aligned_batch: list[torch.Tensor], target_aligned_batch: list[torch.Tensor]) -> list[torch.Tensor | None]:
+        if len(source_aligned_batch) != len(target_aligned_batch):
+            raise ValueError("source_aligned_batch and target_aligned_batch must have the same length")
+
+        count = len(source_aligned_batch)
+        results: list[torch.Tensor | None] = [None] * count
+        if count == 0:
+            return results
+
         try:
             with torch.no_grad():
-                # Step 1: Ensure input tensors are [0, 1] for PIL conversion
-                # We assume KFAAR sends [0, 1] or [-1, 1]
-                if target_aligned.min() < -0.1:
-                    target_aligned = (target_aligned + 1.0) / 2.0
-                if source_aligned.min() < -0.1:
-                    source_aligned = (source_aligned + 1.0) / 2.0
-                
-                target_aligned = target_aligned.clamp(0.0, 1.0)
-                source_aligned = source_aligned.clamp(0.0, 1.0)
-                _, h, w = target_aligned.shape
+                prepared: list[dict[str, object]] = []
+                valid_indices: list[int] = []
 
-                source_pil = self._tensor_to_pil(source_aligned)
-                target_pil = self._tensor_to_pil(target_aligned)
+                for idx, (source_aligned, target_aligned) in enumerate(zip(source_aligned_batch, target_aligned_batch)):
+                    try:
+                        source_t = source_aligned
+                        target_t = target_aligned
+                        if target_t.min() < -0.1:
+                            target_t = (target_t + 1.0) / 2.0
+                        if source_t.min() < -0.1:
+                            source_t = (source_t + 1.0) / 2.0
 
-                src = self._prepare_aligned_face(source_pil)
-                tar = self._prepare_aligned_face(target_pil)
+                        target_t = target_t.clamp(0.0, 1.0)
+                        source_t = source_t.clamp(0.0, 1.0)
+                        _, h, w = target_t.shape
 
-                # --- 3D Landmark & Expression Transfer ---
-                src_d3d_coeff = self.net_d3dfr(src["image_256"])
-                gt_d3d_coeff = self.net_d3dfr(tar["image_256"])
-                gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
-                gt_pts68 = self.bfm_facemodel.get_lm68(gt_d3d_coeff)
+                        source_pil = self._tensor_to_pil(source_t)
+                        target_pil = self._tensor_to_pil(target_t)
 
-                im_pts70 = self._draw_pts70_batch(
-                    gt_pts68, gt_d3d_coeff[:, 257:], tar["warp_mat_256"],
-                    self.test_image_size, return_pt=True
-                ).to(tar["image_512"])
+                        src = self._prepare_aligned_face(source_pil)
+                        tar = self._prepare_aligned_face(target_pil)
 
-                # --- Diffusion Generation ---
-                face_masks_tar, blend_mask = self._build_swap_mask(tar["image_512"])
-                controlnet_image_swap = (im_pts70 * face_masks_tar + tar["image_512"] * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
+                        src_d3d_coeff = self.net_d3dfr(src["image_256"])
+                        gt_d3d_coeff = self.net_d3dfr(tar["image_256"])
+                        gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
+                        gt_pts68 = self.bfm_facemodel.get_lm68(gt_d3d_coeff)
 
-                faceid = self.net_arcface(F.interpolate(src["image_256"], [128, 128], mode="bilinear", align_corners=False))
-                encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
-                
-                tar_last_hidden = self.net_vision_encoder(tar["clip"]).last_hidden_state
-                controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
+                        im_pts70 = self._draw_pts70_batch(
+                            gt_pts68,
+                            gt_d3d_coeff[:, 257:],
+                            tar["warp_mat_256"],
+                            self.test_image_size,
+                            return_pt=True,
+                        ).to(tar["image_512"])
+
+                        face_masks_tar, blend_mask = self._build_swap_mask(tar["image_512"])
+                        controlnet_image_swap = (im_pts70 * face_masks_tar + tar["image_512"] * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
+
+                        faceid = self.net_arcface(F.interpolate(src["image_256"], [128, 128], mode="bilinear", align_corners=False))
+                        encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
+
+                        tar_last_hidden = self.net_vision_encoder(tar["clip"]).last_hidden_state
+                        controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
+
+                        prepared.append(
+                            {
+                                "prompt": encoder_hidden_states_src,
+                                "control_prompt": controlnet_encoder_hidden_states_tar,
+                                "control_image": controlnet_image_swap,
+                                "blend_mask": blend_mask,
+                                "tar_image_512": tar["image_512"],
+                                "warp_mat_512": tar["warp_mat_512"],
+                                "target_pil": target_pil,
+                                "target_hw": (h, w),
+                                "target_device": target_aligned.device,
+                            }
+                        )
+                        valid_indices.append(idx)
+                    except Exception as item_exc:
+                        logger.error("FaceAdapter swap failed for batch item %d: %s", idx, item_exc)
+
+                if not prepared:
+                    return results
+
+                prompt_embeds = torch.cat([item["prompt"] for item in prepared], dim=0)
+                control_prompt_embeds = torch.cat([item["control_prompt"] for item in prepared], dim=0)
+                control_images = torch.cat([item["control_image"] for item in prepared], dim=0)
+
+                batch_size = prompt_embeds.shape[0]
+                negative_prompt_embeds = self.empty_prompt_token.expand(batch_size, -1, -1)
+                control_negative_prompt_embeds = self.empty_prompt_token.expand(batch_size, -1, -1)
 
                 self._set_seed(self.seed)
                 generator = torch.Generator(device=self.device).manual_seed(self.seed)
-                
-                # Generation results in a PIL image
-                gen_pil = self.pipe(
-                    prompt_embeds=encoder_hidden_states_src,
-                    negative_prompt_embeds=self.empty_prompt_token,
-                    controlnet_prompt_embeds=controlnet_encoder_hidden_states_tar,
-                    controlnet_negative_prompt_embeds=self.empty_prompt_token,
-                    image=controlnet_image_swap,
+
+                gen_pils = self.pipe(
+                    prompt_embeds=prompt_embeds,
+                    negative_prompt_embeds=negative_prompt_embeds,
+                    controlnet_prompt_embeds=control_prompt_embeds,
+                    controlnet_negative_prompt_embeds=control_negative_prompt_embeds,
+                    image=control_images,
                     num_inference_steps=self.inference_steps,
                     generator=generator,
                     guidance_scale=self.guidance_scale,
                     controlnet_conditioning_scale=1.0,
-                ).images[0]
+                ).images
 
-                # --- Color & Alignment Correction ---
-                # Convert Gen PIL to [0, 255] numpy
-                gen_np = np.array(gen_pil.convert("RGB"))
-                
-                # Convert Images_tar (normalized [-1, 1]) back to [0, 255]
-                tar_512_np = (tar["image_512"][0].cpu().numpy().transpose(1, 2, 0) * 127.5 + 127.5).clip(0, 255).astype(np.uint8)
-                blend_mask_np = blend_mask[0, 0].cpu().numpy()[:, :, np.newaxis]
+                for out_idx, item in enumerate(prepared):
+                    gen_np = np.array(gen_pils[out_idx].convert("RGB"))
+                    tar_512_np = (
+                        item["tar_image_512"][0].cpu().numpy().transpose(1, 2, 0) * 127.5 + 127.5
+                    ).clip(0, 255).astype(np.uint8)
+                    blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
 
-                # Composite in 512x512 space
-                composite_512 = (gen_np * blend_mask_np + tar_512_np * (1 - blend_mask_np)).astype(np.uint8)
+                    composite_512 = (gen_np * blend_mask_np + tar_512_np * (1 - blend_mask_np)).astype(np.uint8)
 
-                # Inverse Warp back to KFAAR crop coordinates
-                orig_crop_np = np.array(target_pil) # [0, 255]
-                inv_face = cv2.warpAffine(
-                    composite_512, tar["warp_mat_512"], (w, h), 
-                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, 
-                    borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0)
-                )
-                
-                inv_mask = cv2.warpAffine(
-                    blend_mask_np.squeeze(), tar["warp_mat_512"], (w, h), 
-                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, 
-                    borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
-                )[:, :, np.newaxis]
+                    h, w = item["target_hw"]
+                    orig_crop_np = np.array(item["target_pil"])
+                    inv_face = cv2.warpAffine(
+                        composite_512,
+                        item["warp_mat_512"],
+                        (w, h),
+                        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=(0, 0, 0),
+                    )
 
-                # Final blend with original background to remove edge artifacts
-                final_np = (inv_face * inv_mask + orig_crop_np * (1 - inv_mask)).astype(np.uint8)
-                
-                # Convert back to [0, 1] tensor for KFAAR
-                final_tensor = torch.from_numpy(final_np.transpose(2, 0, 1)).float().div(255.0)
+                    inv_mask = cv2.warpAffine(
+                        blend_mask_np.squeeze(),
+                        item["warp_mat_512"],
+                        (w, h),
+                        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0.0,
+                    )[:, :, np.newaxis]
 
-                return final_tensor.to(target_aligned.device)
+                    final_np = (inv_face * inv_mask + orig_crop_np * (1 - inv_mask)).astype(np.uint8)
+                    final_tensor = torch.from_numpy(final_np.transpose(2, 0, 1)).float().div(255.0)
+                    results[valid_indices[out_idx]] = final_tensor.to(item["target_device"])
 
+                return results
         except Exception as e:
-            logger.error("FaceAdapter swap failed: %s", e)
-            return None
+            logger.error("FaceAdapter batched swap failed: %s", e)
+            return results
+
+    def swap(self, source_aligned: torch.Tensor, target_aligned: torch.Tensor) -> torch.Tensor | None:
+        return self.swap_batch([source_aligned], [target_aligned])[0]
