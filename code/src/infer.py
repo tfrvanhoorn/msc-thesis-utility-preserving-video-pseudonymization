@@ -167,7 +167,7 @@ def _collect_sources(args: argparse.Namespace) -> list[SourceVideo]:
                     SourceVideo(
                         identity=identity,
                         youtube_id=None,
-                        source_id=str(video_path.name),
+                        source_id=str(video_path.relative_to(args.data_path).as_posix()),
                         video_path=video_path,
                         sample_index=sample_index,
                         original_name=original_name,
@@ -192,6 +192,14 @@ def _build_export_leaf(export_root: Path, source: SourceVideo) -> Path:
 
 def _prepared_output_filename(source: SourceVideo) -> str:
     return f"{source.identity}_sample{source.sample_index}_{source.original_name}.mp4"
+
+
+def _nested_output_subdir(source: SourceVideo) -> Path:
+    rel_source = Path(source.source_id)
+    parent = rel_source.parent
+    if str(parent) in ("", "."):
+        return Path()
+    return Path(*[_sanitize_segment(part) for part in parent.parts if part not in ("", ".")])
 
 
 def _normalize_frame(frame: torch.Tensor, image_size: int | None = 256) -> torch.Tensor:
@@ -272,6 +280,19 @@ def _resize_like(frame: torch.Tensor, target_h: int, target_w: int) -> torch.Ten
         mode="bilinear",
         align_corners=False,
     ).squeeze(0)
+
+
+def _build_output_path(
+    output_root: Path,
+    source: SourceVideo,
+    prepared_filename: str,
+    *,
+    preserve_nested_folders: bool,
+) -> Path:
+    if not preserve_nested_folders:
+        return output_root / prepared_filename
+    nested_dir = _nested_output_subdir(source)
+    return output_root / nested_dir / prepared_filename
 
 
 def parse_args() -> argparse.Namespace:
@@ -431,6 +452,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional output FPS override. Defaults to source_fps/effective_sample_step.",
+    )
+    parser.add_argument(
+        "--preserve_nested_folders",
+        action="store_true",
+        help="Preserve nested input folder structure in output (inside key folders when num_keys >= 2)",
     )
 
     return parser.parse_args()
@@ -655,10 +681,20 @@ def main() -> None:
             for key_name, output_frames in key_outputs.items():
                 if args.num_keys >= 2:
                     key_output_dir = output_dir / key_name
-                    key_output_dir.mkdir(parents=True, exist_ok=True)
-                    output_path = key_output_dir / prepared_filename
+                    output_path = _build_output_path(
+                        key_output_dir,
+                        src,
+                        prepared_filename,
+                        preserve_nested_folders=args.preserve_nested_folders,
+                    )
                 else:
-                    output_path = output_dir / prepared_filename
+                    output_path = _build_output_path(
+                        output_dir,
+                        src,
+                        prepared_filename,
+                        preserve_nested_folders=args.preserve_nested_folders,
+                    )
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 key_codecs[key_name] = write_mp4(output_path, output_frames, fps=output_fps)
                 outputs[key_name] = str(output_path.relative_to(output_dir).as_posix())
 
