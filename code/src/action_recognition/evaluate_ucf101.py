@@ -271,9 +271,16 @@ def main() -> None:
     counters: dict[str, int] = defaultdict(int)
     per_class_support: dict[str, int] = defaultdict(int)
     per_class_correct: dict[str, int] = defaultdict(int)
+    per_class_confidence_sum: dict[str, float] = defaultdict(float)
+    per_class_brier_sum: dict[str, float] = defaultdict(float)
     predicted_count_by_class: dict[str, int] = defaultdict(int)
     actual_count_by_class: dict[str, int] = defaultdict(int)
     unknown_label_folders: dict[str, int] = defaultdict(int)
+
+    confidence_sum_total = 0.0
+    confidence_sum_correct = 0.0
+    confidence_sum_incorrect = 0.0
+    brier_sum_total = 0.0
 
     per_video_records: list[dict[str, Any]] = []
     start_ts = time.time()
@@ -348,6 +355,9 @@ def main() -> None:
 
         counters["evaluated"] += 1
         is_correct = int(prediction["predicted_label_index"] == true_idx)
+        confidence = float(prediction["confidence"])
+        brier_error = (confidence - float(is_correct)) ** 2
+
         counters["correct"] += is_correct
         counters["incorrect"] += 1 - is_correct
 
@@ -355,6 +365,13 @@ def main() -> None:
         predicted_count_by_class[prediction["predicted_label"]] += 1
         per_class_support[resolved_true_label] += 1
         per_class_correct[resolved_true_label] += is_correct
+        per_class_confidence_sum[resolved_true_label] += confidence
+        per_class_brier_sum[resolved_true_label] += brier_error
+
+        confidence_sum_total += confidence
+        confidence_sum_correct += confidence * float(is_correct)
+        confidence_sum_incorrect += confidence * float(1 - is_correct)
+        brier_sum_total += brier_error
 
         per_video_records.append(
             {
@@ -376,6 +393,12 @@ def main() -> None:
 
     evaluated = counters["evaluated"]
     overall_accuracy = float(counters["correct"] / evaluated) if evaluated > 0 else None
+    mean_confidence = float(confidence_sum_total / evaluated) if evaluated > 0 else None
+    mean_confidence_correct = float(confidence_sum_correct / counters["correct"]) if counters["correct"] > 0 else None
+    mean_confidence_incorrect = (
+        float(confidence_sum_incorrect / counters["incorrect"]) if counters["incorrect"] > 0 else None
+    )
+    brier_score = float(brier_sum_total / evaluated) if evaluated > 0 else None
 
     per_class_metrics: dict[str, dict[str, Any]] = {}
     for label in sorted(per_class_support.keys()):
@@ -385,6 +408,8 @@ def main() -> None:
             "support": int(support),
             "correct": int(correct),
             "accuracy": float(correct / support) if support > 0 else None,
+            "mean_confidence": float(per_class_confidence_sum[label] / support) if support > 0 else None,
+            "brier_score": float(per_class_brier_sum[label] / support) if support > 0 else None,
         }
 
     summary = {
@@ -393,6 +418,10 @@ def main() -> None:
         "correct": int(counters["correct"]),
         "incorrect": int(counters["incorrect"]),
         "accuracy": overall_accuracy,
+        "brier_score": brier_score,
+        "mean_confidence": mean_confidence,
+        "mean_confidence_correct": mean_confidence_correct,
+        "mean_confidence_incorrect": mean_confidence_incorrect,
         "skipped_unknown_label": int(counters["skipped_unknown_label"]),
         "skipped_unreadable": int(counters["skipped_unreadable"]),
         "inference_errors": int(counters["inference_errors"]),
@@ -449,6 +478,7 @@ def main() -> None:
         evaluated=summary["evaluated"],
         correct=summary["correct"],
         accuracy=summary["accuracy"],
+        brier_score=summary["brier_score"],
         skipped_unknown_label=summary["skipped_unknown_label"],
         skipped_unreadable=summary["skipped_unreadable"],
         inference_errors=summary["inference_errors"],
