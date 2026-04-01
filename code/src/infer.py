@@ -58,6 +58,22 @@ class SourceVideo:
     original_name: str
 
 
+@dataclass(frozen=True)
+class CropRegion:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+    @property
+    def width(self) -> int:
+        return self.x2 - self.x1
+
+    @property
+    def height(self) -> int:
+        return self.y2 - self.y1
+
+
 DEFAULT_VIDEO_PATTERNS = ("*.mp4", "*.mkv", "*.avi", "*.mov")
 
 
@@ -209,6 +225,53 @@ def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) ->
         return frames
     scale = float(2.0 ** float(input_brightness_ev))
     return (frames * scale).clamp(0.0, 1.0)
+
+
+def _detection_area(det) -> float:
+    bbox = det.bbox.detach().float()
+    return float(max(0.0, (bbox[2] - bbox[0]).item()) * max(0.0, (bbox[3] - bbox[1]).item()))
+
+
+def _square_region_from_bbox(bbox: torch.Tensor, frame_h: int, frame_w: int) -> CropRegion | None:
+    if frame_h <= 0 or frame_w <= 0:
+        return None
+
+    box = bbox.detach().float().cpu()
+    x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+
+    side = max(width, height)
+    max_side = float(min(frame_h, frame_w))
+    side = max(1.0, min(side, max_side))
+    side_i = max(1, int(round(side)))
+
+    cx = 0.5 * (x1 + x2)
+    cy = 0.5 * (y1 + y2)
+
+    left = int(round(cx - 0.5 * side_i))
+    top = int(round(cy - 0.5 * side_i))
+    max_left = max(0, frame_w - side_i)
+    max_top = max(0, frame_h - side_i)
+    left = min(max(left, 0), max_left)
+    top = min(max(top, 0), max_top)
+
+    right = left + side_i
+    bottom = top + side_i
+    if right <= left or bottom <= top:
+        return None
+    return CropRegion(x1=left, y1=top, x2=right, y2=bottom)
+
+
+def _resize_like(frame: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+    if frame.shape[-2] == target_h and frame.shape[-1] == target_w:
+        return frame
+    return torch.nn.functional.interpolate(
+        frame.unsqueeze(0),
+        size=(target_h, target_w),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -517,23 +580,69 @@ def main() -> None:
             sample_context = src.youtube_id if src.youtube_id is not None else Path(src.source_id).stem
 
             key_outputs: dict[str, list[torch.Tensor]] = {}
+            key_stats: dict[str, dict[str, int]] = {}
 
             for key_idx, key_vec in enumerate(key_bank, start=1):
-                res = pipeline.forward_eval(
-                    frames,
-                    key_vec,
-                    sample_label=label,
-                    sample_context=sample_context,
-                    use_face_swapper=face_swapper is not None,
-                    swap_for_visuals_only=args.swap_for_visuals_only,
-                    return_frame_pairs=True,
-                )
+                key_name = f"key{key_idx}"
+                key_detected = 0
+                key_processed = 0
+                key_composited = 0
+                key_skipped = 0
+                composited_frames: list[torch.Tensor] = []
 
-                output_image_size = None if face_swapper is not None else cfg.detector.image_size
-                gen_frames = [_normalize_frame(frame, image_size=output_image_size) for frame in res.generated_face_frames]
-                key_outputs[f"key{key_idx}"] = gen_frames
+                for frame_idx in range(frames.shape[0]):
+                    frame = frames[frame_idx]
+                    output_frame = frame.clone()
+                    dets = sorted(list(pipeline.detector.detect(frame)), key=_detection_area, reverse=True)
+                    key_detected += len(dets)
 
-            if any(len(output_frames) == 0 for output_frames in key_outputs.values()):
+                    for det in dets:
+                        region = _square_region_from_bbox(det.bbox, frame.shape[1], frame.shape[2])
+                        if region is None:
+                            key_skipped += 1
+                            continue
+
+                        crop = frame[:, region.y1 : region.y2, region.x1 : region.x2]
+                        if crop.numel() == 0 or crop.shape[1] <= 0 or crop.shape[2] <= 0:
+                            key_skipped += 1
+                            continue
+
+                        key_processed += 1
+                        crop_res = pipeline.forward_eval(
+                            crop.unsqueeze(0),
+                            key_vec,
+                            sample_label=label,
+                            sample_context=f"{sample_context}_frame{frame_idx}",
+                            use_face_swapper=face_swapper is not None,
+                            swap_for_visuals_only=args.swap_for_visuals_only,
+                            return_frame_pairs=True,
+                        )
+
+                        if not crop_res.generated_face_frames:
+                            key_skipped += 1
+                            continue
+
+                        generated_face = crop_res.generated_face_frames[0]
+                        if not torch.is_tensor(generated_face) or generated_face.numel() == 0:
+                            key_skipped += 1
+                            continue
+
+                        patch = _normalize_frame(generated_face, image_size=None).to(output_frame.device)
+                        patch = _resize_like(patch, region.height, region.width)
+                        output_frame[:, region.y1 : region.y2, region.x1 : region.x2] = patch
+                        key_composited += 1
+
+                    composited_frames.append(_normalize_frame(output_frame, image_size=None))
+
+                key_outputs[key_name] = composited_frames
+                key_stats[key_name] = {
+                    "detected_faces": key_detected,
+                    "processed_faces": key_processed,
+                    "composited_faces": key_composited,
+                    "skipped_faces": key_skipped,
+                }
+
+            if any(len(output_frames) != int(frames.shape[0]) for output_frames in key_outputs.values()):
                 skipped_videos += 1
                 continue
 
@@ -568,9 +677,17 @@ def main() -> None:
                     "effective_sample_step": int(effective_sample_step),
                     "sampled_frames": int(frames.shape[0]),
                     "outputs": outputs,
+                    "multi_face_stats": key_stats,
                     "fps": float(output_fps),
                     "codecs": key_codecs,
                 }
+            )
+
+            logging.info(
+                "Processed video %s | sampled_frames=%d | key_stats=%s",
+                src.video_path,
+                int(frames.shape[0]),
+                key_stats,
             )
 
     manifest_path = output_dir / "manifest.json"
