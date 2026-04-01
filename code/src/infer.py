@@ -58,35 +58,12 @@ class SourceVideo:
     original_name: str
 
 
-@dataclass(frozen=True)
-class CropRegion:
-    x1: int
-    y1: int
-    x2: int
-    y2: int
-
-    @property
-    def width(self) -> int:
-        return self.x2 - self.x1
-
-    @property
-    def height(self) -> int:
-        return self.y2 - self.y1
-
-
 DEFAULT_VIDEO_PATTERNS = ("*.mp4", "*.mkv", "*.avi", "*.mov")
 
 
 def _sanitize_segment(value: str) -> str:
     cleaned = value.strip().replace("\\", "_").replace("/", "_")
     return cleaned or "unknown"
-
-
-def _video_folder_identity_from_path(path: Path) -> str:
-    stem = path.stem
-    if "_" not in stem:
-        return stem
-    return stem.split("_", 1)[0]
 
 
 def _iter_video_paths(root: Path, patterns: tuple[str, ...] = DEFAULT_VIDEO_PATTERNS) -> list[Path]:
@@ -233,53 +210,6 @@ def _apply_input_brightness(frames: torch.Tensor, input_brightness_ev: float) ->
         return frames
     scale = float(2.0 ** float(input_brightness_ev))
     return (frames * scale).clamp(0.0, 1.0)
-
-
-def _detection_area(det) -> float:
-    bbox = det.bbox.detach().float()
-    return float(max(0.0, (bbox[2] - bbox[0]).item()) * max(0.0, (bbox[3] - bbox[1]).item()))
-
-
-def _square_region_from_bbox(bbox: torch.Tensor, frame_h: int, frame_w: int) -> CropRegion | None:
-    if frame_h <= 0 or frame_w <= 0:
-        return None
-
-    box = bbox.detach().float().cpu()
-    x1, y1, x2, y2 = [float(v) for v in box.tolist()]
-    width = max(1.0, x2 - x1)
-    height = max(1.0, y2 - y1)
-
-    side = max(width, height)
-    max_side = float(min(frame_h, frame_w))
-    side = max(1.0, min(side, max_side))
-    side_i = max(1, int(round(side)))
-
-    cx = 0.5 * (x1 + x2)
-    cy = 0.5 * (y1 + y2)
-
-    left = int(round(cx - 0.5 * side_i))
-    top = int(round(cy - 0.5 * side_i))
-    max_left = max(0, frame_w - side_i)
-    max_top = max(0, frame_h - side_i)
-    left = min(max(left, 0), max_left)
-    top = min(max(top, 0), max_top)
-
-    right = left + side_i
-    bottom = top + side_i
-    if right <= left or bottom <= top:
-        return None
-    return CropRegion(x1=left, y1=top, x2=right, y2=bottom)
-
-
-def _resize_like(frame: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
-    if frame.shape[-2] == target_h and frame.shape[-1] == target_w:
-        return frame
-    return torch.nn.functional.interpolate(
-        frame.unsqueeze(0),
-        size=(target_h, target_w),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(0)
 
 
 def _build_output_path(
@@ -436,6 +366,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_videos_per_youtube_id", type=int, default=None, help="Max videos sampled per YouTube ID (voxceleb_video)")
     parser.add_argument("--max_files", type=int, default=None, help="Global maximum number of source videos")
     parser.add_argument("--max_frames_per_video", type=int, default=64, help="Maximum sampled frames per source video")
+    parser.add_argument("--batch_size", type=int, default=1, help="Number of sampled frames to process at once during inference")
     parser.add_argument("--target_sample_fps", type=float, default=10.0, help="Target FPS for frame sampling before anonymization")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for key generation")
 
@@ -516,6 +447,8 @@ def main() -> None:
         raise ValueError("--target_sample_fps must be > 0")
     if args.num_keys < 1:
         raise ValueError("--num_keys must be >= 1")
+    if args.batch_size <= 0:
+        raise ValueError("--batch_size must be > 0")
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -564,11 +497,6 @@ def main() -> None:
         pipeline.embedder.eval()
 
     sources = _collect_sources(args)
-    identity_to_index: dict[str, int] = {}
-    for src in sources:
-        if src.identity not in identity_to_index:
-            identity_to_index[src.identity] = len(identity_to_index)
-
     rng = torch.Generator(device=device)
     rng.manual_seed(args.seed)
     projector_dtype = next(pipeline.projector.parameters()).dtype
@@ -602,9 +530,6 @@ def main() -> None:
             frames = _apply_input_brightness(frames, args.input_brightness_ev)
             frames = frames.to(device)
 
-            label = identity_to_index[src.identity]
-            sample_context = src.youtube_id if src.youtube_id is not None else Path(src.source_id).stem
-
             key_outputs: dict[str, list[torch.Tensor]] = {}
             key_stats: dict[str, dict[str, int]] = {}
 
@@ -616,49 +541,33 @@ def main() -> None:
                 key_skipped = 0
                 composited_frames: list[torch.Tensor] = []
 
-                for frame_idx in range(frames.shape[0]):
-                    frame = frames[frame_idx]
-                    output_frame = frame.clone()
-                    dets = sorted(list(pipeline.detector.detect(frame)), key=_detection_area, reverse=True)
-                    key_detected += len(dets)
+                for chunk_start in range(0, int(frames.shape[0]), args.batch_size):
+                    chunk_end = min(int(frames.shape[0]), chunk_start + args.batch_size)
+                    frame_chunk = frames[chunk_start:chunk_end]
+                    chunk_res = pipeline.infer_frames_batched(
+                        frame_chunk,
+                        key_vec,
+                        use_face_swapper=face_swapper is not None,
+                        swap_for_visuals_only=args.swap_for_visuals_only,
+                    )
 
-                    for det in dets:
-                        region = _square_region_from_bbox(det.bbox, frame.shape[1], frame.shape[2])
-                        if region is None:
-                            key_skipped += 1
-                            continue
+                    key_detected += int(chunk_res.stats.get("detected_faces", 0))
+                    key_processed += int(chunk_res.stats.get("processed_faces", 0))
+                    key_composited += int(chunk_res.stats.get("composited_faces", 0))
+                    key_skipped += int(chunk_res.stats.get("skipped_faces", 0))
 
-                        crop = frame[:, region.y1 : region.y2, region.x1 : region.x2]
-                        if crop.numel() == 0 or crop.shape[1] <= 0 or crop.shape[2] <= 0:
-                            key_skipped += 1
-                            continue
+                    if len(chunk_res.output_frames) != (chunk_end - chunk_start):
+                        skipped_videos += 1
+                        composited_frames = []
+                        break
 
-                        key_processed += 1
-                        crop_res = pipeline.forward_eval(
-                            crop.unsqueeze(0),
-                            key_vec,
-                            sample_label=label,
-                            sample_context=f"{sample_context}_frame{frame_idx}",
-                            use_face_swapper=face_swapper is not None,
-                            swap_for_visuals_only=args.swap_for_visuals_only,
-                            return_frame_pairs=True,
-                        )
+                    composited_frames.extend([
+                        _normalize_frame(output_frame, image_size=None)
+                        for output_frame in chunk_res.output_frames
+                    ])
 
-                        if not crop_res.generated_face_frames:
-                            key_skipped += 1
-                            continue
-
-                        generated_face = crop_res.generated_face_frames[0]
-                        if not torch.is_tensor(generated_face) or generated_face.numel() == 0:
-                            key_skipped += 1
-                            continue
-
-                        patch = _normalize_frame(generated_face, image_size=None).to(output_frame.device)
-                        patch = _resize_like(patch, region.height, region.width)
-                        output_frame[:, region.y1 : region.y2, region.x1 : region.x2] = patch
-                        key_composited += 1
-
-                    composited_frames.append(_normalize_frame(output_frame, image_size=None))
+                if len(composited_frames) != int(frames.shape[0]):
+                    continue
 
                 key_outputs[key_name] = composited_frames
                 key_stats[key_name] = {

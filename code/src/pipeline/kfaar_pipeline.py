@@ -32,6 +32,12 @@ class KfaarResult:
     generated_face_frames: Sequence[torch.Tensor]
     w_pre_boundary: Optional[torch.Tensor] = None
 
+
+@dataclass(frozen=True)
+class InferenceBatchResult:
+    output_frames: list[torch.Tensor]
+    stats: dict[str, int]
+
 class KfaarPipeline:
     def __init__(
         self,
@@ -318,6 +324,153 @@ class KfaarPipeline:
                 use_face_swapper=use_face_swapper,
                 swap_for_visuals_only=swap_for_visuals_only,
                 return_frame_pairs=return_frame_pairs,
+            )
+
+    def infer_frames_batched(
+        self,
+        frames: torch.Tensor,
+        key: torch.Tensor,
+        *,
+        use_face_swapper: bool = False,
+        swap_for_visuals_only: bool = True,
+    ) -> InferenceBatchResult:
+        """Inference-only full-frame multi-face path; does not affect training codepaths."""
+        if self.stylegan is None:
+            raise RuntimeError("StyleGAN is not initialized")
+
+        with torch.no_grad():
+            device = self.device
+            frames_t = self._to_sequence_tensor(frames, device=device)
+            if frames_t.dim() != 4:
+                raise ValueError(f"Expected frames with shape [N, C, H, W], got {tuple(frames_t.shape)}")
+
+            output_frames = [frames_t[idx].clone() for idx in range(frames_t.shape[0])]
+            stats = {
+                "detected_faces": 0,
+                "processed_faces": 0,
+                "composited_faces": 0,
+                "skipped_faces": 0,
+            }
+
+            records: list[dict[str, object]] = []
+            for frame_idx in range(frames_t.shape[0]):
+                frame = frames_t[frame_idx]
+                dets = sorted(list(self.detector.detect(frame)), key=self._detection_area, reverse=True)
+                stats["detected_faces"] += len(dets)
+
+                for det in dets:
+                    region = self._square_region_from_bbox(det.bbox, frame.shape[1], frame.shape[2])
+                    if region is None:
+                        stats["skipped_faces"] += 1
+                        continue
+
+                    x1, y1, x2, y2 = region
+                    crop = frame[:, y1:y2, x1:x2]
+                    if crop.numel() == 0 or crop.shape[1] <= 0 or crop.shape[2] <= 0:
+                        stats["skipped_faces"] += 1
+                        continue
+
+                    stats["processed_faces"] += 1
+                    records.append(
+                        {
+                            "frame_idx": frame_idx,
+                            "region": region,
+                            "crop": crop,
+                        }
+                    )
+
+            if not records:
+                return InferenceBatchResult(
+                    output_frames=[self._normalize_visual_frame(frame) for frame in output_frames],
+                    stats=stats,
+                )
+
+            aligned_inputs: list[torch.Tensor] = []
+            valid_records: list[dict[str, object]] = []
+            for record in records:
+                crop = record["crop"]
+                if not torch.is_tensor(crop):
+                    stats["skipped_faces"] += 1
+                    continue
+
+                crop_dets = self.detector.detect(crop)
+                if not crop_dets:
+                    stats["skipped_faces"] += 1
+                    continue
+
+                crop_top = max(crop_dets, key=lambda d: d.score)
+                aligned_input = self.aligner.align(crop, crop_top).to(device)
+                aligned_inputs.append(aligned_input)
+                valid_records.append(record)
+
+            if not valid_records:
+                return InferenceBatchResult(
+                    output_frames=[self._normalize_visual_frame(frame) for frame in output_frames],
+                    stats=stats,
+                )
+
+            real_embeddings = torch.zeros((len(valid_records), 512), device=device)
+            embedded_inputs = self.embedder.embed(aligned_inputs, with_grad=False)
+            for idx, emb in enumerate(embedded_inputs):
+                real_embeddings[idx] = emb
+
+            key_t = key.to(device)
+            key_batch = key_t.view(1, -1).expand(len(valid_records), -1)
+            projected = self.projector.project(real_embeddings, key_batch)
+            w = self._project_to_stylegan_w(projected)
+            generated = self.stylegan.synthesize(w, noise_mode="const").clamp(-1, 1).add(1).div(2.0)
+
+            for idx, record in enumerate(valid_records):
+                frame_idx = int(record["frame_idx"])
+                region = record["region"]
+                if not isinstance(region, tuple) or len(region) != 4:
+                    stats["skipped_faces"] += 1
+                    continue
+
+                x1, y1, x2, y2 = region
+                target_h = y2 - y1
+                target_w = x2 - x1
+                if target_h <= 0 or target_w <= 0:
+                    stats["skipped_faces"] += 1
+                    continue
+
+                generated_face = generated[idx]
+                visual = generated_face
+
+                if use_face_swapper:
+                    if self.face_swapper is None and not self._warned_face_swapper:
+                        logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
+                        self._warned_face_swapper = True
+                    elif self.face_swapper is not None:
+                        stylegan_dets = self.detector.detect(generated_face)
+                        if stylegan_dets:
+                            stylegan_top = max(stylegan_dets, key=lambda d: d.score)
+                            aligned_stylegan = self.aligner.align(generated_face, stylegan_top).to(device)
+
+                            is_diffusion = type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+                            target_to_swap = output_frames[frame_idx] if is_diffusion else aligned_inputs[idx]
+                            swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
+                            if swapped is not None:
+                                if is_diffusion:
+                                    output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
+                                    stats["composited_faces"] += 1
+                                    continue
+                                visual = swapped
+
+                patch = self._normalize_visual_frame(visual)
+                patch = torch.nn.functional.interpolate(
+                    patch.unsqueeze(0),
+                    size=(target_h, target_w),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0)
+
+                output_frames[frame_idx][:, y1:y2, x1:x2] = patch
+                stats["composited_faces"] += 1
+
+            return InferenceBatchResult(
+                output_frames=[self._normalize_visual_frame(frame) for frame in output_frames],
+                stats=stats,
             )
 
     def hpvg_train_step(
@@ -679,6 +832,49 @@ class KfaarPipeline:
     def _to_sequence_tensor(frames, device):
         t = frames if torch.is_tensor(frames) else torch.from_numpy(frames)
         return t.float().to(device)
+
+    @staticmethod
+    def _normalize_visual_frame(frame: torch.Tensor) -> torch.Tensor:
+        out = frame.detach().float()
+        if out.min().item() < 0.0 or out.max().item() > 1.0:
+            out = out.add(1.0).div(2.0)
+        return out.clamp(0.0, 1.0)
+
+    @staticmethod
+    def _detection_area(det: Detection) -> float:
+        bbox = det.bbox.detach().float()
+        return float(max(0.0, (bbox[2] - bbox[0]).item()) * max(0.0, (bbox[3] - bbox[1]).item()))
+
+    @staticmethod
+    def _square_region_from_bbox(bbox: torch.Tensor, frame_h: int, frame_w: int) -> tuple[int, int, int, int] | None:
+        if frame_h <= 0 or frame_w <= 0:
+            return None
+
+        box = bbox.detach().float().cpu()
+        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+
+        side = max(width, height)
+        max_side = float(min(frame_h, frame_w))
+        side = max(1.0, min(side, max_side))
+        side_i = max(1, int(round(side)))
+
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+
+        left = int(round(cx - 0.5 * side_i))
+        top = int(round(cy - 0.5 * side_i))
+        max_left = max(0, frame_w - side_i)
+        max_top = max(0, frame_h - side_i)
+        left = min(max(left, 0), max_left)
+        top = min(max(top, 0), max_top)
+
+        right = left + side_i
+        bottom = top + side_i
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
 
     def _project_to_stylegan_w(self, projected_z: torch.Tensor) -> torch.Tensor:
         if self.stylegan is None:
