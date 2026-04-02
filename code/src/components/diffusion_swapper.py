@@ -50,7 +50,6 @@ class DiffusionFaceSwapper:
         detector_size: int = 640,
         seed: int = 0,
         download_if_missing: bool = True,
-        hand_seg_model_path: str = "hand-seg.pt", # Path to your custom YOLO hand weights
         **kwargs
     ) -> None:
         if not torch.cuda.is_available():
@@ -207,8 +206,6 @@ class DiffusionFaceSwapper:
             # === YOLO Segmentation Models ===
             # Standard COCO for items (hairdryer, toothbrush, cups, phones, etc.)
             self.coco_seg_model = YOLO('yolov8n-seg.pt')
-            # Custom Hand Seg for isolating hands safely
-            self.hand_seg_model = YOLO(hand_seg_model_path)
             
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             self.app = FaceAnalysis(name=detector_name, root=str(self.checkpoint_dir / "third_party"), providers=providers)
@@ -460,28 +457,20 @@ class DiffusionFaceSwapper:
                     ).clip(0, 255).astype(np.uint8)
                     blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
 
-                    # --- DUAL YOLO PROTECTION (COCO Items + Hands) ---
+                    # --- YOLO COCO PROTECTION ---
                     object_mask_np = np.zeros_like(blend_mask_np)
 
-                    # 1. Catch standard objects (39=bottle, 41=cup, 67=phone, 78=hair dryer, 79=toothbrush)
+                    # Catch standard objects (39=bottle, 41=cup, 67=phone, 78=hair dryer, 79=toothbrush)
                     coco_results = self.coco_seg_model(item["tar_pil_512"], classes=[39, 41, 67, 78, 79], verbose=False)
                     if len(coco_results) > 0 and coco_results[0].masks is not None:
                         mask_data = coco_results[0].masks.data.cpu().numpy()
                         if mask_data.size > 0:
                             combined_coco = np.any(mask_data, axis=0).astype(np.float32)
-                            object_mask_np = np.maximum(object_mask_np, cv2.resize(combined_coco, (512, 512))[:, :, np.newaxis])
+                            object_mask_np = cv2.resize(combined_coco, (512, 512))[:, :, np.newaxis]
 
-                    # 2. Catch hands using the custom hand checkpoint
-                    hand_results = self.hand_seg_model(item["tar_pil_512"], verbose=False)
-                    if len(hand_results) > 0 and hand_results[0].masks is not None:
-                        mask_data = hand_results[0].masks.data.cpu().numpy()
-                        if mask_data.size > 0:
-                            combined_hands = np.any(mask_data, axis=0).astype(np.float32)
-                            object_mask_np = np.maximum(object_mask_np, cv2.resize(combined_hands, (512, 512))[:, :, np.newaxis])
-
-                    # Apply the combined YOLO safety mask
+                    # Apply the safety mask
                     safe_blend_mask = blend_mask_np * (1.0 - object_mask_np)
-                    # -------------------------------------------------
+                    # ----------------------------
 
                     composite_512 = (gen_np * safe_blend_mask + tar_512_np * (1.0 - safe_blend_mask)).astype(np.uint8)
 
