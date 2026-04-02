@@ -50,6 +50,7 @@ class DiffusionFaceSwapper:
         detector_size: int = 640,
         seed: int = 0,
         download_if_missing: bool = True,
+        hand_seg_model_path: str = "hand-seg.pt", # Path to your custom YOLO hand weights
         **kwargs
     ) -> None:
         if not torch.cuda.is_available():
@@ -110,11 +111,7 @@ class DiffusionFaceSwapper:
             StableDiffusionFaceAdapterPipeline = face_adapter_pipeline_mod.StableDiffusionFaceAdapterPipeline
             draw_pts70_batch = face_adapter_pipeline_mod.draw_pts70_batch
 
-            # === ADD THIS TO FIX THE TYPE-CHECKING CRASH ===
-            # Override the validation method at the class level to prevent the 
-            # outdated positional arguments from hitting Diffusers 0.27.2
             StableDiffusionFaceAdapterPipeline.check_inputs = lambda *args, **kwargs: None
-            # ===============================================
 
             self._set_seed = set_seed
             self._datasets_faceswap = datasets_faceswap
@@ -201,14 +198,17 @@ class DiffusionFaceSwapper:
                 )
             )
 
-            # === Load the 19-class parsing model for occlusion-aware target masking ===
+            # === Face Parsing Model ===
             model_parsing = importlib.import_module("third_party.model_parsing")
             self.net_seg_parsing = model_parsing.get_face_parsing(
                 str(self.checkpoint_dir / "third_party" / "79999_iter.pth")
             ).eval().to(self.device)
 
-            # === Load YOLO Segmentation for Hand/Context Protection ===
-            self.seg_model = YOLO('yolov8n-seg.pt')
+            # === YOLO Segmentation Models ===
+            # Standard COCO for items (hairdryer, toothbrush, cups, phones, etc.)
+            self.coco_seg_model = YOLO('yolov8n-seg.pt')
+            # Custom Hand Seg for isolating hands safely
+            self.hand_seg_model = YOLO(hand_seg_model_path)
             
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             self.app = FaceAnalysis(name=detector_name, root=str(self.checkpoint_dir / "third_party"), providers=providers)
@@ -219,8 +219,7 @@ class DiffusionFaceSwapper:
                 empty_prompt_path = self.checkpoint_dir / "empty_prompt_embedding.pth"
             if not empty_prompt_path.exists():
                 raise FileNotFoundError(
-                    f"Missing empty prompt embedding file at {self.faceadapter_root / 'empty_prompt_embedding.pth'} "
-                    f"or {self.checkpoint_dir / 'empty_prompt_embedding.pth'}"
+                    f"Missing empty prompt embedding file"
                 )
             self.empty_prompt_token = torch.load(
                 str(empty_prompt_path),
@@ -250,11 +249,8 @@ class DiffusionFaceSwapper:
         bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         face_info = self.app.get(bgr)
         
-        # If standard detection fails, the image is likely a tight crop.
-        # We temporarily pad it to give the detector "context".
         if not face_info:
             h, w = bgr.shape[:2]
-            # Pad by 50% on all sides
             pad_h, pad_w = int(h * 0.5), int(w * 0.5)
             padded_bgr = cv2.copyMakeBorder(
                 bgr, pad_h, pad_h, pad_w, pad_w, 
@@ -262,20 +258,14 @@ class DiffusionFaceSwapper:
             )
             
             face_info = self.app.get(padded_bgr)
-            
             if not face_info:
-                # If it STILL fails, the tensor is truly invalid/empty
                 raise RuntimeError("No face detected even after padding.")
                 
             largest_face = self._largest_face(face_info)
-            
-            # Shift the bounding box coordinates back to the unpadded image space
             largest_face["bbox"][0] -= pad_w
             largest_face["bbox"][1] -= pad_h
             largest_face["bbox"][2] -= pad_w
             largest_face["bbox"][3] -= pad_h
-            
-            # Shift the 5 facial landmarks back to the unpadded image space
             largest_face["kps"][:, 0] -= pad_w
             largest_face["kps"][:, 1] -= pad_h
             
@@ -307,19 +297,16 @@ class DiffusionFaceSwapper:
             bbox = dets[0:4].reshape((2, 2))
             bbox_pts4 = ds.get_box_lm4p(bbox)
 
-        # Map crop to Face-Adapter 512x512 space
         warp_mat_crop = ds.transformation_from_points(bbox_pts4, ds.mean_box_lm4p_512)
         image_crop512 = cv2.warpAffine(image_np, warp_mat_crop, (self.test_image_size, self.test_image_size), flags=cv2.INTER_LINEAR)
         image_crop512_pil = Image.fromarray(image_crop512)
 
-        # Map 512x512 to 256x256 for feature extractors
         face_info_512 = self._detect_face_info(image_crop512)
         pts5 = face_info_512["kps"]
         warp_mat_256 = ds.get_affine_transform(pts5, ds.mean_face_lm5p_256)
         image_crop256 = cv2.warpAffine(image_crop512, warp_mat_256, (256, 256), flags=cv2.INTER_LINEAR)
         image_crop256_pil = Image.fromarray(image_crop256)
 
-        # Standardizing normalization: self.pil2tensor usually maps to [-1, 1]
         image_256_t = self.pil2tensor(image_crop256_pil).view(1, 3, 256, 256).to(self.device)
         image_512_t = self.pil2tensor(image_crop512_pil).view(1, 3, self.test_image_size, self.test_image_size).to(self.device)
         clip_t = self.clip_image_processor(images=image_crop512_pil, return_tensors="pt").pixel_values.view(-1, 3, 224, 224).to(self.device)
@@ -334,28 +321,21 @@ class DiffusionFaceSwapper:
         }
     
     def _build_swap_mask(self, images_tar: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Generates occlusion-aware face mask and blend mask using the 19-class parser."""
-        # 19 Classes: (0, 'background'), (1, 'skin'), (2, 'l_brow'), (3, 'r_brow'), (4, 'l_eye'), (5, 'r_eye'),
-        # (6, 'eye_g'), (7, 'l_ear'), (8, 'r_ear'), (9, 'ear_r'), (10, 'nose'), (11, 'mouth'), (12, 'u_lip'), 
-        # (13, 'l_lip'), (14, 'neck'), (15, 'neck_l'), (16, 'cloth'), (17, 'hair'), (18, 'hat')
-        
         seg_pred = self.net_seg_parsing(images_tar)[0]
         masks_tar = torch.argmax(
             F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode='bilinear', align_corners=False), 
             dim=1, keepdim=True
         ) 
 
-        # Build base face mask (skin, brows, eyes, nose, mouth) minus glasses
         mask_0_6 = (masks_tar > 0) & (masks_tar < 7)
         mask_9_14 = (masks_tar > 9) & (masks_tar < 14)
         face_masks_tar = torch.logical_or(mask_0_6, mask_9_14).float() - (masks_tar == 6).float()
         
-        # Build extended face mask including ears, minus earrings and glasses
         mask_0_14 = (masks_tar > 0) & (masks_tar < 14)
         face_masks_tar_withear = mask_0_14.float() - (masks_tar == 9).float() - (masks_tar == 6).float()
         
-        # --- MODIFIED LOGIC ---
-        # Expand occlusion mask to strictly protect background, clothing, and hair from dilation
+        # --- Face Adapter Background/Hair Fix ---
+        # 0 = Background, 16 = Clothes, 17 = Hair. This protects them from the dilation step
         occ_mask = ((masks_tar == 0) | (masks_tar == 6) | (masks_tar == 9) | 
                     (masks_tar == 15) | (masks_tar == 16) | (masks_tar == 17) | 
                     (masks_tar == 18)).float() 
@@ -363,12 +343,10 @@ class DiffusionFaceSwapper:
         dilated_face_mask = F.max_pool2d(face_masks_tar, kernel_size=65, stride=1, padding=32)
         face_masks_tar = torch.max(face_masks_tar_withear, dilated_face_mask)
         
-        # Subtract ALL occlusions (including background objects) from the final face mask
         face_masks_tar = face_masks_tar * (1 - occ_mask)
         face_masks_tar = F.max_pool2d(face_masks_tar, kernel_size=5, stride=1, padding=2)
-        # ----------------------
+        # ----------------------------------------
         
-        # Generate the blurred blend mask for final compositing
         face_masks_tar_pad = F.pad(face_masks_tar, (16, 16, 16, 16), "constant", 0)
         blend_mask = F.max_pool2d(face_masks_tar_pad, kernel_size=17, stride=1, padding=8)
         blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
@@ -438,7 +416,7 @@ class DiffusionFaceSwapper:
                                 "control_image": controlnet_image_swap,
                                 "blend_mask": blend_mask,
                                 "tar_image_512": tar["image_512"],
-                                "tar_pil_512": tar["pil_512"], # Kept to generate perfect alignment with segmentation
+                                "tar_pil_512": tar["pil_512"],
                                 "warp_mat_512": tar["warp_mat_512"],
                                 "target_pil": target_pil,
                                 "target_hw": (h, w),
@@ -482,20 +460,28 @@ class DiffusionFaceSwapper:
                     ).clip(0, 255).astype(np.uint8)
                     blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
 
-                    # --- YOLO OBJECT PROTECTION ---
-                    # Protect objects in the 512x512 aligned frame before composite
-                    # class 0 = person/hand. Add more COCO classes to the list if needed (e.g. 41 for cup, 67 for cell phone)
-                    yolo_results = self.seg_model(item["tar_pil_512"], classes=[0], verbose=False)
+                    # --- DUAL YOLO PROTECTION (COCO Items + Hands) ---
                     object_mask_np = np.zeros_like(blend_mask_np)
 
-                    if len(yolo_results) > 0 and yolo_results[0].masks is not None:
-                        mask_data = yolo_results[0].masks.data.cpu().numpy()
+                    # 1. Catch standard objects (39=bottle, 41=cup, 67=phone, 78=hair dryer, 79=toothbrush)
+                    coco_results = self.coco_seg_model(item["tar_pil_512"], classes=[39, 41, 67, 78, 79], verbose=False)
+                    if len(coco_results) > 0 and coco_results[0].masks is not None:
+                        mask_data = coco_results[0].masks.data.cpu().numpy()
                         if mask_data.size > 0:
-                            combined_obj_mask = np.any(mask_data, axis=0).astype(np.float32)
-                            object_mask_np = cv2.resize(combined_obj_mask, (512, 512))[:, :, np.newaxis]
+                            combined_coco = np.any(mask_data, axis=0).astype(np.float32)
+                            object_mask_np = np.maximum(object_mask_np, cv2.resize(combined_coco, (512, 512))[:, :, np.newaxis])
 
+                    # 2. Catch hands using the custom hand checkpoint
+                    hand_results = self.hand_seg_model(item["tar_pil_512"], verbose=False)
+                    if len(hand_results) > 0 and hand_results[0].masks is not None:
+                        mask_data = hand_results[0].masks.data.cpu().numpy()
+                        if mask_data.size > 0:
+                            combined_hands = np.any(mask_data, axis=0).astype(np.float32)
+                            object_mask_np = np.maximum(object_mask_np, cv2.resize(combined_hands, (512, 512))[:, :, np.newaxis])
+
+                    # Apply the combined YOLO safety mask
                     safe_blend_mask = blend_mask_np * (1.0 - object_mask_np)
-                    # ------------------------------
+                    # -------------------------------------------------
 
                     composite_512 = (gen_np * safe_blend_mask + tar_512_np * (1.0 - safe_blend_mask)).astype(np.uint8)
 
