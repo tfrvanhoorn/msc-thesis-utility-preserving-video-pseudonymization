@@ -203,8 +203,7 @@ class DiffusionFaceSwapper:
                 str(self.checkpoint_dir / "third_party" / "79999_iter.pth")
             ).eval().to(self.device)
 
-            # === YOLO Segmentation Models ===
-            # Standard COCO for items (hairdryer, toothbrush, cups, phones, etc.)
+            # === YOLO Segmentation Model (Items ONLY) ===
             self.coco_seg_model = YOLO('yolov8n-seg.pt')
             
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -318,6 +317,7 @@ class DiffusionFaceSwapper:
         }
     
     def _build_swap_mask(self, images_tar: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # RESTORED TO ORIGINAL WORKING LOGIC
         seg_pred = self.net_seg_parsing(images_tar)[0]
         masks_tar = torch.argmax(
             F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode='bilinear', align_corners=False), 
@@ -331,18 +331,11 @@ class DiffusionFaceSwapper:
         mask_0_14 = (masks_tar > 0) & (masks_tar < 14)
         face_masks_tar_withear = mask_0_14.float() - (masks_tar == 9).float() - (masks_tar == 6).float()
         
-        # --- Face Adapter Background/Hair Fix ---
-        # 0 = Background, 16 = Clothes, 17 = Hair. This protects them from the dilation step
-        occ_mask = ((masks_tar == 0) | (masks_tar == 6) | (masks_tar == 9) | 
-                    (masks_tar == 15) | (masks_tar == 16) | (masks_tar == 17) | 
-                    (masks_tar == 18)).float() 
+        occ_mask = ((masks_tar == 6) | (masks_tar == 9) | (masks_tar == 15) | (masks_tar == 18)).float() 
 
-        dilated_face_mask = F.max_pool2d(face_masks_tar, kernel_size=65, stride=1, padding=32)
-        face_masks_tar = torch.max(face_masks_tar_withear, dilated_face_mask)
-        
+        face_masks_tar = torch.max(face_masks_tar_withear, F.max_pool2d(face_masks_tar, kernel_size=65, stride=1, padding=32))
         face_masks_tar = face_masks_tar * (1 - occ_mask)
         face_masks_tar = F.max_pool2d(face_masks_tar, kernel_size=5, stride=1, padding=2)
-        # ----------------------------------------
         
         face_masks_tar_pad = F.pad(face_masks_tar, (16, 16, 16, 16), "constant", 0)
         blend_mask = F.max_pool2d(face_masks_tar_pad, kernel_size=17, stride=1, padding=8)
@@ -457,7 +450,7 @@ class DiffusionFaceSwapper:
                     ).clip(0, 255).astype(np.uint8)
                     blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
 
-                    # --- YOLO COCO PROTECTION ---
+                    # --- YOLO COCO PROTECTION (BULLETPROOF MATH) ---
                     object_mask_np = np.zeros_like(blend_mask_np)
 
                     # Catch standard objects (39=bottle, 41=cup, 67=phone, 78=hair dryer, 79=toothbrush)
@@ -465,12 +458,16 @@ class DiffusionFaceSwapper:
                     if len(coco_results) > 0 and coco_results[0].masks is not None:
                         mask_data = coco_results[0].masks.data.cpu().numpy()
                         if mask_data.size > 0:
-                            combined_coco = np.any(mask_data, axis=0).astype(np.float32)
-                            object_mask_np = cv2.resize(combined_coco, (512, 512))[:, :, np.newaxis]
+                            # Compress multiple objects into a single flat 2D mask
+                            combined_coco = np.max(mask_data, axis=0)
+                            # Resize to FaceAdapter's 512x512 space
+                            resized_coco = cv2.resize(combined_coco, (512, 512), interpolation=cv2.INTER_LINEAR)
+                            # Binarize to completely remove floating point fading, ensuring a hard cut
+                            object_mask_np = (resized_coco > 0.5).astype(np.float32)[:, :, np.newaxis]
 
-                    # Apply the safety mask
+                    # Punch a hole in the FaceAdapter mask where the object is detected
                     safe_blend_mask = blend_mask_np * (1.0 - object_mask_np)
-                    # ----------------------------
+                    # -----------------------------------------------
 
                     composite_512 = (gen_np * safe_blend_mask + tar_512_np * (1.0 - safe_blend_mask)).astype(np.uint8)
 
