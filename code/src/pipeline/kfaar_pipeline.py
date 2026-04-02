@@ -376,6 +376,7 @@ class KfaarPipeline:
                             "frame_idx": frame_idx,
                             "region": region,
                             "crop": crop,
+                            "detection": det,
                         }
                     )
 
@@ -394,12 +395,19 @@ class KfaarPipeline:
                     continue
 
                 crop_dets = self.detector.detect(crop)
-                if not crop_dets:
+                if crop_dets:
+                    crop_top = max(crop_dets, key=lambda d: d.score)
+                else:
+                    crop_top = self._fallback_crop_detection(record, crop)
+                    if crop_top is None:
+                        stats["skipped_faces"] += 1
+                        continue
+
+                try:
+                    aligned_input = self.aligner.align(crop, crop_top).to(device)
+                except Exception:
                     stats["skipped_faces"] += 1
                     continue
-
-                crop_top = max(crop_dets, key=lambda d: d.score)
-                aligned_input = self.aligner.align(crop, crop_top).to(device)
                 aligned_inputs.append(aligned_input)
                 valid_records.append(record)
 
@@ -931,6 +939,41 @@ class KfaarPipeline:
         if right <= left or bottom <= top:
             return None
         return left, top, right, bottom
+
+    @staticmethod
+    def _fallback_crop_detection(record: dict[str, object], crop: torch.Tensor) -> Detection | None:
+        parent = record.get("detection")
+        region = record.get("region")
+        if not isinstance(parent, Detection):
+            return None
+        if not isinstance(region, tuple) or len(region) != 4:
+            return None
+
+        x1, y1, _, _ = [int(v) for v in region]
+        h, w = int(crop.shape[1]), int(crop.shape[2])
+        if h <= 0 or w <= 0:
+            return None
+
+        shift = torch.tensor([x1, y1, x1, y1], dtype=torch.float32, device=parent.bbox.device)
+        local_bbox = parent.bbox.detach().float() - shift
+        local_bbox[0::2] = local_bbox[0::2].clamp(0.0, float(w))
+        local_bbox[1::2] = local_bbox[1::2].clamp(0.0, float(h))
+        if local_bbox[2] <= local_bbox[0] or local_bbox[3] <= local_bbox[1]:
+            return None
+
+        if torch.is_tensor(parent.landmarks):
+            local_landmarks = parent.landmarks.detach().float().clone()
+            local_landmarks[:, 0] = (local_landmarks[:, 0] - float(x1)).clamp(0.0, float(w))
+            local_landmarks[:, 1] = (local_landmarks[:, 1] - float(y1)).clamp(0.0, float(h))
+        else:
+            local_landmarks = torch.zeros((5, 2), dtype=torch.float32, device=parent.bbox.device)
+
+        return Detection(
+            bbox=local_bbox,
+            landmarks=local_landmarks,
+            score=parent.score,
+            aligned=None,
+        )
 
     def _project_to_stylegan_w(self, projected_z: torch.Tensor) -> torch.Tensor:
         if self.stylegan is None:

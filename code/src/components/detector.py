@@ -32,10 +32,10 @@ class FaceDetector:
 class MTCNNDetector(FaceDetector):
     def __init__(
         self,
-        image_size: int = 160,
+        image_size: int = 256,
         margin: int = 0,
-        score_threshold: float = 0.4,
-        min_face_size: int | None = 20,
+        score_threshold: float = 0.25,
+        min_face_size: int | None = 10,
         keep_all: bool = True,
         post_process: bool = False,
         device: str | torch.device | None = None,
@@ -53,22 +53,36 @@ class MTCNNDetector(FaceDetector):
             image_size=image_size,
             margin=margin,
             keep_all=keep_all,
-            thresholds=(0.6, 0.7, 0.7),
+            thresholds=(0.5, 0.6, 0.6),
             min_face_size=min_face_size,
             post_process=post_process,
             device=self.device,
         )
         self._warned_batch_fallback = False
+        self._warned_empty_detect = False
+        self._small_face_retry_scale = 2.0
 
     def detect(self, image: torch.Tensor) -> Sequence[Detection]:
         prepared = self._prepare_image_for_mtcnn(image)
         if prepared is None:
             return []
 
-        with torch.no_grad():
-            boxes, probs, landmarks = self._mtcnn.detect(prepared, landmarks=True)
+        boxes, probs, landmarks = self._safe_mtcnn_detect(prepared)
+        detections = self._postprocess_single_detect(boxes, probs, landmarks)
+        if detections:
+            return detections
 
-        return self._postprocess_single_detect(boxes, probs, landmarks)
+        if self._small_face_retry_scale <= 1.0:
+            return detections
+        upscaled = self._upscale_for_retry(prepared, self._small_face_retry_scale)
+        if upscaled is None:
+            return detections
+
+        boxes_up, probs_up, landmarks_up = self._safe_mtcnn_detect(upscaled)
+        retry_detections = self._postprocess_single_detect(boxes_up, probs_up, landmarks_up)
+        if not retry_detections:
+            return detections
+        return [self._rescale_detection_coords(det, self._small_face_retry_scale) for det in retry_detections]
 
     def detect_batch(self, images: Sequence[torch.Tensor]) -> Sequence[Sequence[Detection]]:
         if images is None:
@@ -137,6 +151,51 @@ class MTCNNDetector(FaceDetector):
 
         # facenet_pytorch detect stacks to numpy internally; keep on CPU.
         return img.contiguous().cpu()
+
+    def _safe_mtcnn_detect(self, prepared: torch.Tensor):
+        try:
+            with torch.no_grad():
+                return self._mtcnn.detect(prepared, landmarks=True)
+        except RuntimeError as exc:
+            if self._is_empty_cat_error(exc):
+                if not self._warned_empty_detect:
+                    logger.warning("MTCNN returned no candidate boxes (empty cat); treating as no detections.")
+                    self._warned_empty_detect = True
+                else:
+                    logger.debug("MTCNN returned no candidate boxes (empty cat); treating as no detections.")
+                return None, None, None
+            raise
+
+    @staticmethod
+    def _is_empty_cat_error(exc: RuntimeError) -> bool:
+        msg = str(exc)
+        return "torch.cat(): expected a non-empty list of Tensors" in msg
+
+    @staticmethod
+    def _upscale_for_retry(prepared: torch.Tensor, scale: float) -> torch.Tensor | None:
+        if scale <= 1.0:
+            return None
+        if prepared.dim() != 3 or prepared.shape[2] != 3:
+            return None
+        h, w = int(prepared.shape[0]), int(prepared.shape[1])
+        new_h = max(2, int(round(h * scale)))
+        new_w = max(2, int(round(w * scale)))
+        upscaled = torch.nn.functional.interpolate(
+            prepared.permute(2, 0, 1).unsqueeze(0).float(),
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0).permute(1, 2, 0)
+        return upscaled.clamp(0.0, 255.0).byte().contiguous().cpu()
+
+    def _rescale_detection_coords(self, det: Detection, scale: float) -> Detection:
+        inv = 1.0 / float(scale)
+        return Detection(
+            bbox=det.bbox * inv,
+            landmarks=det.landmarks * inv,
+            score=det.score,
+            aligned=det.aligned,
+        )
 
     def _postprocess_single_detect(self, boxes, probs, landmarks) -> list[Detection]:
         # Guard against empty lists returned by facenet_pytorch (causes cat() error)

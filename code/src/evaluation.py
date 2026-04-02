@@ -579,8 +579,8 @@ def main() -> None:
     detector = MTCNNDetector(
         image_size=256,
         margin=0,
-        score_threshold=0.4,
-        min_face_size=20,
+        score_threshold=0.3,
+        min_face_size=12,
         max_faces=None,
         keep_all=True,
         post_process=False,
