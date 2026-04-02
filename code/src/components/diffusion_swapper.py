@@ -331,8 +331,9 @@ class DiffusionFaceSwapper:
         mask_0_14 = (masks_tar > 0) & (masks_tar < 14)
         face_masks_tar_withear = mask_0_14.float() - (masks_tar == 9).float() - (masks_tar == 6).float()
         
-        occ_mask = ((masks_tar == 6) | (masks_tar == 9) | (masks_tar == 15) | (masks_tar == 18)).float() 
-
+        # Added 16 (cloth/arm) and 17 (hair/dark objects)
+        occ_mask = ((masks_tar == 6) | (masks_tar == 9) | (masks_tar == 15) | 
+            (masks_tar == 18) | (masks_tar == 16) | (masks_tar == 17)).float()
         face_masks_tar = torch.max(face_masks_tar_withear, F.max_pool2d(face_masks_tar, kernel_size=65, stride=1, padding=32))
         face_masks_tar = face_masks_tar * (1 - occ_mask)
         face_masks_tar = F.max_pool2d(face_masks_tar, kernel_size=5, stride=1, padding=2)
