@@ -41,6 +41,7 @@ from components import (  # noqa: E402
     load_projector_state_dict,
     SimSwapFaceSwapper,
     DiffusionFaceSwapper,
+    FsVid2VidFaceSwapper,
 )
 from data.prepared import compile_prepared_regex, parse_prepared_video_path  # noqa: E402
 from data.video_io import get_video_fps, load_video_frames, write_mp4  # noqa: E402
@@ -264,7 +265,7 @@ def parse_args() -> argparse.Namespace:
         "--face_swapper",
         type=str,
         default="none",
-        choices=["none", "simswap", "diffusion"],
+        choices=["none", "simswap", "diffusion", "fs_vid2vid"],
         help="Choose face swapper backend for visualization (none=disabled)",
     )
     parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping (overridden by face_swapper != none)")
@@ -349,6 +350,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--faceadapter_crop_ratio", type=float, default=0.81, help="Face crop ratio used by FaceAdapter")
     parser.add_argument("--faceadapter_seed", type=int, default=0, help="Fixed random seed for deterministic FaceAdapter inference")
 
+    # fs-vid2vid swapper options
+    parser.add_argument(
+        "--imaginaire_root",
+        type=Path,
+        default=PROJECT_ROOT / "external_libraries" / "imaginaire",
+        help="Path to imaginaire repository root",
+    )
+    parser.add_argument(
+        "--fs_vid2vid_config",
+        type=Path,
+        default=PROJECT_ROOT
+        / "external_libraries"
+        / "imaginaire"
+        / "configs"
+        / "projects"
+        / "fs_vid2vid"
+        / "face_forensics"
+        / "ampO1.yaml",
+        help="Path to imaginaire fs-vid2vid config yaml",
+    )
+    parser.add_argument(
+        "--fs_vid2vid_checkpoint",
+        type=Path,
+        default=None,
+        help="Optional explicit fs-vid2vid checkpoint path; if omitted, imaginaire uses config pretrained weight",
+    )
+    parser.add_argument(
+        "--fs_vid2vid_shape_predictor",
+        type=Path,
+        default=PROJECT_ROOT / "models" / "shape_predictor_68_face_landmarks.dat",
+        help="Path to dlib shape predictor model file for fs-vid2vid driving landmarks",
+    )
+    parser.add_argument(
+        "--fs_vid2vid_detector_upsample",
+        type=int,
+        default=0,
+        help="Number of upsample steps for dlib frontal face detector in fs-vid2vid",
+    )
+
     # Hyperparameters (Projector)
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--num_keys", type=int, default=2, help="Number of pseudonymization keys to render per source video")
@@ -395,7 +435,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | DiffusionFaceSwapper | None:
+def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | DiffusionFaceSwapper | FsVid2VidFaceSwapper | None:
     face_swapper = None
     swapper_choice = (args.face_swapper or "none").lower()
     use_swapper_requested = args.use_face_swapper or swapper_choice != "none"
@@ -431,6 +471,15 @@ def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSw
             crop_ratio=args.faceadapter_crop_ratio,
             seed=args.faceadapter_seed,
             device=device,
+        )
+    elif swapper_choice == "fs_vid2vid":
+        face_swapper = FsVid2VidFaceSwapper(
+            imaginaire_root=args.imaginaire_root,
+            config_path=args.fs_vid2vid_config,
+            checkpoint_path=args.fs_vid2vid_checkpoint,
+            shape_predictor_path=args.fs_vid2vid_shape_predictor,
+            detector_upsample=args.fs_vid2vid_detector_upsample,
+            seed=args.seed,
         )
 
     return face_swapper
@@ -542,6 +591,8 @@ def main() -> None:
 
             for key_idx, key_vec in enumerate(key_bank, start=1):
                 key_name = f"key{key_idx}"
+                if face_swapper is not None and hasattr(face_swapper, "reset_sequence"):
+                    face_swapper.reset_sequence()
                 key_detected = 0
                 key_processed = 0
                 key_composited = 0
