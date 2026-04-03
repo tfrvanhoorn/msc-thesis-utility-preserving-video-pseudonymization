@@ -62,6 +62,8 @@ wandb
 tensorboard
 face-alignment
 clean-fid
+# Docker build of imaginaire installs both opencv and opencv-contrib.
+# We keep headless variants for server/container environments.
 opencv-contrib-python-headless==4.10.0.84
 
 # --- Core PyTorch (Uncomment if needed, or keep your local install) ---

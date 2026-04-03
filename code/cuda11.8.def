@@ -3,6 +3,8 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 
 %files
     requirements.txt /opt/requirements.txt
+    external_libraries/imaginaire/imaginaire/third_party /opt/imaginaire/imaginaire/third_party
+    external_libraries/imaginaire/imaginaire/model_utils/gancraft/voxlib /opt/imaginaire/imaginaire/model_utils/gancraft/voxlib
 
 %post
     export DEBIAN_FRONTEND=noninteractive
@@ -62,8 +64,20 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
     grep -vE '^[[:space:]]*dlib([[:space:]]*(#.*)?)?$' /opt/requirements.txt > /tmp/requirements.no-dlib.txt
     pip install --no-cache-dir -r /tmp/requirements.no-dlib.txt
     rm -f /tmp/requirements.no-dlib.txt
+
+    # 7. Build imaginaire custom CUDA/C++ extensions (mirrors scripts/build_docker.sh).
+    export CUDA_VERSION=$(nvcc --version | grep -Po "(\d+\.)+\d+" | head -1)
+    for p in correlation channelnorm resample2d bias_act upfirdn2d; do
+        cd /opt/imaginaire/imaginaire/third_party/${p}
+        rm -rf build dist *-info
+        python setup.py install
+    done
+
+    # 8. Compile GANcraft libraries.
+    cd /opt/imaginaire/imaginaire/model_utils/gancraft/voxlib
+    make
     
-    # 7. Cleanup
+    # 9. Cleanup
     unset CMAKE_BUILD_PARALLEL_LEVEL MAX_JOBS CMAKE_ARGS
 
 %environment
