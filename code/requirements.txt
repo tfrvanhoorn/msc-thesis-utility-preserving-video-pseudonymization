@@ -67,6 +67,6 @@ clean-fid
 opencv-contrib-python-headless==4.10.0.84
 
 # --- Core PyTorch (Uncomment if needed, or keep your local install) ---
-# torch==1.8.1
-# torchvision==0.9.1
-# torchaudio==0.8.1
+# torch==2.4.1+cu118
+# torchvision==0.19.1+cu118
+# torchaudio==2.4.1+cu118
