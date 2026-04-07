@@ -276,6 +276,7 @@ def _log_chunk_summary(
     total_chunks: int,
     chunk_ids: list[str],
     scores: dict[str, Any],
+    scope: str = "running",
 ) -> None:
     detection_rate = scores.get("detection_rate")
     landmark_distance = scores.get("landmark_distance")
@@ -288,11 +289,12 @@ def _log_chunk_summary(
     id_text = ", ".join(chunk_ids) if chunk_ids else "none"
 
     logging.info(
-        "chunk %d/%d | ids=[%s]\n"
+        "chunk %d/%d | scope=%s | ids=[%s]\n"
         "  detection_rate=%s | anonymization(%s) | synchronism_total(%s) | synchronism_within(%s) | synchronism_cross(%s)\n"
         "  diversity(%s) | differentiation(%s) | landmark_distance=%s | lpips=%s | ssim=%s",
         chunk_idx,
         total_chunks,
+        scope,
         id_text,
         detection_text,
         _fmt_metric_pair(scores["anonymization"]),
@@ -774,6 +776,13 @@ def main() -> None:
             processed_entries = 0
             for chunk_idx, (chunk_entries, chunk_eligible) in enumerate(entry_chunks, start=1):
                 chunk_diff_embeddings_by_label: dict[int, list[torch.Tensor]] = {}
+                chunk_metrics = MetricsAccumulator(
+                    synchronism_chunk_size=samples_per_id_per_chunk,
+                    show_progress=False,
+                    anonymization_enabled="anonymization" in enabled_metrics,
+                    diversity_enabled=diversity_enabled,
+                )
+                chunk_diff_embeddings_by_label_local: dict[int, list[torch.Tensor]] = {}
                 chunk_entry_total = len(chunk_entries)
                 chunk_entry_done = 0
 
@@ -868,6 +877,7 @@ def main() -> None:
                                     aligned_outputs[frame_idx],
                                 )
                                 metrics.update_perceptual_utility(lpips_value, ssim_value)
+                                chunk_metrics.update_perceptual_utility(lpips_value, ssim_value)
 
                         virt_embeddings, gen_mask = _collect_detected_faces(
                             detector,
@@ -885,6 +895,7 @@ def main() -> None:
                                 out_img = _to_uint8_rgb_image(output_frames[frame_idx])
                                 dist = landmark_evaluator.compute_pair_distance(in_img, out_img)
                                 metrics.update_landmark_distance(dist.distance)
+                                chunk_metrics.update_landmark_distance(dist.distance)
 
                         del output_frames
 
@@ -899,14 +910,18 @@ def main() -> None:
 
                     if "detection" in enabled_metrics:
                         metrics.update_detection(det_gen_mask)
+                        chunk_metrics.update_detection(det_gen_mask)
                     if "anonymization" in enabled_metrics:
                         metrics.update_anonymization(det_real_embeddings, det_embeddings, valid_mask)
+                        chunk_metrics.update_anonymization(det_real_embeddings, det_embeddings, valid_mask)
 
                     valid_virtual = det_embeddings[valid_mask] if detection_branch_enabled else torch.empty((0, 0), device=device)
                     if chunk_eligible and "synchronism" in enabled_metrics and valid_virtual.numel() > 0:
                         metrics.add_synchronism_embeddings(label, valid_virtual, source_id=entry.source_id)
+                        chunk_metrics.add_synchronism_embeddings(label, valid_virtual, source_id=entry.source_id)
                     if chunk_eligible and "differentiation" in enabled_metrics and valid_virtual.numel() > 0:
                         chunk_diff_embeddings_by_label.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
+                        chunk_diff_embeddings_by_label_local.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
 
                     for key_a, key_b in itertools.combinations(eval_key_names, 2):
                         _, input_mask_a, emb_a, mask_a = key_results[key_a]
@@ -928,9 +943,16 @@ def main() -> None:
                             & mask_b[:pair_len]
                         )
                         if diversity_enabled and pair_mask.any():
+                            pair_emb_a = emb_a[:pair_len][pair_mask].detach().to("cpu")
+                            pair_emb_b = emb_b[:pair_len][pair_mask].detach().to("cpu")
                             metrics.update_diversity(
-                                emb_a[:pair_len][pair_mask].detach().to("cpu"),
-                                emb_b[:pair_len][pair_mask].detach().to("cpu"),
+                                pair_emb_a,
+                                pair_emb_b,
+                                embedding_chunk_size=samples_per_id_per_chunk,
+                            )
+                            chunk_metrics.update_diversity(
+                                pair_emb_a,
+                                pair_emb_b,
                                 embedding_chunk_size=samples_per_id_per_chunk,
                             )
 
@@ -961,17 +983,34 @@ def main() -> None:
                         embedding_chunk_size=samples_per_id_per_chunk,
                         show_progress=False,
                     )
+                if chunk_eligible and "differentiation" in enabled_metrics and len(chunk_diff_embeddings_by_label_local) >= 2:
+                    chunk_metrics.update_differentiation_batched(
+                        chunk_diff_embeddings_by_label_local,
+                        identity_block_size=ids_per_chunk,
+                        embedding_chunk_size=samples_per_id_per_chunk,
+                        show_progress=False,
+                    )
 
                 if chunk_eligible and "synchronism" in enabled_metrics:
                     metrics.flush_synchronism_chunk()
+                    chunk_metrics.flush_synchronism_chunk()
 
                 chunk_ids = sorted({entry.identity for entry in chunk_entries})
                 chunk_scores = _build_chunk_score_snapshot(metrics, enabled_metrics)
+                chunk_only_scores = _build_chunk_score_snapshot(chunk_metrics, enabled_metrics)
+                _log_chunk_summary(
+                    chunk_idx=chunk_idx,
+                    total_chunks=len(entry_chunks),
+                    chunk_ids=chunk_ids,
+                    scores=chunk_only_scores,
+                    scope="chunk_only",
+                )
                 _log_chunk_summary(
                     chunk_idx=chunk_idx,
                     total_chunks=len(entry_chunks),
                     chunk_ids=chunk_ids,
                     scores=chunk_scores,
+                    scope="running",
                 )
 
             progress.close()
