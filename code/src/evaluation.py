@@ -165,6 +165,148 @@ def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
         summary["counts"]["ssim_pairs_invalid"] = 0
 
 
+def _build_chunk_score_snapshot(metrics: MetricsAccumulator, enabled: set[str]) -> dict[str, Any]:
+    similar_pool = metrics._synchronism_total_hist.merged(  # type: ignore[attr-defined]
+        [
+            metrics._synchronism_total_hist,  # type: ignore[attr-defined]
+            metrics._synchronism_within_hist,  # type: ignore[attr-defined]
+            metrics._synchronism_cross_hist,  # type: ignore[attr-defined]
+        ]
+    )
+    dissimilar_pool = metrics._anonymization_hist.merged(  # type: ignore[attr-defined]
+        [
+            metrics._anonymization_hist,  # type: ignore[attr-defined]
+            metrics._diversity_hist,  # type: ignore[attr-defined]
+            metrics._differentiation_hist,  # type: ignore[attr-defined]
+        ]
+    )
+
+    def _auc_eer(
+        positive_hist: Any,
+        negative_hist: Any,
+        *,
+        positive_when_lower: bool,
+        enabled_flag: bool,
+    ) -> dict[str, float | None]:
+        if not enabled_flag:
+            return {"auc": None, "eer": None}
+        values = MetricsAccumulator._compute_metric_auc_eer_from_hist(  # type: ignore[attr-defined]
+            positive_hist,
+            negative_hist,
+            positive_when_lower=positive_when_lower,
+        )
+        return {"auc": values["auc"], "eer": values["eer"]}
+
+    detection_rate = (
+        float(metrics.detected_generated) / float(metrics.total_generated)
+        if metrics.total_generated
+        else 0.0
+    )
+    landmark_distance = (
+        metrics.landmark_distance_sum / float(metrics.landmark_pairs_valid)
+        if metrics.landmark_pairs_valid
+        else None
+    )
+    lpips_distance = (
+        metrics.lpips_distance_sum / float(metrics.lpips_pairs_valid)
+        if metrics.lpips_pairs_valid
+        else None
+    )
+    ssim_similarity = (
+        metrics.ssim_similarity_sum / float(metrics.ssim_pairs_valid)
+        if metrics.ssim_pairs_valid
+        else None
+    )
+
+    return {
+        "detection_rate": detection_rate if "detection" in enabled else None,
+        "anonymization": _auc_eer(
+            metrics._anonymization_hist,  # type: ignore[attr-defined]
+            similar_pool,
+            positive_when_lower=True,
+            enabled_flag="anonymization" in enabled,
+        ),
+        "synchronism_total": _auc_eer(
+            metrics._synchronism_total_hist,  # type: ignore[attr-defined]
+            dissimilar_pool,
+            positive_when_lower=False,
+            enabled_flag="synchronism" in enabled,
+        ),
+        "synchronism_within": _auc_eer(
+            metrics._synchronism_within_hist,  # type: ignore[attr-defined]
+            dissimilar_pool,
+            positive_when_lower=False,
+            enabled_flag="synchronism" in enabled,
+        ),
+        "synchronism_cross": _auc_eer(
+            metrics._synchronism_cross_hist,  # type: ignore[attr-defined]
+            dissimilar_pool,
+            positive_when_lower=False,
+            enabled_flag="synchronism" in enabled,
+        ),
+        "diversity": _auc_eer(
+            metrics._diversity_hist,  # type: ignore[attr-defined]
+            similar_pool,
+            positive_when_lower=True,
+            enabled_flag="diversity" in enabled,
+        ),
+        "differentiation": _auc_eer(
+            metrics._differentiation_hist,  # type: ignore[attr-defined]
+            similar_pool,
+            positive_when_lower=True,
+            enabled_flag="differentiation" in enabled,
+        ),
+        "landmark_distance": landmark_distance if "landmark_distance" in enabled else None,
+        "lpips_distance": lpips_distance if "lpips" in enabled else None,
+        "ssim_similarity": ssim_similarity if "ssim" in enabled else None,
+    }
+
+
+def _fmt_metric_pair(metric_values: dict[str, float | None]) -> str:
+    auc = metric_values.get("auc")
+    eer = metric_values.get("eer")
+    auc_text = "n/a" if auc is None else f"{auc:.4f}"
+    eer_text = "n/a" if eer is None else f"{eer:.4f}"
+    return f"auc={auc_text}, eer={eer_text}"
+
+
+def _log_chunk_summary(
+    *,
+    chunk_idx: int,
+    total_chunks: int,
+    chunk_ids: list[str],
+    scores: dict[str, Any],
+) -> None:
+    detection_rate = scores.get("detection_rate")
+    landmark_distance = scores.get("landmark_distance")
+    lpips_distance = scores.get("lpips_distance")
+    ssim_similarity = scores.get("ssim_similarity")
+    detection_text = "n/a" if detection_rate is None else f"{float(detection_rate):.4f}"
+    landmark_text = "n/a" if landmark_distance is None else f"{float(landmark_distance):.4f}"
+    lpips_text = "n/a" if lpips_distance is None else f"{float(lpips_distance):.4f}"
+    ssim_text = "n/a" if ssim_similarity is None else f"{float(ssim_similarity):.4f}"
+    id_text = ", ".join(chunk_ids) if chunk_ids else "none"
+
+    logging.info(
+        "chunk %d/%d | ids=[%s]\n"
+        "  detection_rate=%s | anonymization(%s) | synchronism_total(%s) | synchronism_within(%s) | synchronism_cross(%s)\n"
+        "  diversity(%s) | differentiation(%s) | landmark_distance=%s | lpips=%s | ssim=%s",
+        chunk_idx,
+        total_chunks,
+        id_text,
+        detection_text,
+        _fmt_metric_pair(scores["anonymization"]),
+        _fmt_metric_pair(scores["synchronism_total"]),
+        _fmt_metric_pair(scores["synchronism_within"]),
+        _fmt_metric_pair(scores["synchronism_cross"]),
+        _fmt_metric_pair(scores["diversity"]),
+        _fmt_metric_pair(scores["differentiation"]),
+        landmark_text,
+        lpips_text,
+        ssim_text,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate inferred videos from prepared input/inferred folders")
 
@@ -634,13 +776,6 @@ def main() -> None:
                 chunk_diff_embeddings_by_label: dict[int, list[torch.Tensor]] = {}
                 chunk_entry_total = len(chunk_entries)
                 chunk_entry_done = 0
-                if ("synchronism" in enabled_metrics or "differentiation" in enabled_metrics) and not chunk_eligible:
-                    _log_pipe(
-                        "chunk_sync_diff_skipped",
-                        chunk_index=chunk_idx,
-                        reason="requires >=2 identities and >=2 samples per identity",
-                        chunk_entries=len(chunk_entries),
-                    )
 
                 for entry in chunk_entries:
                     progress.update(1)
@@ -820,25 +955,24 @@ def main() -> None:
                     )
 
                 if chunk_eligible and "differentiation" in enabled_metrics and len(chunk_diff_embeddings_by_label) >= 2:
-                    _log_pipe(
-                        "differentiation_chunk_start",
-                        chunk_index=chunk_idx,
-                        identities=len(chunk_diff_embeddings_by_label),
-                        ids_per_chunk=ids_per_chunk,
-                        samples_per_id_per_chunk=samples_per_id_per_chunk,
-                    )
                     metrics.update_differentiation_batched(
                         chunk_diff_embeddings_by_label,
                         identity_block_size=ids_per_chunk,
                         embedding_chunk_size=samples_per_id_per_chunk,
                         show_progress=False,
                     )
-                    _log_pipe("differentiation_chunk_end", chunk_index=chunk_idx)
 
                 if chunk_eligible and "synchronism" in enabled_metrics:
-                    _log_pipe("synchronism_chunk_start", chunk_index=chunk_idx)
                     metrics.flush_synchronism_chunk()
-                    _log_pipe("synchronism_chunk_end", chunk_index=chunk_idx)
+
+                chunk_ids = sorted({entry.identity for entry in chunk_entries})
+                chunk_scores = _build_chunk_score_snapshot(metrics, enabled_metrics)
+                _log_chunk_summary(
+                    chunk_idx=chunk_idx,
+                    total_chunks=len(entry_chunks),
+                    chunk_ids=chunk_ids,
+                    scores=chunk_scores,
+                )
 
             progress.close()
 
