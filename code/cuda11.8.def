@@ -67,6 +67,12 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 
     # 7. Build imaginaire custom CUDA/C++ extensions (mirrors scripts/build_docker.sh).
     export CUDA_VERSION=$(nvcc --version | grep -Po "(\d+\.)+\d+" | head -1)
+
+        # Torch 2.x extensions require C++17. Imaginaire third-party setup.py files
+        # still default to C++14 in this snapshot, so patch them before building.
+        find /opt/imaginaire/imaginaire/third_party -name setup.py -type f -print0 | \
+            xargs -0 sed -i 's/-std=c++14/-std=c++17/g'
+
     for p in correlation channelnorm resample2d bias_act upfirdn2d; do
         cd /opt/imaginaire/imaginaire/third_party/${p}
         rm -rf build dist *-info
