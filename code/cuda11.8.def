@@ -67,6 +67,9 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 
     # 7. Build imaginaire custom CUDA/C++ extensions (mirrors scripts/build_docker.sh).
     export CUDA_VERSION=$(nvcc --version | grep -Po "(\d+\.)+\d+" | head -1)
+    # Container builds typically have no visible GPU, so torch cannot infer
+    # arch flags automatically. Set explicit arch list to avoid IndexError.
+    export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6"
 
         # Torch 2.x extensions require C++17. Imaginaire third-party setup.py files
         # still default to C++14 in this snapshot, so patch them before building.
@@ -93,6 +96,7 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
     export PATH=/usr/local/cuda/bin:$PATH
     export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
+    export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6"
     export NVIDIA_VISIBLE_DEVICES=all
 
 %runscript
