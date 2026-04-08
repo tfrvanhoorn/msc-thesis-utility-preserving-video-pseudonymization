@@ -180,7 +180,6 @@ class ArcFaceEmbedder(EmbeddingModel):
             name=self.model_name,
             root=str(self.insightface_home),
             providers=providers,
-            allowed_modules=["recognition"],
         )
         self._face_analysis.prepare(ctx_id=ctx_id)
 
