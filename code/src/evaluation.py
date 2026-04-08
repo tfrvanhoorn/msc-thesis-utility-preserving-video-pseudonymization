@@ -33,7 +33,7 @@ if str(SRC_ROOT) not in sys.path:
 if str(EXTERNAL_LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
-from components import FacenetEmbedder, MTCNNAligner, MTCNNDetector  # noqa: E402
+from components import ArcFaceEmbedder, EmbeddingModel, FacenetEmbedder, MTCNNAligner, MTCNNDetector  # noqa: E402
 from landmark_metrics import LandmarkDistanceEvaluator  # noqa: E402
 from metrics import MetricsAccumulator  # noqa: E402
 from perceptual_metrics import PerceptualEvaluator  # noqa: E402
@@ -402,6 +402,38 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cache directory for LPIPS/Torch model weights (TORCH_HOME)",
     )
+    parser.add_argument(
+        "--embedding_model",
+        type=str,
+        choices=["facenet", "arcface"],
+        default="facenet",
+        help="Embedding backend used for identity metrics",
+    )
+    parser.add_argument(
+        "--arcface_model_name",
+        type=str,
+        default="buffalo_l",
+        help="InsightFace ArcFace model pack name",
+    )
+    parser.add_argument(
+        "--arcface_cache_dir",
+        type=Path,
+        default=None,
+        help="Optional ArcFace cache directory (sets INSIGHTFACE_HOME)",
+    )
+    parser.add_argument(
+        "--arcface_auto_download",
+        dest="arcface_auto_download",
+        action="store_true",
+        help="Allow ArcFace model download when not present in cache",
+    )
+    parser.add_argument(
+        "--no_arcface_auto_download",
+        dest="arcface_auto_download",
+        action="store_false",
+        help="Disable ArcFace model download and require a pre-populated cache",
+    )
+    parser.set_defaults(arcface_auto_download=True)
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
@@ -419,7 +451,7 @@ def _load_video_tensor(path: Path, device: torch.device) -> torch.Tensor:
 def _collect_detected_faces(
     detector: MTCNNDetector,
     aligner: MTCNNAligner,
-    embedder: FacenetEmbedder,
+    embedder: EmbeddingModel,
     sample_frames: torch.Tensor,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -633,6 +665,17 @@ def _build_entry_chunks(
     return chunks
 
 
+def _build_face_embedder(args: argparse.Namespace, device: torch.device) -> EmbeddingModel:
+    if args.embedding_model == "arcface":
+        return ArcFaceEmbedder(
+            model_name=args.arcface_model_name,
+            device=str(device),
+            cache_dir=args.arcface_cache_dir,
+            auto_download=bool(args.arcface_auto_download),
+        )
+    return FacenetEmbedder(pretrained="vggface2", device=str(device))
+
+
 def main() -> None:
     args = parse_args()
     configure_logging()
@@ -713,6 +756,10 @@ def main() -> None:
         enabled_metrics=",".join(sorted(enabled_metrics)),
         lpips_net=args.lpips_net,
         lpips_cache_dir=str(args.lpips_cache_dir) if args.lpips_cache_dir is not None else None,
+        embedding_model=args.embedding_model,
+        arcface_model_name=args.arcface_model_name,
+        arcface_cache_dir=str(args.arcface_cache_dir) if args.arcface_cache_dir is not None else None,
+        arcface_auto_download=bool(args.arcface_auto_download),
         ids_per_chunk=ids_per_chunk,
         samples_per_id_per_chunk=samples_per_id_per_chunk,
         keys_per_id_per_chunk=keys_per_id_per_chunk,
@@ -731,7 +778,7 @@ def main() -> None:
         device=str(device),
     )
     aligner = MTCNNAligner(output_size=256)
-    embedder = FacenetEmbedder(pretrained="vggface2", device=str(device))
+    embedder = _build_face_embedder(args, device)
 
     metrics = MetricsAccumulator(
         synchronism_chunk_size=samples_per_id_per_chunk,

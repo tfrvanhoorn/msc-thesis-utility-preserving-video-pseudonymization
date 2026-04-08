@@ -1,6 +1,6 @@
 from .alignment import FaceAligner, MTCNNAligner
 from .detector import FaceDetector, MTCNNDetector, Detection
-from .embedding import EmbeddingModel, FacenetEmbedder, SemanticAttributeEmbedder
+from .embedding import ArcFaceEmbedder, EmbeddingModel, FacenetEmbedder, SemanticAttributeEmbedder
 from .projector import ProjectorMLP, load_projector_state_dict
 from .stylegan2 import StyleGAN2Generator, load_stylegan2, load_stylegan2_components
 from .simswap import SimSwapFaceSwapper
@@ -15,6 +15,7 @@ __all__ = [
     "Detection",
     "EmbeddingModel",
     "FacenetEmbedder",
+    "ArcFaceEmbedder",
     "SemanticAttributeEmbedder",
     "ProjectorMLP",
     "load_projector_state_dict",

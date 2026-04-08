@@ -1,5 +1,6 @@
 from .pipeline import KfaarPipeline, KfaarResult, build_kfaar_pipeline
 from .components import (
+    ArcFaceEmbedder,
     FaceAligner,
     MTCNNAligner,
     FaceDetector,
@@ -40,6 +41,7 @@ __all__ = [
     "Detection",
     "EmbeddingModel",
     "FacenetEmbedder",
+    "ArcFaceEmbedder",
     "SemanticAttributeEmbedder",
     "ProjectorMLP",
     "cosine_loss",
