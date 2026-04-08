@@ -205,18 +205,24 @@ class ArcFaceEmbedder(EmbeddingModel):
         if with_grad:
             logger.warning("ArcFaceEmbedder does not support autograd; returning detached embeddings")
 
-        input_size = tuple(getattr(self._recognition_model, "input_size", (112, 112)))
-        target_w, target_h = int(input_size[0]), int(input_size[1])
+        raw_input_size = getattr(self._recognition_model, "input_size", (112, 112))
+        if isinstance(raw_input_size, (list, tuple)) and len(raw_input_size) == 2:
+            target_w = int(raw_input_size[0]) if raw_input_size[0] else 112
+            target_h = int(raw_input_size[1]) if raw_input_size[1] else 112
+        else:
+            target_w, target_h = 112, 112
         batch_bgr: list[np.ndarray] = []
         for face in aligned_faces:
             tensor = self._to_tensor(face)
             rgb = tensor.permute(1, 2, 0).cpu().numpy()
             rgb_uint8 = (np.clip(rgb, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+            if rgb_uint8.ndim != 3 or rgb_uint8.shape[2] != 3:
+                raise ValueError(f"Expected RGB face image with 3 channels, got shape {rgb_uint8.shape}")
             resized = cv2.resize(rgb_uint8, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
             bgr = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
             batch_bgr.append(bgr)
 
-        feats_np = self._recognition_model.get_feat(np.stack(batch_bgr, axis=0))
+        feats_np = self._recognition_model.get_feat(batch_bgr)
         feats = torch.from_numpy(np.asarray(feats_np, dtype=np.float32)).to(self.device)
         feats = torch.nn.functional.normalize(feats, p=2, dim=1)
         if feats.shape[1] != self.embedding_size:
