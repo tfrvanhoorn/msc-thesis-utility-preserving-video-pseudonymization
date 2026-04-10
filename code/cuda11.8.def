@@ -78,8 +78,18 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
     for p in correlation channelnorm resample2d bias_act upfirdn2d; do
         cd /opt/imaginaire/imaginaire/third_party/${p}
         rm -rf build dist *-info
-        python setup.py install
+        python -m pip install --no-cache-dir .
     done
+
+    # Verify custom ops are importable at runtime.
+    python - <<'PY'
+import correlation_cuda
+import channelnorm_cuda
+import resample2d_cuda
+import bias_act_cuda
+import upfirdn2d_cuda
+print('imaginaire custom CUDA ops import check: OK')
+PY
 
     # 8. Skip optional GANcraft voxlib build.
     # Not required for fs-vid2vid inference and can fail in headless builds.
