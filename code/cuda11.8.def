@@ -82,7 +82,9 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
     done
 
     # Verify custom ops are importable at runtime.
+    export LD_LIBRARY_PATH=/usr/local/lib/python3.8/dist-packages/torch/lib:$LD_LIBRARY_PATH
     python - <<'PY'
+import torch
 import correlation_cuda
 import channelnorm_cuda
 import resample2d_cuda
@@ -102,7 +104,7 @@ PY
     export CUDA_HOME=/usr/local/cuda
     export CUDA_PATH=/usr/local/cuda
     export PATH=/usr/local/cuda/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib/python3.8/dist-packages/torch/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
     export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6"
     export NVIDIA_VISIBLE_DEVICES=all
