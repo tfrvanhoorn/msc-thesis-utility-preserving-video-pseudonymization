@@ -4,7 +4,6 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
 %files
     requirements.txt /opt/requirements.txt
     external_libraries/imaginaire/imaginaire/third_party /opt/imaginaire/imaginaire/third_party
-    external_libraries/imaginaire/imaginaire/model_utils/gancraft/voxlib /opt/imaginaire/imaginaire/model_utils/gancraft/voxlib
 
 %post
     export DEBIAN_FRONTEND=noninteractive
@@ -82,10 +81,9 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
         python setup.py install
     done
 
-    # 8. Compile GANcraft libraries.
-    cd /opt/imaginaire/imaginaire/model_utils/gancraft/voxlib
-    make
-    
+    # 8. Skip optional GANcraft voxlib build.
+    # Not required for fs-vid2vid inference and can fail in headless builds.
+
     # 9. Cleanup
     unset CMAKE_BUILD_PARALLEL_LEVEL MAX_JOBS CMAKE_ARGS
 
