@@ -39,7 +39,7 @@ from components import (
     load_stylegan2,
     load_projector_state_dict,
     SimSwapFaceSwapper,
-    DiffusionFaceSwapper,
+    FaceAdapterFaceSwap,
     FaceAdapterFaceReenactment,
 )
 from data.splits import build_train_test_loaders
@@ -94,6 +94,8 @@ def parse_args():
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
+    parser.add_argument("--detector_score_threshold", type=float, default=0.35, help="MTCNN score threshold for detection filtering")
+    parser.add_argument("--detector_min_face_size", type=int, default=15, help="Minimum face size in pixels for MTCNN")
 
     # Generated face saving
     parser.add_argument("--save_generated_faces", action="store_true", help="Store generated faces to disk during training")
@@ -106,8 +108,8 @@ def parse_args():
         "--face_postprocessor",
         type=str,
         default="none",
-        choices=["none", "simswap", "diffusion", "faceadapter_reenactment"],
-        help="Choose final face postprocessing backend (none=disabled, simswap, diffusion, faceadapter_reenactment)",
+        choices=["none", "simswap", "faceadapter_swap", "faceadapter_reenactment"],
+        help="Choose final face postprocessing backend (none=disabled, simswap, faceadapter_swap, faceadapter_reenactment)",
     )
     parser.add_argument("--use_face_postprocessor", action="store_true", help="Legacy flag to enable face postprocessing (overridden by face_postprocessor != none)")
     parser.add_argument(
@@ -134,7 +136,7 @@ def parse_args():
     parser.add_argument("--simswap_detector_name", type=str, default="antelopev2", help="Face detector name for SimSwap (e.g., antelopev2)")
     parser.add_argument("--simswap_detector_root", type=Path, default=None, help="Path to SimSwap face detector models root (defaults to simswap_root/insightface_func/models)")
 
-    # Diffusion swapper options
+    # FaceAdapter options
     parser.add_argument("--faceadapter_root", type=Path, default=PROJECT_ROOT / "external_libraries" / "Face-Adapter", help="Path to Face-Adapter repository root")
     parser.add_argument("--faceadapter_checkpoint_dir", type=Path, default=None, help="Path to FaceAdapter checkpoints (defaults to faceadapter_root/checkpoints)")
     parser.add_argument("--faceadapter_base_model", type=str, default="runwayml/stable-diffusion-v1-5", help="Base Stable Diffusion model for FaceAdapter")
@@ -208,10 +210,10 @@ def main():
                 crop_size=args.simswap_crop_size,
                 device=device,
             )
-        elif postprocessor_choice == "diffusion":
+        elif postprocessor_choice == "faceadapter_swap":
             faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
 
-            face_postprocessor = DiffusionFaceSwapper(
+            face_postprocessor = FaceAdapterFaceSwap(
                 faceadapter_root=args.faceadapter_root,
                 checkpoint_dir=faceadapter_ckpt_dir,
                 base_model_id=args.faceadapter_base_model,
@@ -221,6 +223,8 @@ def main():
                 guidance_scale=args.faceadapter_guidance_scale,
                 crop_ratio=args.faceadapter_crop_ratio,
                 seed=args.faceadapter_seed,
+                detector_score_threshold=args.detector_score_threshold,
+                detector_min_face_size=args.detector_min_face_size,
                 device=device,
             )
         elif postprocessor_choice == "faceadapter_reenactment":
@@ -236,6 +240,8 @@ def main():
                 guidance_scale=args.faceadapter_guidance_scale,
                 crop_ratio=args.faceadapter_crop_ratio,
                 seed=args.faceadapter_seed,
+                detector_score_threshold=args.detector_score_threshold,
+                detector_min_face_size=args.detector_min_face_size,
                 device=device,
             )
     
@@ -251,7 +257,12 @@ def main():
         dataset_type="prepared_images",
         options=data_options,
     )
-    detector_cfg = DetectorConfig(image_size=256, device=str(device))
+    detector_cfg = DetectorConfig(
+        image_size=256,
+        score_threshold=args.detector_score_threshold,
+        min_face_size=args.detector_min_face_size,
+        device=str(device),
+    )
     embedding_cfg = EmbeddingConfig(method="facenet", pretrained="vggface2", device=str(device))
     projector_cfg = ProjectorConfig(
         key_dim=args.key_dim,

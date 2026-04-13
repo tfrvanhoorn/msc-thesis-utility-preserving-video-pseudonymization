@@ -40,7 +40,7 @@ from components import (  # noqa: E402
     load_stylegan2,
     load_projector_state_dict,
     SimSwapFaceSwapper,
-    DiffusionFaceSwapper,
+    FaceAdapterFaceSwap,
     FaceAdapterFaceReenactment,
 )
 from data.prepared import compile_prepared_regex, parse_prepared_video_path  # noqa: E402
@@ -265,7 +265,7 @@ def parse_args() -> argparse.Namespace:
         "--face_postprocessor",
         type=str,
         default="none",
-        choices=["none", "simswap", "diffusion", "faceadapter_reenactment"],
+        choices=["none", "simswap", "faceadapter_swap", "faceadapter_reenactment"],
         help="Choose final face postprocessing backend for visualization (none=disabled)",
     )
     parser.add_argument("--use_face_postprocessor", action="store_true", help="Legacy flag to enable face postprocessing (overridden by face_postprocessor != none)")
@@ -339,7 +339,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to SimSwap face detector models root (defaults to simswap_root/insightface_func/models)",
     )
 
-    # Diffusion swapper options
+    # FaceAdapter options
     parser.add_argument("--faceadapter_root", type=Path, default=PROJECT_ROOT / "external_libraries" / "Face-Adapter", help="Path to Face-Adapter repository root")
     parser.add_argument("--faceadapter_checkpoint_dir", type=Path, default=None, help="Path to FaceAdapter checkpoints (defaults to faceadapter_root/checkpoints)")
     parser.add_argument("--faceadapter_base_model", type=str, default="runwayml/stable-diffusion-v1-5", help="Base Stable Diffusion model for FaceAdapter")
@@ -370,8 +370,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=1, help="Number of sampled frames to process at once during inference")
     parser.add_argument("--target_sample_fps", type=float, default=10.0, help="Target FPS for frame sampling before anonymization")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for key generation")
-    parser.add_argument("--detector_score_threshold", type=float, default=0.3, help="MTCNN score threshold for detection filtering")
-    parser.add_argument("--detector_min_face_size", type=int, default=12, help="Minimum face size in pixels for MTCNN")
+    parser.add_argument("--detector_score_threshold", type=float, default=0.35, help="MTCNN score threshold for detection filtering")
+    parser.add_argument("--detector_min_face_size", type=int, default=15, help="Minimum face size in pixels for MTCNN")
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
@@ -396,7 +396,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | DiffusionFaceSwapper | FaceAdapterFaceReenactment | None:
+def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | FaceAdapterFaceSwap | FaceAdapterFaceReenactment | None:
     face_postprocessor = None
     postprocessor_choice = (args.face_postprocessor or "none").lower()
     use_postprocessor_requested = args.use_face_postprocessor or postprocessor_choice != "none"
@@ -418,10 +418,10 @@ def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) ->
             crop_size=args.simswap_crop_size,
             device=device,
         )
-    elif postprocessor_choice == "diffusion":
+    elif postprocessor_choice == "faceadapter_swap":
         faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
 
-        face_postprocessor = DiffusionFaceSwapper(
+        face_postprocessor = FaceAdapterFaceSwap(
             faceadapter_root=args.faceadapter_root,
             checkpoint_dir=faceadapter_ckpt_dir,
             base_model_id=args.faceadapter_base_model,
@@ -431,6 +431,8 @@ def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) ->
             guidance_scale=args.faceadapter_guidance_scale,
             crop_ratio=args.faceadapter_crop_ratio,
             seed=args.faceadapter_seed,
+            detector_score_threshold=args.detector_score_threshold,
+            detector_min_face_size=args.detector_min_face_size,
             device=device,
         )
     elif postprocessor_choice == "faceadapter_reenactment":
@@ -446,6 +448,8 @@ def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) ->
             guidance_scale=args.faceadapter_guidance_scale,
             crop_ratio=args.faceadapter_crop_ratio,
             seed=args.faceadapter_seed,
+            detector_score_threshold=args.detector_score_threshold,
+            detector_min_face_size=args.detector_min_face_size,
             device=device,
         )
     return face_postprocessor

@@ -34,8 +34,8 @@ class MTCNNDetector(FaceDetector):
         self,
         image_size: int = 256,
         margin: int = 0,
-        score_threshold: float = 0.25,
-        min_face_size: int | None = 10,
+        score_threshold: float = 0.35,
+        min_face_size: int | None = 15,
         keep_all: bool = True,
         post_process: bool = False,
         device: str | torch.device | None = None,
@@ -216,6 +216,11 @@ class MTCNNDetector(FaceDetector):
 
             box_t = torch.as_tensor(box, dtype=torch.float32, device=self.device)
             lm_t = torch.as_tensor(lm, dtype=torch.float32, device=self.device)
+            # Reject degenerate landmark constellations that commonly appear on non-face circular textures.
+            if lm_t.shape != (5, 2):
+                continue
+            if float(lm_t.std(dim=0).mean().item()) < 2.0:
+                continue
 
             detections.append(
                 Detection(

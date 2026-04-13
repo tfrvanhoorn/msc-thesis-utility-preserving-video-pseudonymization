@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import logging
 import importlib
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
@@ -10,11 +10,9 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchvision.transforms.functional as TF
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
 from PIL import Image
-
-# Import YOLO for robust overlapping object protection
 from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
@@ -28,12 +26,9 @@ def _load_module_from_file(module_name: str, module_file: Path):
     spec.loader.exec_module(module)
     return module
 
-class DiffusionFaceSwapper:
-    """FaceAdapter-backed face swapper for aligned KFAAR face crops.
 
-    Inputs are aligned face tensors in CHW format and range [-1, 1] or [0, 1].
-    Output is a swapped aligned target tensor in [0, 1] or ``None`` on failure.
-    """
+class FaceAdapterRuntime:
+    """Shared FaceAdapter runtime utilities for FaceSwap and reenactment modes."""
 
     def __init__(
         self,
@@ -50,14 +45,16 @@ class DiffusionFaceSwapper:
         detector_size: int = 640,
         seed: int = 0,
         download_if_missing: bool = True,
-        **kwargs
+        detector_score_threshold: float = 0.35,
+        detector_min_face_size: int = 15,
+        **kwargs,
     ) -> None:
         if not torch.cuda.is_available():
-            raise RuntimeError("FaceAdapter diffusion swapper requires CUDA.")
+            raise RuntimeError("FaceAdapter postprocessing requires CUDA.")
 
         self.device = torch.device(device)
         if self.device.type != "cuda":
-            raise RuntimeError("FaceAdapter diffusion swapper only supports CUDA devices.")
+            raise RuntimeError("FaceAdapter postprocessing only supports CUDA devices.")
         if self.device.index is None:
             self.device = torch.device("cuda:0")
 
@@ -71,6 +68,9 @@ class DiffusionFaceSwapper:
         self.seed = int(seed)
         self.test_image_size = 512
         self.weight_dtype = torch.float16
+        self.detector_score_threshold = float(detector_score_threshold)
+        self.detector_min_face_size = int(detector_min_face_size)
+        self.last_failure_reasons: list[str | None] = []
 
         if str(self.faceadapter_root) not in sys.path:
             sys.path.insert(0, str(self.faceadapter_root))
@@ -197,15 +197,13 @@ class DiffusionFaceSwapper:
                 )
             )
 
-            # === Face Parsing Model ===
             model_parsing = importlib.import_module("third_party.model_parsing")
             self.net_seg_parsing = model_parsing.get_face_parsing(
                 str(self.checkpoint_dir / "third_party" / "79999_iter.pth")
             ).eval().to(self.device)
 
-            # === YOLO Segmentation Model (Items ONLY) ===
-            self.coco_seg_model = YOLO('yolov8n-seg.pt')
-            
+            self.coco_seg_model = YOLO("yolov8n-seg.pt")
+
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             self.app = FaceAnalysis(name=detector_name, root=str(self.checkpoint_dir / "third_party"), providers=providers)
             self.app.prepare(ctx_id=self.device.index or 0, det_size=(detector_size, detector_size))
@@ -214,16 +212,14 @@ class DiffusionFaceSwapper:
             if not empty_prompt_path.exists():
                 empty_prompt_path = self.checkpoint_dir / "empty_prompt_embedding.pth"
             if not empty_prompt_path.exists():
-                raise FileNotFoundError(
-                    f"Missing empty prompt embedding file"
-                )
+                raise FileNotFoundError("Missing empty prompt embedding file")
             self.empty_prompt_token = torch.load(
                 str(empty_prompt_path),
                 map_location=self.device,
                 weights_only=False,
             ).view(1, 77, 768).to(dtype=self.weight_dtype, device=self.device)
         except Exception as exc:
-            raise RuntimeError(f"Failed to initialize FaceAdapter diffusion swapper: {exc}") from exc
+            raise RuntimeError(f"Failed to initialize FaceAdapter runtime: {exc}") from exc
 
         self.pil2tensor = transforms.Compose(
             [
@@ -241,22 +237,43 @@ class DiffusionFaceSwapper:
             key=lambda x: (x["bbox"][2] - x["bbox"][0]) * (x["bbox"][3] - x["bbox"][1]),
         )[-1]
 
+    def _filter_face_infos(self, face_infos: list) -> list:
+        filtered: list = []
+        for face in face_infos:
+            bbox = face.get("bbox")
+            if bbox is None or len(bbox) < 4:
+                continue
+            width = float(bbox[2] - bbox[0])
+            height = float(bbox[3] - bbox[1])
+            if min(width, height) < float(self.detector_min_face_size):
+                continue
+            det_score = float(face.get("det_score", 1.0))
+            if det_score < float(self.detector_score_threshold):
+                continue
+            filtered.append(face)
+        return filtered
+
     def _detect_face_info(self, image_rgb: np.ndarray) -> dict:
         bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-        face_info = self.app.get(bgr)
-        
+        face_info = self._filter_face_infos(self.app.get(bgr))
+
         if not face_info:
             h, w = bgr.shape[:2]
             pad_h, pad_w = int(h * 0.5), int(w * 0.5)
             padded_bgr = cv2.copyMakeBorder(
-                bgr, pad_h, pad_h, pad_w, pad_w, 
-                cv2.BORDER_CONSTANT, value=(128, 128, 128)
+                bgr,
+                pad_h,
+                pad_h,
+                pad_w,
+                pad_w,
+                cv2.BORDER_CONSTANT,
+                value=(128, 128, 128),
             )
-            
-            face_info = self.app.get(padded_bgr)
+
+            face_info = self._filter_face_infos(self.app.get(padded_bgr))
             if not face_info:
                 raise RuntimeError("No face detected even after padding.")
-                
+
             largest_face = self._largest_face(face_info)
             largest_face["bbox"][0] -= pad_w
             largest_face["bbox"][1] -= pad_h
@@ -264,7 +281,6 @@ class DiffusionFaceSwapper:
             largest_face["bbox"][3] -= pad_h
             largest_face["kps"][:, 0] -= pad_w
             largest_face["kps"][:, 1] -= pad_h
-            
             return largest_face
 
         return self._largest_face(face_info)
@@ -273,10 +289,20 @@ class DiffusionFaceSwapper:
         tensor = tensor.detach().to("cpu").clamp(0.0, 1.0)
         return TF.to_pil_image(tensor)
 
-    def _prepare_aligned_face(self, image_pil: Image.Image) -> dict[str, torch.Tensor | np.ndarray | Image.Image]:
+    def _reset_failure_reasons(self, count: int) -> None:
+        self.last_failure_reasons = [None] * count
+
+    def _set_failure_reason(self, idx: int, reason: str) -> None:
+        if 0 <= idx < len(self.last_failure_reasons):
+            self.last_failure_reasons[idx] = reason
+
+    def _prepare_aligned_face(self, image_pil: Image.Image, *, role: str) -> dict[str, torch.Tensor | np.ndarray | Image.Image]:
         ds = self._datasets_faceswap
         image_np = np.array(image_pil.convert("RGB"))
-        face_info = self._detect_face_info(image_np)
+        try:
+            face_info = self._detect_face_info(image_np)
+        except Exception as exc:
+            raise RuntimeError(f"No face detected in {role} input") from exc
         dets = face_info["bbox"]
 
         if self.crop_ratio > 0:
@@ -297,7 +323,10 @@ class DiffusionFaceSwapper:
         image_crop512 = cv2.warpAffine(image_np, warp_mat_crop, (self.test_image_size, self.test_image_size), flags=cv2.INTER_LINEAR)
         image_crop512_pil = Image.fromarray(image_crop512)
 
-        face_info_512 = self._detect_face_info(image_crop512)
+        try:
+            face_info_512 = self._detect_face_info(image_crop512)
+        except Exception as exc:
+            raise RuntimeError(f"No face detected in {role} crop512") from exc
         pts5 = face_info_512["kps"]
         warp_mat_256 = ds.get_affine_transform(pts5, ds.mean_face_lm5p_256)
         image_crop256 = cv2.warpAffine(image_crop512, warp_mat_256, (256, 256), flags=cv2.INTER_LINEAR)
@@ -315,29 +344,28 @@ class DiffusionFaceSwapper:
             "warp_mat_512": warp_mat_crop,
             "pil_512": image_crop512_pil,
         }
-    
+
     def _build_swap_mask(self, images_tar: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # RESTORED TO ORIGINAL WORKING LOGIC
         seg_pred = self.net_seg_parsing(images_tar)[0]
         masks_tar = torch.argmax(
-            F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode='bilinear', align_corners=False), 
-            dim=1, keepdim=True
-        ) 
+            F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode="bilinear", align_corners=False),
+            dim=1,
+            keepdim=True,
+        )
 
         mask_0_6 = (masks_tar > 0) & (masks_tar < 7)
         mask_9_14 = (masks_tar > 9) & (masks_tar < 14)
         face_masks_tar = torch.logical_or(mask_0_6, mask_9_14).float() - (masks_tar == 6).float()
-        
+
         mask_0_14 = (masks_tar > 0) & (masks_tar < 14)
         face_masks_tar_withear = mask_0_14.float() - (masks_tar == 9).float() - (masks_tar == 6).float()
-        
-        # Added 16 (cloth/arm) and 17 (hair/dark objects)
-        occ_mask = ((masks_tar == 0) | (masks_tar == 6) | (masks_tar == 9) | (masks_tar == 15) | 
+
+        occ_mask = ((masks_tar == 0) | (masks_tar == 6) | (masks_tar == 9) | (masks_tar == 15) |
             (masks_tar == 18) | (masks_tar == 16) | (masks_tar == 17)).float()
         face_masks_tar = torch.max(face_masks_tar_withear, F.max_pool2d(face_masks_tar, kernel_size=65, stride=1, padding=32))
         face_masks_tar = face_masks_tar * (1 - occ_mask)
         face_masks_tar = F.max_pool2d(face_masks_tar, kernel_size=5, stride=1, padding=2)
-        
+
         face_masks_tar_pad = F.pad(face_masks_tar, (16, 16, 16, 16), "constant", 0)
         blend_mask = F.max_pool2d(face_masks_tar_pad, kernel_size=17, stride=1, padding=8)
         blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
@@ -346,160 +374,7 @@ class DiffusionFaceSwapper:
         return face_masks_tar, blend_mask
 
     def swap_batch(self, source_aligned_batch: list[torch.Tensor], target_aligned_batch: list[torch.Tensor]) -> list[torch.Tensor | None]:
-        if len(source_aligned_batch) != len(target_aligned_batch):
-            raise ValueError("source_aligned_batch and target_aligned_batch must have the same length")
-
-        count = len(source_aligned_batch)
-        results: list[torch.Tensor | None] = [None] * count
-        if count == 0:
-            return results
-
-        try:
-            with torch.no_grad():
-                prepared: list[dict[str, object]] = []
-                valid_indices: list[int] = []
-
-                for idx, (source_aligned, target_aligned) in enumerate(zip(source_aligned_batch, target_aligned_batch)):
-                    try:
-                        source_t = source_aligned
-                        target_t = target_aligned
-                        if target_t.min() < -0.1:
-                            target_t = (target_t + 1.0) / 2.0
-                        if source_t.min() < -0.1:
-                            source_t = (source_t + 1.0) / 2.0
-
-                        target_t = target_t.clamp(0.0, 1.0)
-                        source_t = source_t.clamp(0.0, 1.0)
-                        _, h, w = target_t.shape
-
-                        source_pil = self._tensor_to_pil(source_t)
-                        target_pil = self._tensor_to_pil(target_t)
-
-                        src = self._prepare_aligned_face(source_pil)
-                        tar = self._prepare_aligned_face(target_pil)
-
-                        src_d3d_coeff = self.net_d3dfr(src["image_256"])
-                        gt_d3d_coeff = self.net_d3dfr(tar["image_256"])
-                        gt_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
-                        gt_pts68 = self.bfm_facemodel.get_lm68(gt_d3d_coeff)
-
-                        im_pts70 = self._draw_pts70_batch(
-                            gt_pts68,
-                            gt_d3d_coeff[:, 257:],
-                            tar["warp_mat_256"],
-                            self.test_image_size,
-                            return_pt=True,
-                        ).to(tar["image_512"])
-
-                        face_masks_tar, blend_mask = self._build_swap_mask(tar["image_512"])
-                        controlnet_image_swap = (im_pts70 * face_masks_tar + tar["image_512"] * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
-
-                        faceid = self.net_arcface(F.interpolate(src["image_256"], [128, 128], mode="bilinear", align_corners=False))
-                        encoder_hidden_states_src = self.net_id2token(faceid).to(dtype=self.weight_dtype)
-
-                        tar_last_hidden = self.net_vision_encoder(tar["clip"]).last_hidden_state
-                        controlnet_encoder_hidden_states_tar = self.net_image2token(tar_last_hidden).to(dtype=self.weight_dtype)
-
-                        prepared.append(
-                            {
-                                "prompt": encoder_hidden_states_src,
-                                "control_prompt": controlnet_encoder_hidden_states_tar,
-                                "control_image": controlnet_image_swap,
-                                "blend_mask": blend_mask,
-                                "tar_image_512": tar["image_512"],
-                                "tar_pil_512": tar["pil_512"],
-                                "warp_mat_512": tar["warp_mat_512"],
-                                "target_pil": target_pil,
-                                "target_hw": (h, w),
-                                "target_device": target_aligned.device,
-                            }
-                        )
-                        valid_indices.append(idx)
-                    except Exception as item_exc:
-                        logger.error("FaceAdapter swap failed for batch item %d: %s", idx, item_exc)
-
-                if not prepared:
-                    return results
-
-                prompt_embeds = torch.cat([item["prompt"] for item in prepared], dim=0)
-                control_prompt_embeds = torch.cat([item["control_prompt"] for item in prepared], dim=0)
-                control_images = torch.cat([item["control_image"] for item in prepared], dim=0)
-
-                batch_size = prompt_embeds.shape[0]
-                negative_prompt_embeds = self.empty_prompt_token.expand(batch_size, -1, -1)
-                control_negative_prompt_embeds = self.empty_prompt_token.expand(batch_size, -1, -1)
-
-                self._set_seed(self.seed)
-                generator = torch.Generator(device=self.device).manual_seed(self.seed)
-
-                gen_pils = self.pipe(
-                    prompt_embeds=prompt_embeds,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    controlnet_prompt_embeds=control_prompt_embeds,
-                    controlnet_negative_prompt_embeds=control_negative_prompt_embeds,
-                    image=control_images,
-                    num_inference_steps=self.inference_steps,
-                    generator=generator,
-                    guidance_scale=self.guidance_scale,
-                    controlnet_conditioning_scale=1.0,
-                ).images
-
-                for out_idx, item in enumerate(prepared):
-                    gen_np = np.array(gen_pils[out_idx].convert("RGB"))
-                    tar_512_np = (
-                        item["tar_image_512"][0].cpu().numpy().transpose(1, 2, 0) * 127.5 + 127.5
-                    ).clip(0, 255).astype(np.uint8)
-                    blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
-
-                    # --- YOLO COCO PROTECTION (BULLETPROOF MATH) ---
-                    object_mask_np = np.zeros_like(blend_mask_np)
-
-                    # Catch standard objects (39=bottle, 41=cup, 67=phone, 78=hair dryer, 79=toothbrush)
-                    coco_results = self.coco_seg_model(item["tar_pil_512"], classes=[39, 41, 67, 78, 79], verbose=False)
-                    if len(coco_results) > 0 and coco_results[0].masks is not None:
-                        mask_data = coco_results[0].masks.data.cpu().numpy()
-                        if mask_data.size > 0:
-                            # Compress multiple objects into a single flat 2D mask
-                            combined_coco = np.max(mask_data, axis=0)
-                            # Resize to FaceAdapter's 512x512 space
-                            resized_coco = cv2.resize(combined_coco, (512, 512), interpolation=cv2.INTER_LINEAR)
-                            # Binarize to completely remove floating point fading, ensuring a hard cut
-                            object_mask_np = (resized_coco > 0.5).astype(np.float32)[:, :, np.newaxis]
-
-                    # Punch a hole in the FaceAdapter mask where the object is detected
-                    safe_blend_mask = blend_mask_np * (1.0 - object_mask_np)
-                    # -----------------------------------------------
-
-                    composite_512 = (gen_np * safe_blend_mask + tar_512_np * (1.0 - safe_blend_mask)).astype(np.uint8)
-
-                    h, w = item["target_hw"]
-                    orig_crop_np = np.array(item["target_pil"])
-                    inv_face = cv2.warpAffine(
-                        composite_512,
-                        item["warp_mat_512"],
-                        (w, h),
-                        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                        borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=(0, 0, 0),
-                    )
-
-                    inv_mask = cv2.warpAffine(
-                        safe_blend_mask.squeeze(),
-                        item["warp_mat_512"],
-                        (w, h),
-                        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                        borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=0.0,
-                    )[:, :, np.newaxis]
-
-                    final_np = (inv_face * inv_mask + orig_crop_np * (1 - inv_mask)).astype(np.uint8)
-                    final_tensor = torch.from_numpy(final_np.transpose(2, 0, 1)).float().div(255.0)
-                    results[valid_indices[out_idx]] = final_tensor.to(item["target_device"])
-
-                return results
-        except Exception as e:
-            logger.error("FaceAdapter batched swap failed: %s", e)
-            return results
+        raise NotImplementedError
 
     def swap(self, source_aligned: torch.Tensor, target_aligned: torch.Tensor) -> torch.Tensor | None:
         return self.swap_batch([source_aligned], [target_aligned])[0]

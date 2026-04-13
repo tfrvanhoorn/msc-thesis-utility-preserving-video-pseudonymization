@@ -11,7 +11,13 @@ try:
     import imageio.v2 as imageio  # type: ignore
 except Exception:  # pragma: no cover
     imageio = None
-from components import EmbeddingModel, FaceDetector, ProjectorMLP
+from components import (
+    EmbeddingModel,
+    FaceAdapterFaceReenactment,
+    FaceAdapterFaceSwap,
+    FaceDetector,
+    ProjectorMLP,
+)
 from components.alignment import FaceAligner
 from components.detector import Detection
 from components import StyleGAN2Generator
@@ -189,12 +195,15 @@ class KfaarPipeline:
                             stylegan_top_i = max(stylegan_dets_i, key=lambda d: d.score)
                             aligned_stylegan_i = self.aligner.align(img_i, stylegan_top_i).to(device)
 
-                            is_diffusion = type(self.face_postprocessor).__name__ == "DiffusionFaceSwapper"
-                            target_to_swap_i = frames_t[frame_idx] if is_diffusion else aligned_input
+                            is_faceadapter_fullframe = isinstance(
+                                self.face_postprocessor,
+                                (FaceAdapterFaceSwap, FaceAdapterFaceReenactment),
+                            )
+                            target_to_swap_i = frames_t[frame_idx] if is_faceadapter_fullframe else aligned_input
                             if target_to_swap_i.numel() > 0:
                                 swapped_i = self.face_postprocessor.swap(aligned_stylegan_i, target_to_swap_i)
                                 if swapped_i is not None:
-                                    # Diffusion returns full-frame composites; legacy swappers return face crops.
+                                    # FaceAdapter full-frame postprocessors return full-frame composites.
                                     visual_i = swapped_i
 
                     frame_pair_inputs.append(aligned_input.detach())
@@ -220,10 +229,13 @@ class KfaarPipeline:
                 elif self.face_postprocessor is not None:
                     
                     # === SMART ROUTING ===
-                    # If it's the diffusion swapper, give it the full frame so it can inverse-warp perfectly.
-                    # Otherwise, give it the KFAAR crop for legacy swappers.
-                    is_diffusion = type(self.face_postprocessor).__name__ == "DiffusionFaceSwapper"
-                    target_to_swap = frames_t[center_idx] if is_diffusion else aligned_faces[center_idx]
+                    # FaceAdapter full-frame postprocessors receive the full frame to preserve inverse-warp geometry.
+                    # Legacy swappers receive aligned face crops.
+                    is_faceadapter_fullframe = isinstance(
+                        self.face_postprocessor,
+                        (FaceAdapterFaceSwap, FaceAdapterFaceReenactment),
+                    )
+                    target_to_swap = frames_t[center_idx] if is_faceadapter_fullframe else aligned_faces[center_idx]
                     
                     swapped = None
                     if target_to_swap.numel() > 0 and aligned_stylegan is not None:
@@ -232,8 +244,8 @@ class KfaarPipeline:
                     if swapped is not None:
                         det_input_embed = aligned_stylegan if swap_for_visuals_only else swapped
 
-                        if is_diffusion:
-                            # DiffusionFaceSwapper natively returns the seamlessly blended full frame
+                        if is_faceadapter_fullframe:
+                            # FaceAdapter full-frame postprocessors natively return full-frame composites.
                             swapped_images = swapped.unsqueeze(0)
                         else:
                             # Legacy naive paste-back for other swappers that return tight crops
@@ -350,6 +362,8 @@ class KfaarPipeline:
                 "processed_faces": 0,
                 "composited_faces": 0,
                 "skipped_faces": 0,
+                "source_fail_black_boxes": 0,
+                "target_failures": 0,
             }
 
             records: list[dict[str, object]] = []
@@ -438,14 +452,14 @@ class KfaarPipeline:
                 stylegan_top = max(stylegan_dets, key=lambda d: d.score)
                 aligned_stylegan_faces.append(self.aligner.align(generated_face, stylegan_top).to(device))
 
-            is_diffusion = (
+            is_faceadapter_fullframe = (
                 use_face_postprocessor
                 and self.face_postprocessor is not None
-                and type(self.face_postprocessor).__name__ == "DiffusionFaceSwapper"
+                and isinstance(self.face_postprocessor, (FaceAdapterFaceSwap, FaceAdapterFaceReenactment))
             )
             diffusion_composited = [False] * len(valid_records)
 
-            if is_diffusion and hasattr(self.face_postprocessor, "swap_batch"):
+            if is_faceadapter_fullframe and hasattr(self.face_postprocessor, "swap_batch"):
                 records_by_frame: dict[int, list[int]] = {}
                 for rec_idx, record in enumerate(valid_records):
                     frame_idx = int(record["frame_idx"])
@@ -474,8 +488,20 @@ class KfaarPipeline:
                         continue
 
                     swapped_batch = self.face_postprocessor.swap_batch(batch_sources, batch_targets)
-                    for (frame_idx, rec_idx), swapped in zip(batch_meta, swapped_batch):
+                    failure_reasons = getattr(self.face_postprocessor, "last_failure_reasons", [])
+                    for local_idx, ((frame_idx, rec_idx), swapped) in enumerate(zip(batch_meta, swapped_batch)):
+                        reason = failure_reasons[local_idx] if local_idx < len(failure_reasons) else None
                         if swapped is None:
+                            if reason == "source_no_face":
+                                region = valid_records[rec_idx].get("region")
+                                if isinstance(region, tuple) and len(region) == 4:
+                                    x1, y1, x2, y2 = region
+                                    output_frames[frame_idx][:, y1:y2, x1:x2] = 0.0
+                                    diffusion_composited[rec_idx] = True
+                                    stats["composited_faces"] += 1
+                                    stats["source_fail_black_boxes"] += 1
+                            elif reason == "target_no_face":
+                                stats["target_failures"] += 1
                             continue
                         output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
                         diffusion_composited[rec_idx] = True
@@ -507,19 +533,50 @@ class KfaarPipeline:
                         self._warned_face_postprocessor = True
                     elif self.face_postprocessor is not None:
                         aligned_stylegan = aligned_stylegan_faces[idx]
+                        if is_faceadapter_fullframe and aligned_stylegan is None:
+                            output_frames[frame_idx][:, y1:y2, x1:x2] = 0.0
+                            stats["composited_faces"] += 1
+                            stats["source_fail_black_boxes"] += 1
+                            logger.warning(
+                                "FaceAdapter source detection failed before swap | frame_idx=%d | region=(%d,%d,%d,%d)",
+                                frame_idx,
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                            )
+                            continue
                         if aligned_stylegan is not None:
-                            if is_diffusion:
+                            if is_faceadapter_fullframe:
                                 target_to_swap = output_frames[frame_idx]
                                 swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
                                 if swapped is not None:
                                     output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
                                     stats["composited_faces"] += 1
                                     continue
+                                failure_reasons = getattr(self.face_postprocessor, "last_failure_reasons", [])
+                                failure_reason = failure_reasons[0] if failure_reasons else None
+                                if failure_reason == "source_no_face":
+                                    output_frames[frame_idx][:, y1:y2, x1:x2] = 0.0
+                                    stats["composited_faces"] += 1
+                                    stats["source_fail_black_boxes"] += 1
+                                    continue
+                                if failure_reason == "target_no_face":
+                                    stats["target_failures"] += 1
+                                    continue
                             else:
                                 target_to_swap = aligned_inputs[idx]
                                 swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
                                 if swapped is not None:
                                     visual = swapped
+                                else:
+                                    failure_reasons = getattr(self.face_postprocessor, "last_failure_reasons", [])
+                                    failure_reason = failure_reasons[0] if failure_reasons else None
+                                    if failure_reason == "source_no_face":
+                                        visual = torch.zeros_like(generated_face)
+                                        stats["source_fail_black_boxes"] += 1
+                                    elif failure_reason == "target_no_face":
+                                        stats["target_failures"] += 1
 
                 patch = self._normalize_visual_frame(visual)
                 patch = torch.nn.functional.interpolate(
