@@ -52,7 +52,7 @@ class KfaarPipeline:
         save_mode: str = "detected",
         save_max_per_epoch: Optional[int] = None,
         truncation_psi: float = 0.5,
-        face_swapper: object | None = None,
+        face_postprocessor: object | None = None,
         use_stylegan_mapper: bool = False,
     ) -> None:
         self.detector = detector
@@ -60,10 +60,10 @@ class KfaarPipeline:
         self.embedder = embedder
         self.projector = projector
         self.stylegan = stylegan
-        self.face_swapper = face_swapper
+        self.face_postprocessor = face_postprocessor
         self.use_stylegan_mapper = use_stylegan_mapper
         self.device = device or next(projector.parameters()).device
-        self._warned_face_swapper = False
+        self._warned_face_postprocessor = False
         
         # Optimizer Setup
         self.optimizer = torch.optim.Adam(self.projector.parameters(), lr=1e-4)
@@ -112,7 +112,7 @@ class KfaarPipeline:
         key_tag: Optional[str] = None,
         batch_index: Optional[int] = None,
         sample_context: Optional[str] = None,
-        use_face_swapper: bool = False,
+        use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
         return_frame_pairs: bool = False,
     ) -> KfaarResult:
@@ -183,16 +183,16 @@ class KfaarPipeline:
                     img_i = self.stylegan.synthesize(w_i, noise_mode="const")[0].clamp(-1, 1).add(1).div(2.0)
 
                     visual_i = img_i
-                    if use_face_swapper and self.face_swapper is not None:
+                    if use_face_postprocessor and self.face_postprocessor is not None:
                         stylegan_dets_i = self.detector.detect(img_i)
                         if stylegan_dets_i:
                             stylegan_top_i = max(stylegan_dets_i, key=lambda d: d.score)
                             aligned_stylegan_i = self.aligner.align(img_i, stylegan_top_i).to(device)
 
-                            is_diffusion = type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+                            is_diffusion = type(self.face_postprocessor).__name__ == "DiffusionFaceSwapper"
                             target_to_swap_i = frames_t[frame_idx] if is_diffusion else aligned_input
                             if target_to_swap_i.numel() > 0:
-                                swapped_i = self.face_swapper.swap(aligned_stylegan_i, target_to_swap_i)
+                                swapped_i = self.face_postprocessor.swap(aligned_stylegan_i, target_to_swap_i)
                                 if swapped_i is not None:
                                     # Diffusion returns full-frame composites; legacy swappers return face crops.
                                     visual_i = swapped_i
@@ -213,21 +213,21 @@ class KfaarPipeline:
                 stylegan_top = max(stylegan_dets, key=lambda d: d.score)
                 aligned_stylegan = self.aligner.align(img, stylegan_top).to(device)
 
-            if use_face_swapper:
-                if self.face_swapper is None and not self._warned_face_swapper:
-                    logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
-                    self._warned_face_swapper = True
-                elif self.face_swapper is not None:
+            if use_face_postprocessor:
+                if self.face_postprocessor is None and not self._warned_face_postprocessor:
+                    logger.warning("Face postprocessing requested but no postprocessor is configured; proceeding without postprocessing.")
+                    self._warned_face_postprocessor = True
+                elif self.face_postprocessor is not None:
                     
                     # === SMART ROUTING ===
                     # If it's the diffusion swapper, give it the full frame so it can inverse-warp perfectly.
                     # Otherwise, give it the KFAAR crop for legacy swappers.
-                    is_diffusion = type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+                    is_diffusion = type(self.face_postprocessor).__name__ == "DiffusionFaceSwapper"
                     target_to_swap = frames_t[center_idx] if is_diffusion else aligned_faces[center_idx]
                     
                     swapped = None
                     if target_to_swap.numel() > 0 and aligned_stylegan is not None:
-                        swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
+                        swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
 
                     if swapped is not None:
                         det_input_embed = aligned_stylegan if swap_for_visuals_only else swapped
@@ -258,9 +258,9 @@ class KfaarPipeline:
                                     swapped_full[:, y1:y2, x1:x2] = swapped_resized
 
                             swapped_images = swapped_full.unsqueeze(0)
-                    elif not self._warned_face_swapper:
-                        logger.warning("Face swapper failed to produce output; proceeding without swap.")
-                        self._warned_face_swapper = True
+                    elif not self._warned_face_postprocessor:
+                        logger.warning("Face postprocessor failed to produce output; proceeding without postprocessing.")
+                        self._warned_face_postprocessor = True
 
             if det_input_embed is None and stylegan_detected:
                 det_input_embed = aligned_stylegan
@@ -309,7 +309,7 @@ class KfaarPipeline:
         key_tag: Optional[str] = None,
         batch_index: Optional[int] = None,
         sample_context: Optional[str] = None,
-        use_face_swapper: bool = False,
+        use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
         return_frame_pairs: bool = False,
     ) -> KfaarResult:
@@ -321,7 +321,7 @@ class KfaarPipeline:
                 key_tag=key_tag,
                 batch_index=batch_index,
                 sample_context=sample_context,
-                use_face_swapper=use_face_swapper,
+                use_face_postprocessor=use_face_postprocessor,
                 swap_for_visuals_only=swap_for_visuals_only,
                 return_frame_pairs=return_frame_pairs,
             )
@@ -331,7 +331,7 @@ class KfaarPipeline:
         frames: torch.Tensor,
         key: torch.Tensor,
         *,
-        use_face_swapper: bool = False,
+        use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
     ) -> InferenceBatchResult:
         """Inference-only full-frame multi-face path; does not affect training codepaths."""
@@ -439,13 +439,13 @@ class KfaarPipeline:
                 aligned_stylegan_faces.append(self.aligner.align(generated_face, stylegan_top).to(device))
 
             is_diffusion = (
-                use_face_swapper
-                and self.face_swapper is not None
-                and type(self.face_swapper).__name__ == "DiffusionFaceSwapper"
+                use_face_postprocessor
+                and self.face_postprocessor is not None
+                and type(self.face_postprocessor).__name__ == "DiffusionFaceSwapper"
             )
             diffusion_composited = [False] * len(valid_records)
 
-            if is_diffusion and hasattr(self.face_swapper, "swap_batch"):
+            if is_diffusion and hasattr(self.face_postprocessor, "swap_batch"):
                 records_by_frame: dict[int, list[int]] = {}
                 for rec_idx, record in enumerate(valid_records):
                     frame_idx = int(record["frame_idx"])
@@ -473,7 +473,7 @@ class KfaarPipeline:
                     if not batch_sources:
                         continue
 
-                    swapped_batch = self.face_swapper.swap_batch(batch_sources, batch_targets)
+                    swapped_batch = self.face_postprocessor.swap_batch(batch_sources, batch_targets)
                     for (frame_idx, rec_idx), swapped in zip(batch_meta, swapped_batch):
                         if swapped is None:
                             continue
@@ -501,23 +501,23 @@ class KfaarPipeline:
                 generated_face = generated[idx]
                 visual = generated_face
 
-                if use_face_swapper:
-                    if self.face_swapper is None and not self._warned_face_swapper:
-                        logger.warning("Face swapping requested but no swapper is configured; proceeding without swap.")
-                        self._warned_face_swapper = True
-                    elif self.face_swapper is not None:
+                if use_face_postprocessor:
+                    if self.face_postprocessor is None and not self._warned_face_postprocessor:
+                        logger.warning("Face postprocessing requested but no postprocessor is configured; proceeding without postprocessing.")
+                        self._warned_face_postprocessor = True
+                    elif self.face_postprocessor is not None:
                         aligned_stylegan = aligned_stylegan_faces[idx]
                         if aligned_stylegan is not None:
                             if is_diffusion:
                                 target_to_swap = output_frames[frame_idx]
-                                swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
+                                swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
                                 if swapped is not None:
                                     output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
                                     stats["composited_faces"] += 1
                                     continue
                             else:
                                 target_to_swap = aligned_inputs[idx]
-                                swapped = self.face_swapper.swap(aligned_stylegan, target_to_swap)
+                                swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
                                 if swapped is not None:
                                     visual = swapped
 
@@ -545,7 +545,7 @@ class KfaarPipeline:
         key_1,
         key_2,
         batch_index: Optional[int] = None,
-        use_face_swapper: bool = False,
+        use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
         lambda_w_reg: float = 20.0,
         return_components: bool = False,
@@ -561,7 +561,7 @@ class KfaarPipeline:
             key_1,
             key_2,
             batch_index=batch_index,
-            use_face_swapper=use_face_swapper,
+            use_face_postprocessor=use_face_postprocessor,
             swap_for_visuals_only=swap_for_visuals_only,
             lambda_w_reg=lambda_w_reg,
             **kwargs,
@@ -612,7 +612,7 @@ class KfaarPipeline:
         margin=0.5, lambda_ano=0.4, lambda_syn=1.0, lambda_div=1.0, lambda_dif=1.0, lambda_temp=0.0,
         lambda_w_reg: float = 20.0,
         batch_index: Optional[int] = None,
-        use_face_swapper: bool = False,
+        use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
     ) -> Optional[
         tuple[
@@ -641,7 +641,7 @@ class KfaarPipeline:
         det_failures = 0
         batched_success = False
         if (
-            not use_face_swapper
+            not use_face_postprocessor
             and self.stylegan is not None
         ):
             try:
@@ -776,7 +776,7 @@ class KfaarPipeline:
                     sample_label=label_int,
                     key_tag="k1",
                     batch_index=batch_index,
-                    use_face_swapper=use_face_swapper,
+                    use_face_postprocessor=use_face_postprocessor,
                     swap_for_visuals_only=swap_for_visuals_only,
                 )
                 res2 = self.forward(
@@ -785,7 +785,7 @@ class KfaarPipeline:
                     sample_label=label_int,
                     key_tag="k2",
                     batch_index=batch_index,
-                    use_face_swapper=use_face_swapper,
+                    use_face_postprocessor=use_face_postprocessor,
                     swap_for_visuals_only=swap_for_visuals_only,
                 )
 

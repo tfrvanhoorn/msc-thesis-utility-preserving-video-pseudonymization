@@ -40,6 +40,7 @@ from components import (
     load_projector_state_dict,
     SimSwapFaceSwapper,
     DiffusionFaceSwapper,
+    FaceAdapterFaceReenactment,
 )
 from data.splits import build_train_test_loaders
 from data.prepared import DEFAULT_PREPARED_REGEX, collect_prepared_images, compile_prepared_regex, PreparedNameError
@@ -100,15 +101,15 @@ def parse_args():
     parser.add_argument("--save_generated_dir", type=Path, default=None, help="Directory to store generated face images (defaults to output_dir/generated_faces)")
     parser.add_argument("--save_generated_max_per_epoch", type=int, default=100, help="Maximum number of generated samples to store per epoch (set <=0 for no limit)")
 
-    # Face swapping selector (visual-only by default)
+    # Face postprocessing selector (visual-only by default)
     parser.add_argument(
-        "--face_swapper",
+        "--face_postprocessor",
         type=str,
         default="none",
-        choices=["none", "simswap", "diffusion"],
-        help="Choose face swapper backend (none=disabled, simswap, diffusion)",
+        choices=["none", "simswap", "diffusion", "faceadapter_reenactment"],
+        help="Choose final face postprocessing backend (none=disabled, simswap, diffusion, faceadapter_reenactment)",
     )
-    parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping (overridden by face_swapper != none)")
+    parser.add_argument("--use_face_postprocessor", action="store_true", help="Legacy flag to enable face postprocessing (overridden by face_postprocessor != none)")
     parser.add_argument(
         "--swap_for_visuals_only",
         action="store_true",
@@ -188,14 +189,14 @@ def main():
         max_samples,
     )
 
-    face_swapper = None
-    swapper_choice = (args.face_swapper or "none").lower()
-    use_swapper_requested = args.use_face_swapper or swapper_choice != "none"
-    if use_swapper_requested:
-        if swapper_choice == "simswap" or swapper_choice == "none":
+    face_postprocessor = None
+    postprocessor_choice = (args.face_postprocessor or "none").lower()
+    use_postprocessor_requested = args.use_face_postprocessor or postprocessor_choice != "none"
+    if use_postprocessor_requested:
+        if postprocessor_choice == "simswap" or postprocessor_choice == "none":
             simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
             arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
-            face_swapper = SimSwapFaceSwapper(
+            face_postprocessor = SimSwapFaceSwapper(
                 simswap_root=args.simswap_root,
                 checkpoints_dir=simswap_ckpt_dir,
                 name=args.simswap_name,
@@ -207,10 +208,25 @@ def main():
                 crop_size=args.simswap_crop_size,
                 device=device,
             )
-        elif swapper_choice == "diffusion":
+        elif postprocessor_choice == "diffusion":
             faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
 
-            face_swapper = DiffusionFaceSwapper(
+            face_postprocessor = DiffusionFaceSwapper(
+                faceadapter_root=args.faceadapter_root,
+                checkpoint_dir=faceadapter_ckpt_dir,
+                base_model_id=args.faceadapter_base_model,
+                cache_dir=args.faceadapter_cache_dir,
+                use_cache=args.faceadapter_use_cache,
+                inference_steps=args.faceadapter_inference_steps,
+                guidance_scale=args.faceadapter_guidance_scale,
+                crop_ratio=args.faceadapter_crop_ratio,
+                seed=args.faceadapter_seed,
+                device=device,
+            )
+        elif postprocessor_choice == "faceadapter_reenactment":
+            faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
+
+            face_postprocessor = FaceAdapterFaceReenactment(
                 faceadapter_root=args.faceadapter_root,
                 checkpoint_dir=faceadapter_ckpt_dir,
                 base_model_id=args.faceadapter_base_model,
@@ -279,7 +295,7 @@ def main():
         stylegan=stylegan,
         device=device,
         truncation_psi=args.truncation_psi,
-        face_swapper=face_swapper,
+        face_postprocessor=face_postprocessor,
     )
 
     start_epoch = args.start_epoch if args.start_epoch is not None else 0
@@ -295,7 +311,7 @@ def main():
     save_max = None if args.save_generated_max_per_epoch is not None and args.save_generated_max_per_epoch <= 0 else args.save_generated_max_per_epoch
 
     # 4. Initialize and Run Trainer
-    use_swapper_flag = face_swapper is not None
+    use_postprocessor_flag = face_postprocessor is not None
 
     trainer = KfaarTrainer(
         pipeline=pipeline,
@@ -319,7 +335,7 @@ def main():
         save_generated_dir=save_dir,
         save_generated_mode=args.save_generated_mode,
         save_generated_max_per_epoch=save_max,
-        use_face_swapper=use_swapper_flag,
+        use_face_postprocessor=use_postprocessor_flag,
         swap_for_visuals_only=args.swap_for_visuals_only,
     )
 

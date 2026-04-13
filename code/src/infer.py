@@ -41,6 +41,7 @@ from components import (  # noqa: E402
     load_projector_state_dict,
     SimSwapFaceSwapper,
     DiffusionFaceSwapper,
+    FaceAdapterFaceReenactment,
 )
 from data.prepared import compile_prepared_regex, parse_prepared_video_path  # noqa: E402
 from data.video_io import get_video_fps, load_video_frames, write_mp4  # noqa: E402
@@ -259,15 +260,15 @@ def parse_args() -> argparse.Namespace:
         help="Regex used for prepared video names when dataset_type=video_folder",
     )
 
-    # Face swapping selector (visual-only by default)
+    # Face postprocessing selector (visual-only by default)
     parser.add_argument(
-        "--face_swapper",
+        "--face_postprocessor",
         type=str,
         default="none",
-        choices=["none", "simswap", "diffusion"],
-        help="Choose face swapper backend for visualization (none=disabled)",
+        choices=["none", "simswap", "diffusion", "faceadapter_reenactment"],
+        help="Choose final face postprocessing backend for visualization (none=disabled)",
     )
-    parser.add_argument("--use_face_swapper", action="store_true", help="Legacy flag to enable face swapping (overridden by face_swapper != none)")
+    parser.add_argument("--use_face_postprocessor", action="store_true", help="Legacy flag to enable face postprocessing (overridden by face_postprocessor != none)")
     parser.add_argument(
         "--swap_for_visuals_only",
         action="store_true",
@@ -395,17 +396,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | DiffusionFaceSwapper | None:
-    face_swapper = None
-    swapper_choice = (args.face_swapper or "none").lower()
-    use_swapper_requested = args.use_face_swapper or swapper_choice != "none"
-    if not use_swapper_requested:
+def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | DiffusionFaceSwapper | FaceAdapterFaceReenactment | None:
+    face_postprocessor = None
+    postprocessor_choice = (args.face_postprocessor or "none").lower()
+    use_postprocessor_requested = args.use_face_postprocessor or postprocessor_choice != "none"
+    if not use_postprocessor_requested:
         return None
 
-    if swapper_choice == "simswap" or swapper_choice == "none":
+    if postprocessor_choice == "simswap" or postprocessor_choice == "none":
         simswap_ckpt_dir = args.simswap_checkpoints_dir or args.simswap_root / "checkpoints"
         arcface_ckpt = args.simswap_arcface_ckpt or args.simswap_root / "arcface_model" / "arcface_checkpoint.tar"
-        face_swapper = SimSwapFaceSwapper(
+        face_postprocessor = SimSwapFaceSwapper(
             simswap_root=args.simswap_root,
             checkpoints_dir=simswap_ckpt_dir,
             name=args.simswap_name,
@@ -417,10 +418,10 @@ def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSw
             crop_size=args.simswap_crop_size,
             device=device,
         )
-    elif swapper_choice == "diffusion":
+    elif postprocessor_choice == "diffusion":
         faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
 
-        face_swapper = DiffusionFaceSwapper(
+        face_postprocessor = DiffusionFaceSwapper(
             faceadapter_root=args.faceadapter_root,
             checkpoint_dir=faceadapter_ckpt_dir,
             base_model_id=args.faceadapter_base_model,
@@ -432,7 +433,22 @@ def _build_face_swapper(args: argparse.Namespace, device: torch.device) -> SimSw
             seed=args.faceadapter_seed,
             device=device,
         )
-    return face_swapper
+    elif postprocessor_choice == "faceadapter_reenactment":
+        faceadapter_ckpt_dir = args.faceadapter_checkpoint_dir or args.faceadapter_root / "checkpoints"
+
+        face_postprocessor = FaceAdapterFaceReenactment(
+            faceadapter_root=args.faceadapter_root,
+            checkpoint_dir=faceadapter_ckpt_dir,
+            base_model_id=args.faceadapter_base_model,
+            cache_dir=args.faceadapter_cache_dir,
+            use_cache=args.faceadapter_use_cache,
+            inference_steps=args.faceadapter_inference_steps,
+            guidance_scale=args.faceadapter_guidance_scale,
+            crop_ratio=args.faceadapter_crop_ratio,
+            seed=args.faceadapter_seed,
+            device=device,
+        )
+    return face_postprocessor
 
 
 def main() -> None:
@@ -454,7 +470,7 @@ def main() -> None:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    face_swapper = _build_face_swapper(args, device)
+    face_postprocessor = _build_face_postprocessor(args, device)
 
     data_cfg = DataConfig(
         dataset_path=args.data_path,
@@ -492,7 +508,7 @@ def main() -> None:
         stylegan=stylegan,
         device=device,
         truncation_psi=args.truncation_psi,
-        face_swapper=face_swapper,
+        face_postprocessor=face_postprocessor,
     )
 
     logging.info("Loading checkpoint %s", args.checkpoint)
@@ -541,8 +557,8 @@ def main() -> None:
 
             for key_idx, key_vec in enumerate(key_bank, start=1):
                 key_name = f"key{key_idx}"
-                if face_swapper is not None and hasattr(face_swapper, "reset_sequence"):
-                    face_swapper.reset_sequence()
+                if face_postprocessor is not None and hasattr(face_postprocessor, "reset_sequence"):
+                    face_postprocessor.reset_sequence()
                 key_detected = 0
                 key_processed = 0
                 key_composited = 0
@@ -555,7 +571,7 @@ def main() -> None:
                     chunk_res = pipeline.infer_frames_batched(
                         frame_chunk,
                         key_vec,
-                        use_face_swapper=face_swapper is not None,
+                        use_face_postprocessor=face_postprocessor is not None,
                         swap_for_visuals_only=args.swap_for_visuals_only,
                     )
 
