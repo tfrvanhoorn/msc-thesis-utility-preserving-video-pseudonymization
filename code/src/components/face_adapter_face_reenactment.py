@@ -45,7 +45,9 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
 
                         target_t = target_t.clamp(0.0, 1.0)
                         source_t = source_t.clamp(0.0, 1.0)
-                        _, h, w = target_t.shape # Assuming source and target crops are the same size
+                        
+                        # --- THE FIX: Extracting dimensions from the SOURCE tensor ---
+                        _, h, w = source_t.shape
 
                         source_pil = self._tensor_to_pil(source_t)
                         target_pil = self._tensor_to_pil(target_t)
