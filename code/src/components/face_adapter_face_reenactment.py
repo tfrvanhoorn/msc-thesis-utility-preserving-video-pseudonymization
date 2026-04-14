@@ -45,7 +45,7 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
 
                         target_t = target_t.clamp(0.0, 1.0)
                         source_t = source_t.clamp(0.0, 1.0)
-                        _, h, w = target_t.shape
+                        _, h, w = target_t.shape # Assuming source and target crops are the same size
 
                         source_pil = self._tensor_to_pil(source_t)
                         target_pil = self._tensor_to_pil(target_t)
@@ -64,22 +64,41 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                             logger.error("FaceAdapter reenactment failed for batch item %d (target): %s", idx, target_exc)
                             continue
 
+                        # --- 1. PROPER 3DMM RECOMBINATION ---
                         src_d3d_coeff = self.net_d3dfr(src["image_256"])
                         tar_d3d_coeff = self.net_d3dfr(tar["image_256"])
-                        tar_d3d_coeff[:, 0:80] = src_d3d_coeff[:, 0:80]
-                        tar_pts68 = self.bfm_facemodel.get_lm68(tar_d3d_coeff)
+                        
+                        recon_d3d_coeff = src_d3d_coeff.clone()
+                        # Inject Target Expression (80:144) and Pose (224:227)
+                        recon_d3d_coeff[:, 80:144] = tar_d3d_coeff[:, 80:144]
+                        recon_d3d_coeff[:, 224:227] = tar_d3d_coeff[:, 224:227]
+                        
+                        recon_pts68 = self.bfm_facemodel.get_lm68(recon_d3d_coeff)
 
+                        # --- 2. SOURCE SPATIAL ALIGNMENT & TARGET GAZE ---
                         im_pts70 = self._draw_pts70_batch(
-                            tar_pts68,
-                            tar_d3d_coeff[:, 257:],
-                            tar["warp_mat_256"],
+                            recon_pts68,
+                            tar_d3d_coeff[:, 257:],  # Pass target gaze/pupils
+                            src["warp_mat_256"],     # Use SOURCE warp matrix
                             self.test_image_size,
                             return_pt=True,
-                        ).to(tar["image_512"])
+                        ).to(src["image_512"])
 
-                        face_masks_tar, blend_mask = self._build_swap_mask(tar["image_512"])
-                        controlnet_image = (im_pts70 * face_masks_tar + src["image_512"] * (1 - face_masks_tar)).to(dtype=self.weight_dtype)
+                        # --- 3. SOURCE BACKGROUND MASKING (net_seg_res18) ---
+                        # Predict adapting area using Source image and Reenacted landmarks
+                        mask_input = torch.cat([src["image_512"], im_pts70], dim=1)
+                        face_masks_src = (self.net_seg_res18(mask_input) > 0.5).float()
+                        
+                        # Composite the Condition Image
+                        controlnet_image = (im_pts70 * face_masks_src + src["image_512"] * (1 - face_masks_src)).to(dtype=self.weight_dtype)
 
+                        # Create smooth blend mask for final pasting
+                        face_masks_src_pad = F.pad(face_masks_src, (16, 16, 16, 16), "constant", 0)
+                        blend_mask = F.max_pool2d(face_masks_src_pad, kernel_size=17, stride=1, padding=8)
+                        blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
+                        blend_mask = blend_mask[:, :, 16:528, 16:528]
+
+                        # --- 4. EXTRACT SOURCE IDENTITY & ATTRIBUTES ---
                         faceid = self.net_arcface(F.interpolate(src["image_256"], [128, 128], mode="bilinear", align_corners=False))
                         prompt_embeds = self.net_id2token(faceid).to(dtype=self.weight_dtype)
 
@@ -92,10 +111,10 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                                 "control_prompt": control_prompt_embeds,
                                 "control_image": controlnet_image,
                                 "blend_mask": blend_mask,
-                                "warp_mat_512": tar["warp_mat_512"],
-                                "target_pil": target_pil,
+                                "warp_mat_512": src["warp_mat_512"], # We use the SOURCE warp matrix
+                                "target_pil": source_pil,            # We are modifying the SOURCE image
                                 "target_hw": (h, w),
-                                "target_device": target_aligned.device,
+                                "target_device": source_aligned.device,
                             }
                         )
                         valid_indices.append(idx)
@@ -132,10 +151,13 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                 for out_idx, item in enumerate(prepared):
                     gen_np = np.array(gen_pils[out_idx].convert("RGB"))
                     blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
+                    
                     composite_512 = gen_np
 
                     h, w = item["target_hw"]
-                    orig_crop_np = np.array(item["target_pil"])
+                    # original crop is the Source body
+                    orig_crop_np = np.array(item["target_pil"]) 
+                    
                     inv_face = cv2.warpAffine(
                         composite_512,
                         item["warp_mat_512"],
@@ -154,8 +176,8 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                         borderValue=0.0,
                     )[:, :, np.newaxis]
 
-                    inv_mask_hard = (inv_mask > 0.5).astype(np.float32)
-                    final_np = (inv_face * inv_mask_hard + orig_crop_np * (1.0 - inv_mask_hard)).astype(np.uint8)
+                    # Blend using soft mask instead of harsh step function for better border integration
+                    final_np = (inv_face * inv_mask + orig_crop_np * (1.0 - inv_mask)).astype(np.uint8)
                     final_tensor = torch.from_numpy(final_np.transpose(2, 0, 1)).float().div(255.0)
                     results[valid_indices[out_idx]] = final_tensor.to(item["target_device"])
 
