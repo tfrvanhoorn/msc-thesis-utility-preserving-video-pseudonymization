@@ -46,7 +46,6 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                         target_t = target_t.clamp(0.0, 1.0)
                         source_t = source_t.clamp(0.0, 1.0)
                         
-                        # --- Extracting dimensions from the SOURCE tensor ---
                         _, h, w = source_t.shape
 
                         source_pil = self._tensor_to_pil(source_t)
@@ -70,37 +69,43 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                         src_d3d_coeff = self.net_d3dfr(src["image_256"])
                         tar_d3d_coeff = self.net_d3dfr(tar["image_256"])
                         
+                        # Use SOURCE as the absolute base (keeps texture, lighting, translation synced)
                         recon_d3d_coeff = src_d3d_coeff.clone()
-                        # Inject Target Expression (80:144) and Pose (224:227)
+                        
+                        # Only inject TARGET Expression (80:144) and Pose (224:227)
                         recon_d3d_coeff[:, 80:144] = tar_d3d_coeff[:, 80:144]
                         recon_d3d_coeff[:, 224:227] = tar_d3d_coeff[:, 224:227]
                         
                         recon_pts68 = self.bfm_facemodel.get_lm68(recon_d3d_coeff)
 
-                        # --- 2. SOURCE SPATIAL ALIGNMENT & TARGET GAZE ---
+                        # Draw landmarks using SOURCE pupils to completely avoid spatial tearing
                         im_pts70 = self._draw_pts70_batch(
                             recon_pts68,
-                            tar_d3d_coeff[:, 257:],  # Pass target gaze/pupils
-                            src["warp_mat_256"],     # Use SOURCE warp matrix
+                            src_d3d_coeff[:, 257:],  
+                            src["warp_mat_256"],     
                             self.test_image_size,
                             return_pt=True,
                         ).to(src["image_512"])
 
-                        # --- 3. SOURCE BACKGROUND MASKING (net_seg_res18) ---
-                        # Predict adapting area using Source image and Reenacted landmarks
-                        mask_input = torch.cat([src["image_512"], im_pts70], dim=1)
-                        face_masks_src = (self.net_seg_res18(mask_input) > 0.5).float()
+                        # --- 2. STRICT INNER FACE MASKING ---
+                        # Instead of the broad adapting area predictor, we use the face parser
+                        # to strictly isolate the inner face, protecting the grey background and hair.
+                        seg_pred = self.net_seg_parsing(src["image_512"])[0]
+                        masks_src = torch.argmax(F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode="bilinear", align_corners=False), dim=1, keepdim=True)
                         
-                        # Composite the Condition Image
+                        # 1: skin, 2: l_brow, 3: r_brow, 4: l_eye, 5: r_eye, 10: nose, 11: mouth, 12: u_lip, 13: l_lip
+                        mask_inner = ((masks_src > 0) & (masks_src < 6)) | ((masks_src > 9) & (masks_src < 14))
+                        face_masks_src = mask_inner.float()
+                        
+                        # Composite the Condition Image (Everything outside the inner face stays EXACTLY as source)
                         controlnet_image = (im_pts70 * face_masks_src + src["image_512"] * (1 - face_masks_src)).to(dtype=self.weight_dtype)
 
-                        # Create smooth blend mask for final pasting
+                        # Soft feathering for blending, NO massive dilation that hits the background
                         face_masks_src_pad = F.pad(face_masks_src, (16, 16, 16, 16), "constant", 0)
-                        blend_mask = F.max_pool2d(face_masks_src_pad, kernel_size=17, stride=1, padding=8)
-                        blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
+                        blend_mask = F.avg_pool2d(face_masks_src_pad, kernel_size=17, stride=1, padding=8)
                         blend_mask = blend_mask[:, :, 16:528, 16:528]
 
-                        # --- 4. EXTRACT SOURCE IDENTITY & ATTRIBUTES ---
+                        # --- 3. EXTRACT SOURCE IDENTITY & ATTRIBUTES ---
                         faceid = self.net_arcface(F.interpolate(src["image_256"], [128, 128], mode="bilinear", align_corners=False))
                         prompt_embeds = self.net_id2token(faceid).to(dtype=self.weight_dtype)
 
@@ -113,8 +118,8 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                                 "control_prompt": control_prompt_embeds,
                                 "control_image": controlnet_image,
                                 "blend_mask": blend_mask,
-                                "warp_mat_512": src["warp_mat_512"], # We use the SOURCE warp matrix
-                                "target_pil": source_pil,            # We are modifying the SOURCE image
+                                "warp_mat_512": src["warp_mat_512"], 
+                                "target_pil": source_pil,            
                                 "target_hw": (h, w),
                                 "target_device": source_aligned.device,
                             }
@@ -133,8 +138,8 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
 
                 batch_size = prompt_embeds.shape[0]
 
-                # --- NEW FIX: ENCODING THE REALISTIC VISION NEGATIVE PROMPT ---
-                neg_prompt_text = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, drawing, anime:1.4), text, close up, cropped, out of frame, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, watermark, signature, frames, borders, painting, illustration"
+                # Robust negative prompt to suppress base model watermarks/artifacts
+                neg_prompt_text = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, drawing, anime:1.4), text, letters, watermark, signature, close up, cropped, out of frame, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck"
                 
                 text_inputs = self.pipe.tokenizer(
                     neg_prompt_text,
@@ -144,14 +149,11 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                     return_tensors="pt"
                 )
                 
-                # Push through the text encoder
                 neg_prompt_embeds = self.pipe.text_encoder(text_inputs.input_ids.to(self.device))[0]
                 neg_prompt_embeds = neg_prompt_embeds.to(dtype=self.weight_dtype)
 
-                # Expand to batch size
                 negative_prompt_embeds = neg_prompt_embeds.expand(batch_size, -1, -1)
                 control_negative_prompt_embeds = neg_prompt_embeds.expand(batch_size, -1, -1)
-                # -------------------------------------------------------------
 
                 self._set_seed(self.seed)
                 generator = torch.Generator(device=self.device).manual_seed(self.seed)
@@ -175,7 +177,6 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                     composite_512 = gen_np
 
                     h, w = item["target_hw"]
-                    # original crop is the Source body
                     orig_crop_np = np.array(item["target_pil"]) 
                     
                     inv_face = cv2.warpAffine(
@@ -196,7 +197,6 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                         borderValue=0.0,
                     )[:, :, np.newaxis]
 
-                    # Blend using soft mask instead of harsh step function for better border integration
                     final_np = (inv_face * inv_mask + orig_crop_np * (1.0 - inv_mask)).astype(np.uint8)
                     final_tensor = torch.from_numpy(final_np.transpose(2, 0, 1)).float().div(255.0)
                     results[valid_indices[out_idx]] = final_tensor.to(item["target_device"])
