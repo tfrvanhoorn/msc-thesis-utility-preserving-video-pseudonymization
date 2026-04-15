@@ -46,7 +46,7 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                         target_t = target_t.clamp(0.0, 1.0)
                         source_t = source_t.clamp(0.0, 1.0)
                         
-                        # --- THE FIX: Extracting dimensions from the SOURCE tensor ---
+                        # --- Extracting dimensions from the SOURCE tensor ---
                         _, h, w = source_t.shape
 
                         source_pil = self._tensor_to_pil(source_t)
@@ -132,8 +132,26 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                 control_images = torch.cat([item["control_image"] for item in prepared], dim=0)
 
                 batch_size = prompt_embeds.shape[0]
-                negative_prompt_embeds = self.empty_prompt_token.expand(batch_size, -1, -1)
-                control_negative_prompt_embeds = self.empty_prompt_token.expand(batch_size, -1, -1)
+
+                # --- NEW FIX: ENCODING THE REALISTIC VISION NEGATIVE PROMPT ---
+                neg_prompt_text = "(deformed iris, deformed pupils, semi-realistic, cgi, 3d, render, sketch, cartoon, drawing, anime:1.4), text, close up, cropped, out of frame, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, watermark, signature, frames, borders, painting, illustration"
+                
+                text_inputs = self.pipe.tokenizer(
+                    neg_prompt_text,
+                    padding="max_length",
+                    max_length=self.pipe.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt"
+                )
+                
+                # Push through the text encoder
+                neg_prompt_embeds = self.pipe.text_encoder(text_inputs.input_ids.to(self.device))[0]
+                neg_prompt_embeds = neg_prompt_embeds.to(dtype=self.weight_dtype)
+
+                # Expand to batch size
+                negative_prompt_embeds = neg_prompt_embeds.expand(batch_size, -1, -1)
+                control_negative_prompt_embeds = neg_prompt_embeds.expand(batch_size, -1, -1)
+                # -------------------------------------------------------------
 
                 self._set_seed(self.seed)
                 generator = torch.Generator(device=self.device).manual_seed(self.seed)
