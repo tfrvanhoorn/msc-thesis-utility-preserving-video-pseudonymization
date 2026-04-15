@@ -69,10 +69,10 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                         src_d3d_coeff = self.net_d3dfr(src["image_256"])
                         tar_d3d_coeff = self.net_d3dfr(tar["image_256"])
                         
-                        # Use SOURCE as the absolute base (keeps texture, lighting, translation synced)
+                        # Use SOURCE as the absolute base
                         recon_d3d_coeff = src_d3d_coeff.clone()
                         
-                        # Only inject TARGET Expression (80:144) and Pose (224:227)
+                        # Only inject TARGET Expression and Pose
                         recon_d3d_coeff[:, 80:144] = tar_d3d_coeff[:, 80:144]
                         recon_d3d_coeff[:, 224:227] = tar_d3d_coeff[:, 224:227]
                         
@@ -87,22 +87,19 @@ class FaceAdapterFaceReenactment(FaceAdapterRuntime):
                             return_pt=True,
                         ).to(src["image_512"])
 
-                        # --- 2. STRICT INNER FACE MASKING ---
-                        # Instead of the broad adapting area predictor, we use the face parser
-                        # to strictly isolate the inner face, protecting the grey background and hair.
-                        seg_pred = self.net_seg_parsing(src["image_512"])[0]
-                        masks_src = torch.argmax(F.interpolate(seg_pred, [self.test_image_size, self.test_image_size], mode="bilinear", align_corners=False), dim=1, keepdim=True)
+                        # --- 2. DYNAMIC BACKGROUND MASKING (net_seg_res18) ---
+                        # We use the Adapting Area Predictor which looks at BOTH the source image
+                        # and the new landmarks to dynamically expand the mask for the open mouth.
+                        mask_input = torch.cat([src["image_512"], im_pts70], dim=1)
+                        face_masks_src = (self.net_seg_res18(mask_input) > 0.5).float()
                         
-                        # 1: skin, 2: l_brow, 3: r_brow, 4: l_eye, 5: r_eye, 10: nose, 11: mouth, 12: u_lip, 13: l_lip
-                        mask_inner = ((masks_src > 0) & (masks_src < 6)) | ((masks_src > 9) & (masks_src < 14))
-                        face_masks_src = mask_inner.float()
-                        
-                        # Composite the Condition Image (Everything outside the inner face stays EXACTLY as source)
+                        # Composite the Condition Image
                         controlnet_image = (im_pts70 * face_masks_src + src["image_512"] * (1 - face_masks_src)).to(dtype=self.weight_dtype)
 
-                        # Soft feathering for blending, NO massive dilation that hits the background
+                        # Soft feathering for blending
                         face_masks_src_pad = F.pad(face_masks_src, (16, 16, 16, 16), "constant", 0)
-                        blend_mask = F.avg_pool2d(face_masks_src_pad, kernel_size=17, stride=1, padding=8)
+                        blend_mask = F.max_pool2d(face_masks_src_pad, kernel_size=17, stride=1, padding=8)
+                        blend_mask = F.avg_pool2d(blend_mask, kernel_size=17, stride=1, padding=8)
                         blend_mask = blend_mask[:, :, 16:528, 16:528]
 
                         # --- 3. EXTRACT SOURCE IDENTITY & ATTRIBUTES ---
