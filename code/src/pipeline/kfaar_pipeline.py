@@ -503,7 +503,25 @@ class KfaarPipeline:
                             elif reason == "target_no_face":
                                 stats["target_failures"] += 1
                             continue
-                        output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
+                        region = valid_records[rec_idx].get("region")
+                        if not isinstance(region, tuple) or len(region) != 4:
+                            stats["skipped_faces"] += 1
+                            continue
+                        x1, y1, x2, y2 = region
+                        target_h = y2 - y1
+                        target_w = x2 - x1
+                        if target_h <= 0 or target_w <= 0:
+                            stats["skipped_faces"] += 1
+                            continue
+                        patch = self._normalize_visual_frame(swapped)
+                        if patch.shape[1] != target_h or patch.shape[2] != target_w:
+                            patch = torch.nn.functional.interpolate(
+                                patch.unsqueeze(0),
+                                size=(target_h, target_w),
+                                mode="bilinear",
+                                align_corners=False,
+                            ).squeeze(0)
+                        output_frames[frame_idx][:, y1:y2, x1:x2] = patch.to(device)
                         diffusion_composited[rec_idx] = True
                         stats["composited_faces"] += 1
 
@@ -551,7 +569,15 @@ class KfaarPipeline:
                                 target_to_swap = output_frames[frame_idx]
                                 swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
                                 if swapped is not None:
-                                    output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
+                                    patch = self._normalize_visual_frame(swapped)
+                                    if patch.shape[1] != target_h or patch.shape[2] != target_w:
+                                        patch = torch.nn.functional.interpolate(
+                                            patch.unsqueeze(0),
+                                            size=(target_h, target_w),
+                                            mode="bilinear",
+                                            align_corners=False,
+                                        ).squeeze(0)
+                                    output_frames[frame_idx][:, y1:y2, x1:x2] = patch.to(device)
                                     stats["composited_faces"] += 1
                                     continue
                                 failure_reasons = getattr(self.face_postprocessor, "last_failure_reasons", [])
