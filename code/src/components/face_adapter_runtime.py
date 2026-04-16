@@ -45,8 +45,8 @@ class FaceAdapterRuntime:
         detector_size: int = 640,
         seed: int = 0,
         download_if_missing: bool = True,
-        detector_score_threshold: float = 0.35,
-        detector_min_face_size: int = 15,
+        detector_score_threshold: float = 0.45,
+        detector_min_face_size: int = 20,
         **kwargs,
     ) -> None:
         if not torch.cuda.is_available():

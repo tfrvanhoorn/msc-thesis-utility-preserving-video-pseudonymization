@@ -370,8 +370,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=1, help="Number of sampled frames to process at once during inference")
     parser.add_argument("--target_sample_fps", type=float, default=10.0, help="Target FPS for frame sampling before anonymization")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for key generation")
-    parser.add_argument("--detector_score_threshold", type=float, default=0.35, help="MTCNN score threshold for detection filtering")
-    parser.add_argument("--detector_min_face_size", type=int, default=15, help="Minimum face size in pixels for MTCNN")
+    parser.add_argument("--detector_score_threshold", type=float, default=0.45, help="MTCNN score threshold for detection filtering")
+    parser.add_argument("--detector_min_face_size", type=int, default=20, help="Minimum face size in pixels for MTCNN")
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
