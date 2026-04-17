@@ -94,7 +94,7 @@ def parse_args():
 
     # Hardware
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use (cuda/cpu)")
-    parser.add_argument("--detector_score_threshold", type=float, default=0.45, help="MTCNN score threshold for detection filtering")
+    parser.add_argument("--detector_score_threshold", type=float, default=0.55, help="MTCNN score threshold for detection filtering")
     parser.add_argument("--detector_min_face_size", type=int, default=20, help="Minimum face size in pixels for MTCNN")
 
     # Generated face saving

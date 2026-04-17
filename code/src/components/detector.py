@@ -34,7 +34,7 @@ class MTCNNDetector(FaceDetector):
         self,
         image_size: int = 256,
         margin: int = 0,
-        score_threshold: float = 0.45,
+        score_threshold: float = 0.55,
         min_face_size: int | None = 20,
         keep_all: bool = True,
         post_process: bool = False,

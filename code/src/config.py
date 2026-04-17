@@ -15,7 +15,7 @@ class DataConfig:
 
 @dataclass
 class DetectorConfig:
-    score_threshold: float = 0.45
+    score_threshold: float = 0.55
     image_size: int = 256
     margin: int = 0
     min_face_size: Optional[int] = 20
