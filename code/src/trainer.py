@@ -246,6 +246,7 @@ class KfaarTrainer:
                 "train_identities": self.train_identities,
                 "val_identities": self.val_identities,
                 "use_stylegan_mapper": bool(getattr(self.pipeline, "use_stylegan_mapper", False)),
+                "enable_projector_w_avg_addition": bool(getattr(self.pipeline, "enable_projector_w_avg_addition", True)),
                 "enable_projector_l2_reg": bool(getattr(self.pipeline.projector, "enable_input_l2_norm", False)),
                 "enable_projector_key_upscaler": bool(getattr(self.pipeline.projector, "enable_key_upscaler", False)),
             },

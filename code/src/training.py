@@ -74,7 +74,9 @@ def parse_args():
     parser.add_argument("--disable_projector_key_upscaler", dest="enable_projector_key_upscaler", action="store_false", help="Disable projector key upscaler and concatenate raw key with z")
     parser.add_argument("--use_stylegan_mapper", dest="use_stylegan_mapper", action="store_true", help="Use StyleGAN mapping network (z->W+) before synthesis")
     parser.add_argument("--disable_stylegan_mapper", dest="use_stylegan_mapper", action="store_false", help="Bypass StyleGAN mapping and repeat projected z across W+ layers before synthesis")
-    parser.set_defaults(enable_projector_l2_reg=True, enable_projector_key_upscaler=True, use_stylegan_mapper=False)
+    parser.add_argument("--enable_projector_w_avg_addition", dest="enable_projector_w_avg_addition", action="store_true", help="Add projector output to StyleGAN w_avg before mapper-disabled synthesis")
+    parser.add_argument("--disable_projector_w_avg_addition", dest="enable_projector_w_avg_addition", action="store_false", help="Use raw projector output without adding StyleGAN w_avg before mapper-disabled synthesis")
+    parser.set_defaults(enable_projector_l2_reg=True, enable_projector_key_upscaler=True, use_stylegan_mapper=False, enable_projector_w_avg_addition=True)
     parser.add_argument("--margin", type=float, default=0.5, help="Margin for triplet/cosine losses")
 
     # Dataset & Split
@@ -279,6 +281,7 @@ def main():
         seed=SeedConfig(secret_key="master_thesis_secret"), 
         projector=projector_cfg,
         use_stylegan_mapper=args.use_stylegan_mapper,
+        enable_projector_w_avg_addition=args.enable_projector_w_avg_addition,
     )
 
     # 2. Build Data Loaders

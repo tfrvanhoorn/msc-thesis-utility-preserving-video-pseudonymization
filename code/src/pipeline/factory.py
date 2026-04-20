@@ -65,6 +65,7 @@ def build_kfaar_pipeline(
         truncation_psi=truncation_psi,
         face_postprocessor=face_postprocessor,
         use_stylegan_mapper=config.use_stylegan_mapper,
+        enable_projector_w_avg_addition=config.enable_projector_w_avg_addition,
     )
 
 

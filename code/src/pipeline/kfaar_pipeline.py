@@ -60,6 +60,7 @@ class KfaarPipeline:
         truncation_psi: float = 0.5,
         face_postprocessor: object | None = None,
         use_stylegan_mapper: bool = False,
+        enable_projector_w_avg_addition: bool = True,
     ) -> None:
         self.detector = detector
         self.aligner = aligner
@@ -68,6 +69,7 @@ class KfaarPipeline:
         self.stylegan = stylegan
         self.face_postprocessor = face_postprocessor
         self.use_stylegan_mapper = use_stylegan_mapper
+        self.enable_projector_w_avg_addition = enable_projector_w_avg_addition
         self.device = device or next(projector.parameters()).device
         self._warned_face_postprocessor = False
         
@@ -1068,13 +1070,12 @@ class KfaarPipeline:
         if num_ws is None:
             raise RuntimeError("StyleGAN synthesis.num_ws is unavailable for mapper-disabled mode")
 
-        # Fetch the mathematical center of W-space
-        w_avg = self.stylegan.mapping.w_avg
-        
-        # Add the center coordinates to the MLP's raw output. 
-        # This instantly teleports your vectors out of the zero-origin wilderness 
-        # and directly onto the valid face manifold.
-        anchored_w = projected_z + w_avg
+        if self.enable_projector_w_avg_addition:
+            # Fetch the mathematical center of W-space and anchor projector output around it.
+            w_avg = self.stylegan.mapping.w_avg
+            anchored_w = projected_z + w_avg
+        else:
+            anchored_w = projected_z
 
         # Manually broadcast the anchored W vector into W+ space
         return anchored_w.unsqueeze(1).expand(-1, int(num_ws), -1)

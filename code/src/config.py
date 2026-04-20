@@ -70,6 +70,7 @@ class PipelineConfig:
     seed: SeedConfig
     projector: ProjectorConfig = field(default_factory=ProjectorConfig)
     use_stylegan_mapper: bool = False
+    enable_projector_w_avg_addition: bool = True
 
     @staticmethod
     def _require(mapping: Mapping[str, Any], key: str) -> Any:
@@ -123,4 +124,5 @@ class PipelineConfig:
             seed=SeedConfig(**seed_cfg),
             projector=projector,
             use_stylegan_mapper=bool(payload.get("use_stylegan_mapper", False)),
+            enable_projector_w_avg_addition=bool(payload.get("enable_projector_w_avg_addition", True)),
         )
