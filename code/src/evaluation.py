@@ -34,6 +34,7 @@ if str(EXTERNAL_LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
 from components import ArcFaceEmbedder, EmbeddingModel, FacenetEmbedder, MTCNNAligner, MTCNNDetector  # noqa: E402
+from fid_metric import FidEvaluator  # noqa: E402
 from landmark_metrics import LandmarkDistanceEvaluator  # noqa: E402
 from metrics import MetricsAccumulator  # noqa: E402
 from perceptual_metrics import PerceptualEvaluator  # noqa: E402
@@ -55,6 +56,7 @@ SUPPORTED_METRICS = {
     "diversity",
     "differentiation",
     "landmark_distance",
+    "fid",
     "lpips",
     "ssim",
 }
@@ -147,6 +149,13 @@ def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
         summary["landmark_utility"]["counts"] = {"valid_pairs": 0, "invalid_pairs": 0}
         summary["counts"]["landmark_pairs_valid"] = 0
         summary["counts"]["landmark_pairs_invalid"] = 0
+
+    if "fid" not in enabled:
+        summary["fid"] = None
+        summary["realism_utility"]["fid"] = None
+        summary["realism_utility"]["counts"] = {"real_frames": 0, "generated_frames": 0}
+        summary["counts"]["fid_real_frames"] = 0
+        summary["counts"]["fid_generated_frames"] = 0
 
     if "lpips" not in enabled:
         summary["lpips_distance"] = None
@@ -386,7 +395,7 @@ def parse_args() -> argparse.Namespace:
         default="detection,anonymization,synchronism,diversity,differentiation,landmark_distance,lpips,ssim",
         help=(
             "Comma-separated metrics list (supported: detection, anonymization, synchronism, diversity, "
-            "differentiation, landmark_distance, lpips, ssim; use 'all' for full set)"
+            "differentiation, landmark_distance, fid, lpips, ssim; use 'all' for full set)"
         ),
     )
     parser.add_argument(
@@ -684,9 +693,11 @@ def main() -> None:
     detection_branch_enabled = bool(enabled_metrics & {"detection", "anonymization", "synchronism", "differentiation"})
     diversity_enabled = "diversity" in enabled_metrics
     landmark_distance_enabled = "landmark_distance" in enabled_metrics
+    fid_enabled = "fid" in enabled_metrics
     lpips_enabled = "lpips" in enabled_metrics
     ssim_enabled = "ssim" in enabled_metrics
     perceptual_enabled = lpips_enabled or ssim_enabled
+    realism_enabled = perceptual_enabled or fid_enabled
 
     if args.max_identities is not None and args.max_identities <= 0:
         raise ValueError("--max_identities must be > 0 when provided")
@@ -742,7 +753,7 @@ def main() -> None:
     perceptual_key_name = required_detection_key if args.inferred_nested_keys else "key1"
     if detection_branch_enabled and required_detection_key not in key_names:
         raise ValueError(f"--detection_key must be in [1, {num_keys}]")
-    if perceptual_enabled and perceptual_key_name not in key_names:
+    if realism_enabled and perceptual_key_name not in key_names:
         raise ValueError(f"Perceptual metric key must be available in [1, {num_keys}]")
 
     _log_pipe(
@@ -805,6 +816,7 @@ def main() -> None:
         if perceptual_enabled
         else None
     )
+    fid_evaluator = FidEvaluator(device=device) if fid_enabled else None
 
     identity_to_label: dict[str, int] = {}
     batch_processing_start_time = time.perf_counter()
@@ -909,11 +921,16 @@ def main() -> None:
                             key_results[key_name] = (empty_real, empty_mask, virt, gmask)
                             continue
 
+                        raw_output_frames = output_frames
                         min_len = min(int(base_real_embeddings.shape[0]), int(output_frames.shape[0]))
                         key_real_embeddings = base_real_embeddings[:min_len]
                         key_input_mask = base_input_mask[:min_len]
                         key_input_frames = input_frames[:min_len]
                         output_frames = output_frames[:min_len]
+
+                        if fid_enabled and key_name == perceptual_key_name and fid_evaluator is not None:
+                            fid_evaluator.update_real(input_frames)
+                            fid_evaluator.update_generated(raw_output_frames)
 
                         if perceptual_enabled and key_name == perceptual_key_name and perceptual_evaluator is not None:
                             aligned_inputs, aligned_outputs = perceptual_evaluator.prepare_video_pair(key_input_frames, output_frames)
@@ -1070,6 +1087,17 @@ def main() -> None:
     batch_processing_seconds = max(0.0, batch_processing_end_time - batch_processing_start_time)
 
     summary = metrics.finalize()
+    fid_value = fid_evaluator.compute() if fid_evaluator is not None else None
+    summary["fid"] = fid_value
+    summary["realism_utility"] = {
+        "fid": fid_value,
+        "counts": {
+            "real_frames": int(fid_evaluator.real_frames) if fid_evaluator is not None else 0,
+            "generated_frames": int(fid_evaluator.generated_frames) if fid_evaluator is not None else 0,
+        },
+    }
+    summary["counts"]["fid_real_frames"] = int(fid_evaluator.real_frames) if fid_evaluator is not None else 0
+    summary["counts"]["fid_generated_frames"] = int(fid_evaluator.generated_frames) if fid_evaluator is not None else 0
     _log_pipe("finalize_end")
     _mask_disabled_metrics(summary, enabled_metrics)
     _log_pipe(
@@ -1128,6 +1156,13 @@ def main() -> None:
         valid_pairs=summary["landmark_utility"]["counts"]["valid_pairs"],
         invalid_pairs=summary["landmark_utility"]["counts"]["invalid_pairs"],
     )
+    if fid_enabled:
+        _log_pipe(
+            "metric_fid",
+            fid=summary["fid"],
+            real_frames=summary["realism_utility"]["counts"]["real_frames"],
+            generated_frames=summary["realism_utility"]["counts"]["generated_frames"],
+        )
     _log_pipe(
         "metric_lpips",
         distance=summary["lpips_distance"],

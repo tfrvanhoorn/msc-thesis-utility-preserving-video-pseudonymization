@@ -31,6 +31,8 @@ timm==0.5.4           # Dependency for the SimSwap model architecture
 tqdm                  # Progress bar for long swap operations
 lpips==0.1.4          # Learned Perceptual Image Patch Similarity metric
 scikit-image          # Provides skimage.metrics.structural_similarity (SSIM)
+torchmetrics>=1.4.0   # Provides FrechetInceptionDistance for realism/FID evaluation
+torch-fidelity>=0.3.0 # FID feature extractor backend used by torchmetrics
 
 # --- fastai & Face-Adapter Requirements ---
 fastai                # Required by Face-Adapter pipeline module import
