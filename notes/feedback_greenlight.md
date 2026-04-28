@@ -1,0 +1,5 @@
+- Add more examples in the motivation section
+- Put the explanations of anonymization and pseudonymization on the slides
+- Add examples of related works
+- Too much text 
+- More focus on the data usability improvements.
