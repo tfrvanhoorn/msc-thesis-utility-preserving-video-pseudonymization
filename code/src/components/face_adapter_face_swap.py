@@ -133,9 +133,6 @@ class FaceAdapterFaceSwap(FaceAdapterRuntime):
 
                 for out_idx, item in enumerate(prepared):
                     gen_np = np.array(gen_pils[out_idx].convert("RGB"))
-                    tar_512_np = (
-                        item["tar_image_512"][0].cpu().numpy().transpose(1, 2, 0) * 127.5 + 127.5
-                    ).clip(0, 255).astype(np.uint8)
                     blend_mask_np = item["blend_mask"][0, 0].cpu().numpy()[:, :, np.newaxis]
 
                     object_mask_np = np.zeros_like(blend_mask_np)
@@ -148,7 +145,7 @@ class FaceAdapterFaceSwap(FaceAdapterRuntime):
                             object_mask_np = (resized_coco > 0.5).astype(np.float32)[:, :, np.newaxis]
 
                     safe_blend_mask = blend_mask_np * (1.0 - object_mask_np)
-                    composite_512 = (gen_np * safe_blend_mask + tar_512_np * (1.0 - safe_blend_mask)).astype(np.uint8)
+                    composite_512 = gen_np
 
                     h, w = item["target_hw"]
                     orig_crop_np = np.array(item["target_pil"])
