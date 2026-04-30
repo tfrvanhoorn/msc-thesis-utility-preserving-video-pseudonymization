@@ -459,6 +459,14 @@ class KfaarPipeline:
                 and self.face_postprocessor is not None
                 and isinstance(self.face_postprocessor, (FaceAdapterFaceSwap, FaceAdapterFaceReenactment))
             )
+            # FaceAdapterFaceSwap returns a full-frame composite (output sized to target frame).
+            # FaceAdapterFaceReenactment returns an aligned crop (output sized to source/aligned face).
+            # These two require different placement semantics on the output frame.
+            is_faceadapter_swap = (
+                use_face_postprocessor
+                and self.face_postprocessor is not None
+                and isinstance(self.face_postprocessor, FaceAdapterFaceSwap)
+            )
             diffusion_composited = [False] * len(valid_records)
 
             if is_faceadapter_fullframe and hasattr(self.face_postprocessor, "swap_batch"):
@@ -510,22 +518,33 @@ class KfaarPipeline:
                             stats["skipped_faces"] += 1
                             continue
                         x1, y1, x2, y2 = region
-                        target_h = y2 - y1
-                        target_w = x2 - x1
-                        if target_h <= 0 or target_w <= 0:
-                            stats["skipped_faces"] += 1
-                            continue
-                        patch = self._normalize_visual_frame(swapped)
-                        if patch.shape[1] != target_h or patch.shape[2] != target_w:
-                            patch = torch.nn.functional.interpolate(
-                                patch.unsqueeze(0),
-                                size=(target_h, target_w),
-                                mode="bilinear",
-                                align_corners=False,
-                            ).squeeze(0)
-                        output_frames[frame_idx][:, y1:y2, x1:x2] = patch.to(device)
-                        diffusion_composited[rec_idx] = True
-                        stats["composited_faces"] += 1
+
+                        if is_faceadapter_swap:
+                            # FaceAdapterFaceSwap returns a full-frame composite with the new face
+                            # already inverse-warped onto the original target frame. Replace the
+                            # entire frame so multi-face passes accumulate correctly.
+                            output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
+                            diffusion_composited[rec_idx] = True
+                            stats["composited_faces"] += 1
+                        else:
+                            # FaceAdapterFaceReenactment returns an aligned crop sized like the
+                            # source; resize to the bbox region and paste in (existing behavior).
+                            target_h = y2 - y1
+                            target_w = x2 - x1
+                            if target_h <= 0 or target_w <= 0:
+                                stats["skipped_faces"] += 1
+                                continue
+                            patch = self._normalize_visual_frame(swapped)
+                            if patch.shape[1] != target_h or patch.shape[2] != target_w:
+                                patch = torch.nn.functional.interpolate(
+                                    patch.unsqueeze(0),
+                                    size=(target_h, target_w),
+                                    mode="bilinear",
+                                    align_corners=False,
+                                ).squeeze(0)
+                            output_frames[frame_idx][:, y1:y2, x1:x2] = patch.to(device)
+                            diffusion_composited[rec_idx] = True
+                            stats["composited_faces"] += 1
 
             for idx, record in enumerate(valid_records):
                 frame_idx = int(record["frame_idx"])
@@ -571,6 +590,12 @@ class KfaarPipeline:
                                 target_to_swap = output_frames[frame_idx]
                                 swapped = self.face_postprocessor.swap(aligned_stylegan, target_to_swap)
                                 if swapped is not None:
+                                    if is_faceadapter_swap:
+                                        # Full-frame composite: replace the whole frame.
+                                        output_frames[frame_idx] = self._normalize_visual_frame(swapped).to(device)
+                                        stats["composited_faces"] += 1
+                                        continue
+                                    # Reenactment: aligned crop -> resize to bbox and paste.
                                     patch = self._normalize_visual_frame(swapped)
                                     if patch.shape[1] != target_h or patch.shape[2] != target_w:
                                         patch = torch.nn.functional.interpolate(
