@@ -34,6 +34,15 @@ class EmotionInferenceEngine:
         if not self.lstm_checkpoint.exists():
             raise FileNotFoundError(f"LSTM checkpoint not found: {self.lstm_checkpoint}")
 
+        torch_exts = {".pt", ".pth", ".pth.tar", ".jit"}
+        self.use_torch = (
+            self.backbone_checkpoint.suffix.lower() in torch_exts
+            or self.lstm_checkpoint.suffix.lower() in torch_exts
+        )
+        if self.use_torch:
+            if self.backbone_checkpoint.suffix.lower() not in torch_exts or self.lstm_checkpoint.suffix.lower() not in torch_exts:
+                raise ValueError("Torch backend requires both backbone and LSTM checkpoints to be .pt/.pth")
+
         if emo_affectnet_root is None:
             possible_paths = [
                 Path(__file__).parent.parent.parent / "external_libraries" / "EMO-AffectNetModel",
@@ -63,9 +72,19 @@ class EmotionInferenceEngine:
 
     def _load_models(self):
         logger.info("Loading backbone model...")
-        self.backbone_model = self.load_weights_EE(str(self.backbone_checkpoint))
-        logger.info("Loading LSTM model...")
-        self.lstm_model = self.load_weights_LSTM(str(self.lstm_checkpoint))
+        if self.use_torch:
+            import torch
+
+            self.torch = torch
+            self.backbone_model = torch.jit.load(str(self.backbone_checkpoint), map_location=self.device)
+            self.backbone_model.eval()
+            logger.info("Loading LSTM model...")
+            self.lstm_model = torch.jit.load(str(self.lstm_checkpoint), map_location=self.device)
+            self.lstm_model.eval()
+        else:
+            self.backbone_model = self.load_weights_EE(str(self.backbone_checkpoint))
+            logger.info("Loading LSTM model...")
+            self.lstm_model = self.load_weights_LSTM(str(self.lstm_checkpoint))
 
     def process_video(self, video_path: str) -> Dict:
         import pandas as pd
@@ -80,13 +99,33 @@ class EmotionInferenceEngine:
             all_paths = list(face_dict.keys())
             all_faces = list(face_dict.values())
             face_images = np.stack(all_faces, axis=0)
-            features = self.backbone_model.predict(face_images, verbose=0)
+            if self.use_torch:
+                torch = self.torch
+                face_tensor = torch.from_numpy(face_images).to(self.device, dtype=torch.float32)
+                if face_tensor.ndim == 4:
+                    face_tensor = face_tensor.permute(0, 3, 1, 2).contiguous()
+                with torch.no_grad():
+                    features = self.backbone_model(face_tensor)
+                features = features.detach().cpu()
+            else:
+                features = self.backbone_model.predict(face_images, verbose=0)
+
             seq_paths, seq_features = self.seq_module.sequences(all_paths, features, win=10, step=5)
             if len(seq_features) == 0:
                 return {"success": False, "error": "Could not create sequences", "frame_count": len(all_paths), "detected_faces": len(all_faces)}
 
-            seq_features_array = np.array(seq_features, dtype=np.float32)
-            lstm_predictions = self.lstm_model.predict(seq_features_array, verbose=0)
+            if self.use_torch:
+                torch = self.torch
+                seq_features_tensor = torch.tensor(seq_features, dtype=torch.float32, device=self.device)
+                with torch.no_grad():
+                    lstm_output = self.lstm_model(seq_features_tensor)
+                    if isinstance(lstm_output, (tuple, list)):
+                        lstm_output = lstm_output[0]
+                    lstm_output = torch.softmax(lstm_output, dim=1)
+                lstm_predictions = lstm_output.detach().cpu().numpy()
+            else:
+                seq_features_array = np.array(seq_features, dtype=np.float32)
+                lstm_predictions = self.lstm_model.predict(seq_features_array, verbose=0)
 
             label_model = self.EMOTION_CLASSES
             all_pred = []
