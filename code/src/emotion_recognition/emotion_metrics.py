@@ -68,9 +68,9 @@ def calculate_pair_consistency(
     by_group: Optional[List[str]] = None,
 ) -> Tuple[float, int]:
     results = [r for r in video_results if by_group is None or r.filepath in by_group]
-    groups: Dict[Tuple[str, str], List[VideoEvaluationResult]] = {}
+    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
     for result in results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion)
+        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
         groups.setdefault(group_key, []).append(result)
 
     total_diff = 0.0
@@ -103,9 +103,9 @@ def calculate_same_key_pair_consistency(
 def calculate_different_key_pair_consistency(
     video_results: List[VideoEvaluationResult],
 ) -> Tuple[float, int]:
-    groups: Dict[Tuple[str, str], List[VideoEvaluationResult]] = {}
+    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
     for result in video_results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion)
+        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
         groups.setdefault(group_key, []).append(result)
 
     total_diff = 0.0
