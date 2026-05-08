@@ -65,11 +65,12 @@ From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
     rm -f /tmp/requirements.no-dlib.txt
 
     # 7. Install EMO-AffectNetModel requirements for emotion recognition.
-    # Filter out the torch install line which is incompatible with pip -r parsing.
+    # Normalize file encoding and filter out the torch install line incompatible with pip -r parsing.
+    iconv -f UTF-16 -t UTF-8 /opt/emo_affectnet_requirements.txt > /tmp/emo_affectnet_requirements.utf8.txt
     grep -vE '^[[:space:]]*torch[[:space:]]+torchvision[[:space:]]+torchaudio([[:space:]].*)?$' \
-        /opt/emo_affectnet_requirements.txt > /tmp/emo_affectnet_requirements.filtered.txt
+        /tmp/emo_affectnet_requirements.utf8.txt > /tmp/emo_affectnet_requirements.filtered.txt
     pip install --no-cache-dir -r /tmp/emo_affectnet_requirements.filtered.txt
-    rm -f /tmp/emo_affectnet_requirements.filtered.txt
+    rm -f /tmp/emo_affectnet_requirements.filtered.txt /tmp/emo_affectnet_requirements.utf8.txt
 
     # 8. Cleanup
     unset CMAKE_BUILD_PARALLEL_LEVEL MAX_JOBS CMAKE_ARGS
