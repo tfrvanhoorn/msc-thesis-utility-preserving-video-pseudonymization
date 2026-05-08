@@ -7,7 +7,10 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
-from .ravdess_utils import RAVDESSMetadata, emotion_to_one_hot, EMOTION_TO_IDX
+try:
+    from .ravdess_utils import RAVDESSMetadata, emotion_to_one_hot, EMOTION_TO_IDX
+except ImportError:  # Allow direct script execution without package context.
+    from ravdess_utils import RAVDESSMetadata, emotion_to_one_hot, EMOTION_TO_IDX
 
 
 @dataclass
