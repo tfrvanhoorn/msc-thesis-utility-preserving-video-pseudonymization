@@ -35,6 +35,7 @@ class RAVDESSMetadata:
     statement: str
     repetition: str
     actor: str
+    sample_id: Optional[int] = None
 
     @property
     def actor_gender(self) -> str:
@@ -51,12 +52,12 @@ class RAVDESSMetadata:
 
 def parse_ravdess_filename(filename: str) -> Optional[RAVDESSMetadata]:
     name_without_ext = Path(filename).stem
-    pattern = r"^(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})$"
+    pattern = r"^video_sample(\d+)_(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})$"
     match = re.match(pattern, name_without_ext)
     if not match:
         return None
 
-    modality, vocal, emotion, intensity, statement, repetition, actor = match.groups()
+    sample_id_str, modality, vocal, emotion, intensity, statement, repetition, actor = match.groups()
 
     if modality not in ["01", "02", "03"]:
         return None
@@ -85,6 +86,7 @@ def parse_ravdess_filename(filename: str) -> Optional[RAVDESSMetadata]:
         statement=statement,
         repetition=repetition,
         actor=actor,
+        sample_id=int(sample_id_str),
     )
 
 
@@ -92,7 +94,7 @@ def collect_ravdess_videos(video_dir: Path) -> Tuple[Dict[str, RAVDESSMetadata],
     video_dir = Path(video_dir)
     metadata = {}
     failed = []
-    video_extensions = [".mp4", ".avi", ".mov", ".flv", ".mkv", ".webm"]
+    video_extensions = [".mp4"]
 
     for video_file in video_dir.iterdir():
         if not video_file.is_file() or video_file.suffix.lower() not in video_extensions:
@@ -104,6 +106,29 @@ def collect_ravdess_videos(video_dir: Path) -> Tuple[Dict[str, RAVDESSMetadata],
             metadata[str(video_file)] = parsed
 
     return metadata, failed
+
+
+def collect_keyed_ravdess_videos(
+    video_dir: Path,
+    num_keys: int,
+) -> Tuple[Dict[str, Dict[str, RAVDESSMetadata]], List[Dict[str, str]]]:
+    video_dir = Path(video_dir)
+    keyed_metadata: Dict[str, Dict[str, RAVDESSMetadata]] = {}
+    failed: List[Dict[str, str]] = []
+
+    for key_index in range(1, num_keys + 1):
+        key_label = f"key{key_index}"
+        key_dir = video_dir / key_label
+        if not key_dir.exists() or not key_dir.is_dir():
+            failed.append({"key": key_label, "filename": str(key_dir), "reason": "missing directory"})
+            continue
+
+        metadata_dict, failed_files = collect_ravdess_videos(key_dir)
+        keyed_metadata[key_label] = metadata_dict
+        for failed_file in failed_files:
+            failed.append({"key": key_label, "filename": failed_file, "reason": "invalid filename"})
+
+    return keyed_metadata, failed
 
 
 def validate_repetition_pairs(metadata_dict: Dict[str, RAVDESSMetadata]) -> Dict[Tuple[str, str, str], Tuple[Optional[str], Optional[str]]]:
