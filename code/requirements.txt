@@ -34,13 +34,6 @@ scikit-image          # Provides skimage.metrics.structural_similarity (SSIM)
 torchmetrics>=1.4.0   # Provides FrechetInceptionDistance for realism/FID evaluation
 torch-fidelity>=0.3.0 # FID feature extractor backend used by torchmetrics
 
-# --- Emotion Recognition (EMO-AffectNetModel) ---
-tensorflow==2.10.1    # Last TensorFlow release with Python 3.8 wheels
-scikit-learn==1.3.2   # Compatible with Python 3.8
-batch-face==1.5.0
-mediapipe==0.10.11   # Last known 0.10.x release with Py3.8 wheels on pip
-seaborn==0.13.2
-
 # --- fastai & Face-Adapter Requirements ---
 fastai                # Required by Face-Adapter pipeline module import
 spacy<3.8.0           # Pinned: prevents NumPy 2.0 build crash in blis dependency
