@@ -59,6 +59,12 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
     pip install --no-cache-dir "tensorflow[and-cuda]==2.17.0"
 
+    # 5b. Pin jax/jaxlib compatible with TF 2.17's ml_dtypes (<0.5).
+    # jax>=0.4.36 requires ml_dtypes>=0.5 (uses float8_e3m4), which TF 2.17
+    # forbids. Without this pin, `import tensorflow` fails inside tflite's
+    # jax import with: "module 'ml_dtypes' has no attribute 'float8_e3m4'".
+    pip install --no-cache-dir "jax<0.4.36" "jaxlib<0.4.36"
+
     rm -f /tmp/emo_affectnet_requirements.filtered.txt /tmp/emo_affectnet_requirements.utf8.txt
 
     # 6. Extra runtime dependencies used by the emotion recognition code.
@@ -69,10 +75,10 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     export CUDA_HOME=/usr/local/cuda
     export CUDA_PATH=/usr/local/cuda
     export PATH=/usr/local/cuda/bin:$PATH
-    # Note: torch/lib has been removed from LD_LIBRARY_PATH. Keeping it ahead of
-    # /usr/local/cuda/lib64 forced TF to load torch's bundled cuDNN/cuBLAS, which
-    # TF wasn't built against. Both libs now resolve their own CUDA deps via
-    # pip-installed nvidia-* packages and RPATH.
+    # torch/lib removed from LD_LIBRARY_PATH: keeping it ahead of system CUDA
+    # forced TF to load torch's bundled cuDNN/cuBLAS, which TF wasn't built
+    # against. Both libs now resolve their own CUDA deps via pip-installed
+    # nvidia-* packages and RPATH.
     export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
     export NVIDIA_VISIBLE_DEVICES=all
