@@ -8,7 +8,7 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     export DEBIAN_FRONTEND=noninteractive
     set -eux
 
-    # 1. Install system dependencies for Python 3.10 (no recommends to avoid openssh-client pull-in)
+    # 1. System dependencies for Python 3.10
     apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
@@ -32,39 +32,53 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
         libgl1-mesa-glx \
         libglib2.0-0
 
-    # Clean apt caches to reduce image size and avoid stale lists
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    # 2. Set Python 3.10 as the default 'python'
+    # 2. Make python3.10 the default 'python'
     update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
-    # 3. Install pip using the standard bootstrap script
+    # 3. Install pip
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
     python get-pip.py
     rm get-pip.py
 
-    # 4. Install EMO-AffectNetModel requirements for emotion recognition.
-    # Normalize file encoding, split out the torch install line, and install it explicitly.
+    # 4. Install EMO-AffectNetModel requirements.
+    # Strip the combined torch line AND any plain `tensorflow` line so we can
+    # install them explicitly below with the right CUDA wheels.
     iconv -f UTF-16 -t UTF-8 /opt/emo_affectnet_requirements.txt > /tmp/emo_affectnet_requirements.utf8.txt
     grep -vE '^[[:space:]]*torch[[:space:]]+torchvision[[:space:]]+torchaudio([[:space:]].*)?$' \
-        /tmp/emo_affectnet_requirements.utf8.txt > /tmp/emo_affectnet_requirements.filtered.txt
+        /tmp/emo_affectnet_requirements.utf8.txt | \
+    grep -vE '^[[:space:]]*tensorflow(-gpu|-cpu)?([[:space:]]*[<>=!~].*)?[[:space:]]*$' \
+        > /tmp/emo_affectnet_requirements.filtered.txt
     pip install --no-cache-dir -r /tmp/emo_affectnet_requirements.filtered.txt
+
+    # 5. Install PyTorch (cu124) and TensorFlow with bundled CUDA libs.
+    # The plain `tensorflow` wheel does NOT bundle CUDA — that's why TF was
+    # silently falling back to CPU and saying "Cannot dlopen some GPU libraries".
+    # The [and-cuda] extra pulls the matching nvidia-* wheels into site-packages.
     pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+    pip install --no-cache-dir "tensorflow[and-cuda]==2.17.0"
+
     rm -f /tmp/emo_affectnet_requirements.filtered.txt /tmp/emo_affectnet_requirements.utf8.txt
 
-    # 5. Install extra runtime dependencies used by the emotion recognition code.
+    # 6. Extra runtime dependencies used by the emotion recognition code.
     pip install --no-cache-dir numpy pandas tqdm
-
-    # 6. Cleanup
 
 %environment
     export LC_ALL=C
     export CUDA_HOME=/usr/local/cuda
     export CUDA_PATH=/usr/local/cuda
     export PATH=/usr/local/cuda/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    # Note: torch/lib has been removed from LD_LIBRARY_PATH. Keeping it ahead of
+    # /usr/local/cuda/lib64 forced TF to load torch's bundled cuDNN/cuBLAS, which
+    # TF wasn't built against. Both libs now resolve their own CUDA deps via
+    # pip-installed nvidia-* packages and RPATH.
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
     export NVIDIA_VISIBLE_DEVICES=all
+    # Help TF coexist with PyTorch in the same CUDA process.
+    export TF_FORCE_GPU_ALLOW_GROWTH=true
+    export XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/local/cuda
 
 %runscript
     exec python "$@"
