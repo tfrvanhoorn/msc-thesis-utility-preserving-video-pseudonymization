@@ -2,8 +2,7 @@
 """
 Emotion Recognition Script for RAVDESS Dataset.
 """
-import faulthandler
-faulthandler.enable()
+
 
 import argparse
 import json
@@ -13,6 +12,19 @@ import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
+
+# Initialize PyTorch CUDA BEFORE tensorflow gets imported. If TF claims
+# the CUDA context first (during .h5 model load), torch's subsequent
+# .to('cuda') in RetinaFace segfaults inside torch._C._cuda_init.
+# Forcing a real CUDA op here makes torch own the context cleanly first.
+import torch
+if torch.cuda.is_available():
+    torch.cuda.init()
+    _ = torch.zeros(1, device='cuda')
+    del _
+
+import faulthandler
+faulthandler.enable()
 
 import numpy as np
 from tqdm import tqdm
