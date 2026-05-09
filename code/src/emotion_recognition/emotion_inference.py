@@ -108,8 +108,10 @@ class EmotionInferenceEngine:
                     features = self.backbone_model(face_tensor)
                 features = features.detach().cpu()
             else:
-                features = self.backbone_model.predict(face_images, verbose=0)
-
+                # Direct call (returns an EagerTensor) instead of .predict() (returns
+                # numpy). EMO-AffectNetModel/functions/sequences.py calls .numpy() on
+                # this result, which only works on tensors. Same forward pass either way.
+                features = self.backbone_model(face_images, training=False)
             seq_paths, seq_features = self.seq_module.sequences(all_paths, features, win=10, step=5)
             if len(seq_features) == 0:
                 return {"success": False, "error": "Could not create sequences", "frame_count": len(all_paths), "detected_faces": len(all_faces)}
