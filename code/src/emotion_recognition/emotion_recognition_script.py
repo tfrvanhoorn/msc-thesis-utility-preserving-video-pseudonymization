@@ -92,6 +92,18 @@ def main() -> int:
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda", help="Inference device")
     args = parser.parse_args()
 
+    logger.info("Starting emotion recognition evaluation")
+    logger.info("Input directory: %s", args.input_dir)
+    logger.info("Backbone checkpoint: %s", args.backbone_checkpoint)
+    logger.info("LSTM checkpoint: %s", args.lstm_checkpoint)
+    logger.info("Output JSON: %s", args.output_json)
+    logger.info("Confidence threshold: %.3f", args.confidence_threshold)
+    logger.info("Device: %s", args.device)
+    logger.info("Inferred keyed dir: %s", args.inferred_keyed_dir)
+    if args.inferred_keyed_dir:
+        logger.info("Num keys: %s", args.num_keys)
+        logger.info("Detection key: %s", args.detection_key)
+
     if not validate_inputs(args):
         return 1
 
@@ -115,6 +127,12 @@ def main() -> int:
         for video_path, metadata in metadata_dict.items():
             all_video_entries.append((video_path, metadata, None))
 
+    logger.info("Collected %d total video entries", len(all_video_entries))
+    if failed_files:
+        logger.warning("Failed to parse %d files", len(failed_files))
+    if detection_key_label is not None:
+        logger.info("Detection key label: %s", detection_key_label)
+
     if not all_video_entries:
         logger.error("No valid RAVDESS videos found")
         return 1
@@ -123,12 +141,16 @@ def main() -> int:
     for video_path, metadata, key_label in all_video_entries:
         entries_by_actor.setdefault(metadata.actor, []).append((video_path, metadata, key_label))
 
+    logger.info("Grouped entries by actor: %d actors", len(entries_by_actor))
+
     inference_engine = EmotionInferenceEngine(
         backbone_checkpoint=args.backbone_checkpoint,
         lstm_checkpoint=args.lstm_checkpoint,
         confidence_threshold=args.confidence_threshold,
         device=args.device,
     )
+
+    logger.info("Inference engine initialized")
 
     video_results = []
     failed_videos = []
@@ -168,6 +190,8 @@ def main() -> int:
         ]
     else:
         detection_video_results = video_results
+
+    logger.info("Detection key results: %d videos", len(detection_video_results))
 
     metrics_report = generate_metrics_report(detection_video_results)
     if args.inferred_keyed_dir:
@@ -222,6 +246,8 @@ def main() -> int:
             "overall_average": round(overall_pair_consistency, 6),
             "overall_pairs": overall_pair_pairs,
         }
+
+    logger.info("Metrics computed: accuracy=%.2f, brier=%.6f", metrics_report.classification_accuracy, metrics_report.brier_score)
 
     for actor, acc in metrics_report.per_actor_accuracy.items():
         report["per_actor_metrics"][actor] = {
