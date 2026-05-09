@@ -2,6 +2,8 @@
 """
 Emotion Recognition Script for RAVDESS Dataset.
 """
+import faulthandler
+faulthandler.enable()
 
 import argparse
 import json
