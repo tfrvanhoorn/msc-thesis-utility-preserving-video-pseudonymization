@@ -104,6 +104,11 @@ def main() -> int:
     parser.add_argument("--detection-key", type=int, help="Key index (1..N) for per-clip metrics")
     parser.add_argument("--confidence-threshold", type=float, default=0.7, help="Face detection confidence threshold")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda", help="Inference device")
+    parser.add_argument(
+        "--filename-prefix",
+        default="video_sample{n}_",
+        help="Filename prefix template; use {n} for sample id digits",
+    )
     args = parser.parse_args()
 
     logger.info("Starting emotion recognition evaluation")
@@ -113,6 +118,7 @@ def main() -> int:
     logger.info("Output JSON: %s", args.output_json)
     logger.info("Confidence threshold: %.3f", args.confidence_threshold)
     logger.info("Device: %s", args.device)
+    logger.info("Filename prefix template: %s", args.filename_prefix)
     logger.info("Inferred keyed dir: %s", args.inferred_keyed_dir)
     if args.inferred_keyed_dir:
         logger.info("Num keys: %s", args.num_keys)
@@ -130,13 +136,20 @@ def main() -> int:
     detection_key_label = None
 
     if args.inferred_keyed_dir:
-        keyed_metadata, failed_files = collect_keyed_ravdess_videos(input_dir, args.num_keys)
+        keyed_metadata, failed_files = collect_keyed_ravdess_videos(
+            input_dir,
+            args.num_keys,
+            args.filename_prefix,
+        )
         for key_label, metadata_dict in keyed_metadata.items():
             for video_path, metadata in metadata_dict.items():
                 all_video_entries.append((video_path, metadata, key_label))
         detection_key_label = f"key{args.detection_key}"
     else:
-        metadata_dict, failed_files = collect_ravdess_videos(input_dir)
+        metadata_dict, failed_files = collect_ravdess_videos(
+            input_dir,
+            args.filename_prefix,
+        )
         keyed_metadata = {"unkeyed": metadata_dict}
         for video_path, metadata in metadata_dict.items():
             all_video_entries.append((video_path, metadata, None))
@@ -239,6 +252,7 @@ def main() -> int:
         "overall_metrics": {
             "classification_accuracy_percent": round(metrics_report.classification_accuracy, 2),
             "brier_score": round(metrics_report.brier_score, 6),
+            "unweighted_average_recall_percent": round(metrics_report.unweighted_average_recall, 2),
             "pair_consistency": {},
         },
         "per_actor_metrics": {},
@@ -261,7 +275,12 @@ def main() -> int:
             "overall_pairs": overall_pair_pairs,
         }
 
-    logger.info("Metrics computed: accuracy=%.2f, brier=%.6f", metrics_report.classification_accuracy, metrics_report.brier_score)
+    logger.info(
+        "Metrics computed: accuracy=%.2f, brier=%.6f, uar=%.2f",
+        metrics_report.classification_accuracy,
+        metrics_report.brier_score,
+        metrics_report.unweighted_average_recall,
+    )
 
     for actor, acc in metrics_report.per_actor_accuracy.items():
         report["per_actor_metrics"][actor] = {

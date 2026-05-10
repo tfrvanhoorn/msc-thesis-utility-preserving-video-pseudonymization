@@ -29,6 +29,7 @@ class VideoEvaluationResult:
 class MetricsReport:
     classification_accuracy: float
     brier_score: float
+    unweighted_average_recall: float
     pair_consistency: float
     pair_consistency_pair_count: int
     per_actor_accuracy: Dict[str, float]
@@ -61,6 +62,26 @@ def calculate_brier_score(
         pred_probs = np.array(result.predicted_probabilities, dtype=np.float32)
         scores.append(float(np.mean((pred_probs - gt_one_hot) ** 2)))
     return float(np.mean(scores))
+
+
+def calculate_unweighted_average_recall(
+    video_results: List[VideoEvaluationResult],
+    by_group: Optional[List[str]] = None,
+) -> float:
+    results = [r for r in video_results if by_group is None or r.filepath in by_group]
+    if not results:
+        return 0.0
+
+    per_class_recalls = []
+    class_labels = sorted({r.ground_truth_emotion for r in results})
+    for label in class_labels:
+        label_results = [r for r in results if r.ground_truth_emotion == label]
+        if not label_results:
+            continue
+        true_positives = sum(1 for r in label_results if r.predicted_emotion == label)
+        per_class_recalls.append(true_positives / len(label_results))
+
+    return float(np.mean(per_class_recalls) * 100) if per_class_recalls else 0.0
 
 
 def calculate_pair_consistency(
@@ -180,6 +201,7 @@ def generate_metrics_report(
 ) -> MetricsReport:
     overall_accuracy = calculate_classification_accuracy(video_results)["overall"]
     overall_brier_score = calculate_brier_score(video_results)
+    overall_uar = calculate_unweighted_average_recall(video_results)
     overall_pair_consistency, pair_count = calculate_pair_consistency(video_results)
 
     by_actor = aggregate_by_actor(video_results)
@@ -189,6 +211,7 @@ def generate_metrics_report(
     return MetricsReport(
         classification_accuracy=overall_accuracy,
         brier_score=overall_brier_score,
+        unweighted_average_recall=overall_uar,
         pair_consistency=overall_pair_consistency,
         pair_consistency_pair_count=pair_count,
         per_actor_accuracy={actor: data["accuracy"] for actor, data in by_actor.items()},

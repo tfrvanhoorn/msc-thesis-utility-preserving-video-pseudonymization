@@ -50,14 +50,26 @@ class RAVDESSMetadata:
         return hash((self.actor, self.emotion_code, self.intensity, self.repetition))
 
 
-def parse_ravdess_filename(filename: str) -> Optional[RAVDESSMetadata]:
+def parse_ravdess_filename(filename: str, prefix_template: str = "video_sample{n}_") -> Optional[RAVDESSMetadata]:
     name_without_ext = Path(filename).stem
-    pattern = r"^video_sample(\d+)_(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})$"
+    escaped_prefix = re.escape(prefix_template)
+    if "\\{n\\}" in escaped_prefix:
+        prefix_pattern = escaped_prefix.replace("\\{n\\}", r"(\d+)")
+        has_sample = True
+    else:
+        prefix_pattern = escaped_prefix
+        has_sample = False
+    pattern = rf"^{prefix_pattern}(\d{{2}})-(\d{{2}})-(\d{{2}})-(\d{{2}})-(\d{{2}})-(\d{{2}})-(\d{{2}})$"
     match = re.match(pattern, name_without_ext)
     if not match:
         return None
 
-    sample_id_str, modality, vocal, emotion, intensity, statement, repetition, actor = match.groups()
+    if has_sample:
+        sample_id_str, modality, vocal, emotion, intensity, statement, repetition, actor = match.groups()
+        sample_id = int(sample_id_str)
+    else:
+        modality, vocal, emotion, intensity, statement, repetition, actor = match.groups()
+        sample_id = None
 
     if modality not in ["01", "02", "03"]:
         return None
@@ -88,11 +100,14 @@ def parse_ravdess_filename(filename: str) -> Optional[RAVDESSMetadata]:
         statement=statement,
         repetition=repetition,
         actor=actor,
-        sample_id=int(sample_id_str),
+        sample_id=sample_id,
     )
 
 
-def collect_ravdess_videos(video_dir: Path) -> Tuple[Dict[str, RAVDESSMetadata], List[str]]:
+def collect_ravdess_videos(
+    video_dir: Path,
+    prefix_template: str = "video_sample{n}_",
+) -> Tuple[Dict[str, RAVDESSMetadata], List[str]]:
     video_dir = Path(video_dir)
     metadata = {}
     failed = []
@@ -101,7 +116,7 @@ def collect_ravdess_videos(video_dir: Path) -> Tuple[Dict[str, RAVDESSMetadata],
     for video_file in video_dir.iterdir():
         if not video_file.is_file() or video_file.suffix.lower() not in video_extensions:
             continue
-        parsed = parse_ravdess_filename(video_file.name)
+        parsed = parse_ravdess_filename(video_file.name, prefix_template)
         if parsed is None:
             failed.append(video_file.name)
         else:
@@ -113,6 +128,7 @@ def collect_ravdess_videos(video_dir: Path) -> Tuple[Dict[str, RAVDESSMetadata],
 def collect_keyed_ravdess_videos(
     video_dir: Path,
     num_keys: int,
+    prefix_template: str = "video_sample{n}_",
 ) -> Tuple[Dict[str, Dict[str, RAVDESSMetadata]], List[Dict[str, str]]]:
     video_dir = Path(video_dir)
     keyed_metadata: Dict[str, Dict[str, RAVDESSMetadata]] = {}
@@ -125,7 +141,7 @@ def collect_keyed_ravdess_videos(
             failed.append({"key": key_label, "filename": str(key_dir), "reason": "missing directory"})
             continue
 
-        metadata_dict, failed_files = collect_ravdess_videos(key_dir)
+        metadata_dict, failed_files = collect_ravdess_videos(key_dir, prefix_template)
         keyed_metadata[key_label] = metadata_dict
         for failed_file in failed_files:
             failed.append({"key": key_label, "filename": failed_file, "reason": "invalid filename"})
