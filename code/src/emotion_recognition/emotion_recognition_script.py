@@ -37,7 +37,7 @@ if __package__ is None or __package__ == "":
     if str(current_dir) not in sys.path:
         sys.path.insert(0, str(current_dir))
     from ravdess_utils import collect_ravdess_videos, collect_keyed_ravdess_videos, emotion_to_one_hot
-    from .emotion_metrics import (
+    from emotion_metrics import (
         VideoEvaluationResult,
         calculate_different_key_pair_consistency,
         calculate_different_key_pair_consistency_tv,
