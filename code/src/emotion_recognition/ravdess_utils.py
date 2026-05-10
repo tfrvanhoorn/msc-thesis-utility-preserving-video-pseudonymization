@@ -65,6 +65,8 @@ def parse_ravdess_filename(filename: str) -> Optional[RAVDESSMetadata]:
         return None
     if emotion not in RAVDESS_EMOTION_MAP:
         return None
+    if emotion == "02":
+        return None
     if intensity not in ["01", "02"]:
         return None
     if emotion == "01" and intensity == "02":
