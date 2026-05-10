@@ -37,6 +37,12 @@ class MetricsReport:
     per_intensity_accuracy: Dict[str, float]
     video_results: List[VideoEvaluationResult]
 
+def total_variation_distance(probs_a: List[float], probs_b: List[float]) -> float:
+    """TV(P, Q) = 0.5 * sum_c |P(c) - Q(c)|. Bounded in [0, 1]."""
+    a = np.asarray(probs_a, dtype=np.float64)
+    b = np.asarray(probs_b, dtype=np.float64)
+    return float(0.5 * np.sum(np.abs(a - b)))
+
 
 def calculate_classification_accuracy(
     video_results: List[VideoEvaluationResult],
@@ -149,6 +155,73 @@ def calculate_different_key_pair_consistency(
 
     return (total_diff / pair_count if pair_count else 0.0), pair_count
 
+def calculate_pair_consistency_tv(
+    video_results: List[VideoEvaluationResult],
+    by_group: Optional[List[str]] = None,
+) -> Tuple[float, int]:
+    """Pair consistency using TV distance over the full predicted distribution."""
+    results = [r for r in video_results if by_group is None or r.filepath in by_group]
+    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    for result in results:
+        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        groups.setdefault(group_key, []).append(result)
+
+    total_diff = 0.0
+    pair_count = 0
+    for group_results in groups.values():
+        if len(group_results) < 2:
+            continue
+        for i in range(len(group_results)):
+            for j in range(i + 1, len(group_results)):
+                total_diff += total_variation_distance(
+                    group_results[i].predicted_probabilities,
+                    group_results[j].predicted_probabilities,
+                )
+                pair_count += 1
+
+    return (total_diff / pair_count if pair_count else 0.0), pair_count
+
+
+def calculate_same_key_pair_consistency_tv(
+    results_by_key: Dict[str, List[VideoEvaluationResult]],
+) -> Tuple[float, int]:
+    total_diff = 0.0
+    total_pairs = 0
+    for key_results in results_by_key.values():
+        avg_diff, pair_count = calculate_pair_consistency_tv(key_results)
+        total_diff += avg_diff * pair_count
+        total_pairs += pair_count
+    return (total_diff / total_pairs if total_pairs else 0.0), total_pairs
+
+
+def calculate_different_key_pair_consistency_tv(
+    video_results: List[VideoEvaluationResult],
+) -> Tuple[float, int]:
+    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    for result in video_results:
+        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        groups.setdefault(group_key, []).append(result)
+
+    total_diff = 0.0
+    pair_count = 0
+    for group_results in groups.values():
+        if len(group_results) < 2:
+            continue
+        for i in range(len(group_results)):
+            key_i = group_results[i].key_label
+            if key_i is None:
+                continue
+            for j in range(i + 1, len(group_results)):
+                key_j = group_results[j].key_label
+                if key_j is None or key_i == key_j:
+                    continue
+                total_diff += total_variation_distance(
+                    group_results[i].predicted_probabilities,
+                    group_results[j].predicted_probabilities,
+                )
+                pair_count += 1
+
+    return (total_diff / pair_count if pair_count else 0.0), pair_count
 
 def aggregate_by_actor(video_results: List[VideoEvaluationResult]) -> Dict[str, Dict]:
     by_actor = {}

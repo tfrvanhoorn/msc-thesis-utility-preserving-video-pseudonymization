@@ -37,11 +37,14 @@ if __package__ is None or __package__ == "":
     if str(current_dir) not in sys.path:
         sys.path.insert(0, str(current_dir))
     from ravdess_utils import collect_ravdess_videos, collect_keyed_ravdess_videos, emotion_to_one_hot
-    from emotion_metrics import (
+    from .emotion_metrics import (
         VideoEvaluationResult,
         calculate_different_key_pair_consistency,
+        calculate_different_key_pair_consistency_tv,
         calculate_pair_consistency,
+        calculate_pair_consistency_tv,
         calculate_same_key_pair_consistency,
+        calculate_same_key_pair_consistency_tv,
         generate_metrics_report,
     )
     from emotion_inference import EmotionInferenceEngine
@@ -227,8 +230,11 @@ def main() -> int:
             results_by_key[key_label] = [r for r in video_results if r.key_label == key_label]
         same_key_consistency, same_key_pairs = calculate_same_key_pair_consistency(results_by_key)
         different_key_consistency, different_key_pairs = calculate_different_key_pair_consistency(video_results)
+        same_key_consistency_tv, _ = calculate_same_key_pair_consistency_tv(results_by_key)
+        different_key_consistency_tv, _ = calculate_different_key_pair_consistency_tv(video_results)
     else:
         overall_pair_consistency, overall_pair_pairs = calculate_pair_consistency(video_results)
+        overall_pair_consistency_tv, _ = calculate_pair_consistency_tv(video_results)
     report = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
@@ -268,11 +274,14 @@ def main() -> int:
             "same_key_pairs": same_key_pairs,
             "different_key_average": round(different_key_consistency, 6),
             "different_key_pairs": different_key_pairs,
+            "same_key_average_tv": round(same_key_consistency_tv, 6),
+            "different_key_average_tv": round(different_key_consistency_tv, 6),
         }
     else:
         report["overall_metrics"]["pair_consistency"] = {
             "overall_average": round(overall_pair_consistency, 6),
             "overall_pairs": overall_pair_pairs,
+            "overall_average_tv": round(overall_pair_consistency_tv, 6),
         }
 
     logger.info(
@@ -324,6 +333,8 @@ def main() -> int:
     if args.inferred_keyed_dir:
         logger.info("Pair Consistency (same-key): %.6f", same_key_consistency)
         logger.info("Pair Consistency (different-key): %.6f", different_key_consistency)
+        logger.info("Pair Consistency TV (same-key): %.6f", same_key_consistency_tv)
+        logger.info("Pair Consistency TV (different-key): %.6f", different_key_consistency_tv)
     else:
         logger.info("Pair Consistency: %.6f", overall_pair_consistency)
     return 0
