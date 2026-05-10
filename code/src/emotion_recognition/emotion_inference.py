@@ -87,9 +87,8 @@ class EmotionInferenceEngine:
             self.lstm_model = self.load_weights_LSTM(str(self.lstm_checkpoint))
 
     def process_video(self, video_path: str) -> Dict:
-        import pandas as pd
-
         video_path = Path(video_path)
+
         try:
             vc = self.VideoCamera(str(video_path), conf=self.confidence_threshold)
             face_dict, total_frame = vc.get_frame()
@@ -129,47 +128,26 @@ class EmotionInferenceEngine:
                 seq_features_array = np.array(seq_features, dtype=np.float32)
                 lstm_predictions = self.lstm_model.predict(seq_features_array, verbose=0)
 
-            label_model = self.EMOTION_CLASSES
-            all_pred = []
-            all_path = []
-            for index, current_path in enumerate(seq_paths):
-                current_frames = [str(i).zfill(6) for i in range(int(current_path[0]), int(current_path[-1]) + 1)]
-                current_predictions = [lstm_predictions[index]] * len(current_frames)
-                all_pred.extend(current_predictions)
-                all_path.extend(current_frames)
+            # Match run.py's aggregation. Predicted class is the mode of the
+            # per-window argmaxes (np.bincount + argmax is mode for integer
+            # labels, no scipy dependency). avg_probabilities is the mean of
+            # the per-window LSTM outputs and is consumed downstream by Brier
+            # and pair-consistency metrics.
+            window_argmaxes = np.argmax(lstm_predictions, axis=1)
+            predicted_class_idx = int(
+                np.bincount(window_argmaxes, minlength=len(self.EMOTION_CLASSES)).argmax()
+            )
+            avg_probabilities = lstm_predictions.mean(axis=0)
 
-            if all_path:
-                last_frame = int(all_path[-1])
-                missing_frames = [str(i).zfill(6) for i in range(last_frame + 1, total_frame + 1)]
-                missing_predictions = [all_pred[-1]] * len(missing_frames)
-            else:
-                missing_frames = []
-                missing_predictions = []
-
-            df = pd.DataFrame(data=all_pred + missing_predictions, columns=label_model)
-            df["frame"] = all_path + missing_frames
-            df = df[["frame"] + label_model]
-            df_grouped = self.seq_module.df_group(df, label_model)
-
-            frame_predictions = []
-            frame_probabilities = []
-            for _, row in df_grouped.iterrows():
-                frame_probs = row[label_model].values.astype(np.float32)
-                frame_probs = frame_probs / (frame_probs.sum() + 1e-8)
-                frame_predictions.append(int(np.argmax(frame_probs)))
-                frame_probabilities.append(frame_probs.tolist())
-
-            avg_probabilities = np.mean(frame_probabilities, axis=0) if frame_probabilities else np.ones(7) / 7
             return {
                 "success": True,
                 "error": None,
                 "frame_count": len(all_paths),
                 "detected_faces": len(all_faces),
                 "total_frames": total_frame,
-                "frame_predictions": frame_predictions,
                 "sequence_predictions": lstm_predictions.tolist(),
-                "emotion_probabilities": frame_probabilities,
                 "average_probabilities": avg_probabilities.tolist(),
+                "predicted_class_idx": predicted_class_idx,
             }
         except Exception as exc:
             logger.error(f"Error processing video {video_path}: {exc}", exc_info=True)

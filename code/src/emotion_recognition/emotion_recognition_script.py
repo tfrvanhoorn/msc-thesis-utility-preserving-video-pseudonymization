@@ -194,7 +194,7 @@ def main() -> int:
                 continue
 
             avg_probs = result["average_probabilities"]
-            pred_emotion = inference_engine.get_predicted_emotion(avg_probs)
+            pred_emotion = EmotionInferenceEngine.EMOTION_CLASSES[result["predicted_class_idx"]]
             gt_one_hot = emotion_to_one_hot(metadata.emotion_label)
             brier_score = float(np.mean((np.array(avg_probs) - np.array(gt_one_hot)) ** 2))
 
