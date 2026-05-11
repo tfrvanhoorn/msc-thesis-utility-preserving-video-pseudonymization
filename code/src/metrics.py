@@ -56,6 +56,7 @@ class MetricsAccumulator:
     diversity_enabled: bool = True
     detected_generated: int = 0
     total_generated: int = 0
+    detection_score_sum: float = 0.0
     anonymization_total: int = 0
     synchronism_total: int = 0
     synchronism_within_total: int = 0
@@ -91,10 +92,20 @@ class MetricsAccumulator:
         self._diversity_hist = HistogramAggregator(num_bins=self.histogram_bins)
         self._differentiation_hist = HistogramAggregator(num_bins=self.histogram_bins)
 
-    def update_detection(self, gen_mask: torch.Tensor | List[bool]) -> None:
+    def update_detection(
+        self,
+        gen_mask: torch.Tensor | List[bool],
+        detection_scores: torch.Tensor | None = None,
+    ) -> None:
         mask = torch.as_tensor(gen_mask, dtype=torch.bool)
         self.total_generated += int(mask.numel())
         self.detected_generated += int(mask.sum().item())
+        if detection_scores is None:
+            return
+        scores = torch.as_tensor(detection_scores, dtype=torch.float32).reshape(-1)
+        if scores.numel() != int(mask.numel()):
+            raise ValueError("detection_scores must match gen_mask length")
+        self.detection_score_sum += float(scores.sum().item())
 
     def update_anonymization(
         self,
@@ -260,6 +271,7 @@ class MetricsAccumulator:
         logging.info("finalize_auc_eer_end")
 
         detection_rate = float(self.detected_generated) / self.total_generated if self.total_generated else 0.0
+        detection_confidence = self.detection_score_sum / float(self.total_generated) if self.total_generated else 0.0
         landmark_distance = self.landmark_distance_sum / float(self.landmark_pairs_valid) if self.landmark_pairs_valid else None
         lpips_distance = self.lpips_distance_sum / float(self.lpips_pairs_valid) if self.lpips_pairs_valid else None
         ssim_similarity = self.ssim_similarity_sum / float(self.ssim_pairs_valid) if self.ssim_pairs_valid else None
@@ -269,6 +281,7 @@ class MetricsAccumulator:
 
         return {
             "detection_rate": detection_rate,
+            "detection_confidence": detection_confidence,
             "landmark_distance": landmark_distance,
             "lpips_distance": lpips_distance,
             "ssim_similarity": ssim_similarity,

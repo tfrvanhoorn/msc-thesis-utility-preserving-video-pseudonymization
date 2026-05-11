@@ -117,6 +117,7 @@ def _sorted_key_names(keys: list[str]) -> list[str]:
 def _mask_disabled_metrics(summary: dict[str, Any], enabled: set[str]) -> None:
     if "detection" not in enabled:
         summary["detection_rate"] = None
+        summary["detection_confidence"] = None
         summary["counts"]["detected_generated"] = 0
         summary["counts"]["total_generated"] = 0
 
@@ -211,6 +212,11 @@ def _build_chunk_score_snapshot(metrics: MetricsAccumulator, enabled: set[str]) 
         if metrics.total_generated
         else 0.0
     )
+    detection_confidence = (
+        metrics.detection_score_sum / float(metrics.total_generated)
+        if metrics.total_generated
+        else 0.0
+    )
     landmark_distance = (
         metrics.landmark_distance_sum / float(metrics.landmark_pairs_valid)
         if metrics.landmark_pairs_valid
@@ -229,6 +235,7 @@ def _build_chunk_score_snapshot(metrics: MetricsAccumulator, enabled: set[str]) 
 
     return {
         "detection_rate": detection_rate if "detection" in enabled else None,
+        "detection_confidence": detection_confidence if "detection" in enabled else None,
         "anonymization": _auc_eer(
             metrics._anonymization_hist,  # type: ignore[attr-defined]
             similar_pool,
@@ -288,10 +295,12 @@ def _log_chunk_summary(
     scope: str = "running",
 ) -> None:
     detection_rate = scores.get("detection_rate")
+    detection_confidence = scores.get("detection_confidence")
     landmark_distance = scores.get("landmark_distance")
     lpips_distance = scores.get("lpips_distance")
     ssim_similarity = scores.get("ssim_similarity")
     detection_text = "n/a" if detection_rate is None else f"{float(detection_rate):.4f}"
+    confidence_text = "n/a" if detection_confidence is None else f"{float(detection_confidence):.4f}"
     landmark_text = "n/a" if landmark_distance is None else f"{float(landmark_distance):.4f}"
     lpips_text = "n/a" if lpips_distance is None else f"{float(lpips_distance):.4f}"
     ssim_text = "n/a" if ssim_similarity is None else f"{float(ssim_similarity):.4f}"
@@ -299,13 +308,14 @@ def _log_chunk_summary(
 
     logging.info(
         "chunk %d/%d | scope=%s | ids=[%s]\n"
-        "  detection_rate=%s | anonymization(%s) | synchronism_total(%s) | synchronism_within(%s) | synchronism_cross(%s)\n"
+        "  detection_rate=%s | detection_confidence=%s | anonymization(%s) | synchronism_total(%s) | synchronism_within(%s) | synchronism_cross(%s)\n"
         "  diversity(%s) | differentiation(%s) | landmark_distance=%s | lpips=%s | ssim=%s",
         chunk_idx,
         total_chunks,
         scope,
         id_text,
         detection_text,
+        confidence_text,
         _fmt_metric_pair(scores["anonymization"]),
         _fmt_metric_pair(scores["synchronism_total"]),
         _fmt_metric_pair(scores["synchronism_within"]),
@@ -463,13 +473,18 @@ def _collect_detected_faces(
     embedder: EmbeddingModel,
     sample_frames: torch.Tensor,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     aligned_faces: list[torch.Tensor] = []
     input_mask_list: list[bool] = []
+    score_list: list[float] = []
 
     if sample_frames.numel() == 0:
         emb_dim = int(getattr(embedder, "embedding_size", 512))
-        return torch.empty((0, emb_dim), device=device), torch.empty((0,), dtype=torch.bool, device=device)
+        return (
+            torch.empty((0, emb_dim), device=device),
+            torch.empty((0,), dtype=torch.bool, device=device),
+            torch.empty((0,), dtype=torch.float32, device=device),
+        )
 
     for frame in sample_frames:
         detections = detector.detect(frame)
@@ -478,11 +493,14 @@ def _collect_detected_faces(
             aligned = aligner.align(frame, top).to(device)
             aligned_faces.append(aligned)
             input_mask_list.append(True)
+            score_list.append(float(top.score))
         else:
             aligned_faces.append(torch.empty(0, device=device))
             input_mask_list.append(False)
+            score_list.append(0.0)
 
     input_mask = torch.tensor(input_mask_list, dtype=torch.bool, device=device)
+    scores = torch.tensor(score_list, dtype=torch.float32, device=device)
     if input_mask.any():
         valid_idx = [i for i, is_valid in enumerate(input_mask_list) if is_valid]
         valid_faces = [aligned_faces[i] for i in valid_idx]
@@ -494,7 +512,7 @@ def _collect_detected_faces(
     else:
         emb_dim = int(getattr(embedder, "embedding_size", 512))
         full_embeds = torch.zeros((len(aligned_faces), emb_dim), device=device, dtype=torch.float32)
-    return full_embeds, input_mask
+    return full_embeds, input_mask, scores
 
 
 def _sorted_sample_keys(keys: list[tuple[str, int]]) -> list[tuple[str, int]]:
@@ -867,7 +885,7 @@ def main() -> None:
                     if input_frames.shape[0] == 0:
                         continue
 
-                    real_embeddings, input_mask = _collect_detected_faces(
+                    real_embeddings, input_mask, _ = _collect_detected_faces(
                         detector,
                         aligner,
                         embedder,
@@ -877,7 +895,7 @@ def main() -> None:
 
                     base_real_embeddings = real_embeddings
                     base_input_mask = input_mask
-                    key_results: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+                    key_results: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
                     sorted_key_names = _sorted_key_names(available_key_names)
                     if args.inferred_nested_keys:
                         selected: list[str] = []
@@ -918,7 +936,8 @@ def main() -> None:
                             empty_mask = base_input_mask[:0]
                             virt = torch.zeros_like(empty_real)
                             gmask = torch.zeros((0,), dtype=torch.bool, device=device)
-                            key_results[key_name] = (empty_real, empty_mask, virt, gmask)
+                            scores = torch.zeros((0,), dtype=torch.float32, device=device)
+                            key_results[key_name] = (empty_real, empty_mask, virt, gmask, scores)
                             continue
 
                         raw_output_frames = output_frames
@@ -943,14 +962,20 @@ def main() -> None:
                                 metrics.update_perceptual_utility(lpips_value, ssim_value)
                                 chunk_metrics.update_perceptual_utility(lpips_value, ssim_value)
 
-                        virt_embeddings, gen_mask = _collect_detected_faces(
+                        virt_embeddings, gen_mask, gen_scores = _collect_detected_faces(
                             detector,
                             aligner,
                             embedder,
                             output_frames,
                             device,
                         )
-                        key_results[key_name] = (key_real_embeddings, key_input_mask, virt_embeddings, gen_mask)
+                        key_results[key_name] = (
+                            key_real_embeddings,
+                            key_input_mask,
+                            virt_embeddings,
+                            gen_mask,
+                            gen_scores,
+                        )
 
                         if landmark_distance_enabled and landmark_evaluator is not None:
                             pair_count = min(int(input_frames.shape[0]), int(output_frames.shape[0]))
@@ -967,14 +992,15 @@ def main() -> None:
                     det_input_mask = torch.empty((0,), dtype=torch.bool, device=device)
                     det_embeddings = torch.empty((0, 0), device=device)
                     det_gen_mask = torch.empty((0,), dtype=torch.bool, device=device)
+                    det_scores = torch.empty((0,), dtype=torch.float32, device=device)
                     valid_mask = torch.empty((0,), dtype=torch.bool, device=device)
                     if detection_branch_enabled:
-                        det_real_embeddings, det_input_mask, det_embeddings, det_gen_mask = key_results[required_detection_key]
+                        det_real_embeddings, det_input_mask, det_embeddings, det_gen_mask, det_scores = key_results[required_detection_key]
                         valid_mask = det_input_mask & det_gen_mask
 
                     if "detection" in enabled_metrics:
-                        metrics.update_detection(det_gen_mask)
-                        chunk_metrics.update_detection(det_gen_mask)
+                        metrics.update_detection(det_gen_mask, det_scores)
+                        chunk_metrics.update_detection(det_gen_mask, det_scores)
                     if "anonymization" in enabled_metrics:
                         metrics.update_anonymization(det_real_embeddings, det_embeddings, valid_mask)
                         chunk_metrics.update_anonymization(det_real_embeddings, det_embeddings, valid_mask)
@@ -988,8 +1014,8 @@ def main() -> None:
                         chunk_diff_embeddings_by_label_local.setdefault(label, []).append(valid_virtual.detach().to("cpu"))
 
                     for key_a, key_b in itertools.combinations(eval_key_names, 2):
-                        _, input_mask_a, emb_a, mask_a = key_results[key_a]
-                        _, input_mask_b, emb_b, mask_b = key_results[key_b]
+                        _, input_mask_a, emb_a, mask_a, _ = key_results[key_a]
+                        _, input_mask_b, emb_b, mask_b, _ = key_results[key_b]
                         pair_len = min(
                             int(input_mask_a.shape[0]),
                             int(input_mask_b.shape[0]),
@@ -1107,6 +1133,7 @@ def main() -> None:
         total_samples=total_samples,
         batch_processing_seconds=batch_processing_seconds,
         detection_rate=summary["detection_rate"],
+        detection_confidence=summary["detection_confidence"],
     )
     _log_pipe(
         "metric_anonymization",
