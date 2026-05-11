@@ -31,12 +31,19 @@ class FidEvaluator:
             )
 
         try:
-            self._metric = FrechetInceptionDistance(
-                feature=feature,
-                normalize=normalize,
-                feature_extractor_weights_path=feature_extractor_weights_path,
-                antialias=antialias,
-            ).to(device)
+            kwargs = {
+                "feature": feature,
+                "normalize": normalize,
+                "feature_extractor_weights_path": feature_extractor_weights_path,
+                "antialias": antialias,
+            }
+            try:
+                self._metric = FrechetInceptionDistance(**kwargs).to(device)
+            except ValueError as exc:
+                if "Unexpected keyword arguments" not in str(exc):
+                    raise
+                legacy_kwargs = {"feature": feature, "normalize": normalize}
+                self._metric = FrechetInceptionDistance(**legacy_kwargs).to(device)
             self._metric = self._metric.set_dtype(torch.float64)
         except (ImportError, ModuleNotFoundError) as exc:
             raise ImportError(
