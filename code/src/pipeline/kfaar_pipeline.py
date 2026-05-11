@@ -346,6 +346,7 @@ class KfaarPipeline:
         key: torch.Tensor,
         *,
         use_face_postprocessor: bool = False,
+        use_synth_bbox_crop: bool = False,
         swap_for_visuals_only: bool = True,
     ) -> InferenceBatchResult:
         """Inference-only full-frame multi-face path; does not affect training codepaths."""
@@ -565,6 +566,22 @@ class KfaarPipeline:
 
                 generated_face = generated[idx]
                 visual = generated_face
+
+                if use_synth_bbox_crop and not use_face_postprocessor:
+                    # Crop synthesized output to its own detected face before pasting.
+                    synth_dets = self.detector.detect(generated_face)
+                    if synth_dets:
+                        synth_top = max(synth_dets, key=lambda d: d.score)
+                        synth_region = self._square_region_from_bbox(
+                            synth_top.bbox,
+                            generated_face.shape[1],
+                            generated_face.shape[2],
+                        )
+                        if synth_region is not None:
+                            sx1, sy1, sx2, sy2 = synth_region
+                            synth_crop = generated_face[:, sy1:sy2, sx1:sx2]
+                            if synth_crop.numel() > 0:
+                                visual = synth_crop
 
                 if use_face_postprocessor:
                     if self.face_postprocessor is None and not self._warned_face_postprocessor:

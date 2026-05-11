@@ -265,8 +265,8 @@ def parse_args() -> argparse.Namespace:
         "--face_postprocessor",
         type=str,
         default="none",
-        choices=["none", "simswap", "faceadapter_swap", "faceadapter_reenactment"],
-        help="Choose final face postprocessing backend for visualization (none=disabled)",
+        choices=["none", "crop_bbox", "simswap", "faceadapter_swap", "faceadapter_reenactment"],
+        help="Choose final face postprocessing backend for visualization (none=disabled, crop_bbox=crop synthesized face before paste)",
     )
     parser.add_argument("--use_face_postprocessor", action="store_true", help="Legacy flag to enable face postprocessing (overridden by face_postprocessor != none)")
     parser.add_argument(
@@ -401,7 +401,7 @@ def parse_args() -> argparse.Namespace:
 def _build_face_postprocessor(args: argparse.Namespace, device: torch.device) -> SimSwapFaceSwapper | FaceAdapterFaceSwap | FaceAdapterFaceReenactment | None:
     face_postprocessor = None
     postprocessor_choice = (args.face_postprocessor or "none").lower()
-    use_postprocessor_requested = args.use_face_postprocessor or postprocessor_choice != "none"
+    use_postprocessor_requested = args.use_face_postprocessor or postprocessor_choice not in ("none", "crop_bbox")
     if not use_postprocessor_requested:
         return None
 
@@ -579,6 +579,7 @@ def main() -> None:
                         frame_chunk,
                         key_vec,
                         use_face_postprocessor=face_postprocessor is not None,
+                        use_synth_bbox_crop=args.face_postprocessor == "crop_bbox",
                         swap_for_visuals_only=args.swap_for_visuals_only,
                     )
 
