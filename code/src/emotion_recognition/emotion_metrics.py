@@ -181,7 +181,9 @@ def calculate_different_key_pairwise_metrics(
             key_i = group_results[i].key_label
             if key_i is None:
                 continue
-            for j in range(i + 1, len(group_results)):
+            for j in range(len(group_results)):
+                if i == j:
+                    continue
                 key_j = group_results[j].key_label
                 if key_j is None or key_i == key_j:
                     continue
@@ -228,7 +230,9 @@ def calculate_same_key_better_pairs(
             continue
         filenames = sorted(filenames)
         for i in range(len(filenames)):
-            for j in range(i + 1, len(filenames)):
+            for j in range(len(filenames)):
+                if i == j:
+                    continue
                 fname_i = filenames[i]
                 fname_j = filenames[j]
                 res_a_i = lookup_a[fname_i]
@@ -240,14 +244,19 @@ def calculate_same_key_better_pairs(
                     1 if res_a_i.predicted_emotion == res_a_j.predicted_emotion else 0,
                     1 if res_b_i.predicted_emotion == res_b_j.predicted_emotion else 0,
                 ]
-                diff_agreement_vals = [
-                    1 if res_a_i.predicted_emotion == res_b_j.predicted_emotion else 0,
-                    1 if res_b_i.predicted_emotion == res_a_j.predicted_emotion else 0,
-                ]
                 same_agreement = float(np.mean(same_agreement_vals))
-                diff_agreement = float(np.mean(diff_agreement_vals))
-                if same_agreement > diff_agreement:
-                    agreement_better.append(f"{fname_i}|{fname_j}")
+
+                diff_agreement_ab = 1 if res_a_i.predicted_emotion == res_b_j.predicted_emotion else 0
+                diff_agreement_ba = 1 if res_b_i.predicted_emotion == res_a_j.predicted_emotion else 0
+
+                if same_agreement > diff_agreement_ab:
+                    agreement_better.append(
+                        f"{fname_i}|{fname_j} (key_order={key_a}->{key_b})"
+                    )
+                if same_agreement > diff_agreement_ba:
+                    agreement_better.append(
+                        f"{fname_i}|{fname_j} (key_order={key_b}->{key_a})"
+                    )
 
                 same_cond_vals: List[int] = []
                 if res_a_i.is_correct:
@@ -255,17 +264,28 @@ def calculate_same_key_better_pairs(
                 if res_b_i.is_correct:
                     same_cond_vals.append(1 if res_b_j.is_correct else 0)
 
-                diff_cond_vals: List[int] = []
+                diff_cond_ab_vals: List[int] = []
                 if res_a_i.is_correct:
-                    diff_cond_vals.append(1 if res_b_j.is_correct else 0)
-                if res_b_i.is_correct:
-                    diff_cond_vals.append(1 if res_a_j.is_correct else 0)
+                    diff_cond_ab_vals.append(1 if res_b_j.is_correct else 0)
 
-                if same_cond_vals and diff_cond_vals:
+                diff_cond_ba_vals: List[int] = []
+                if res_b_i.is_correct:
+                    diff_cond_ba_vals.append(1 if res_a_j.is_correct else 0)
+
+                if same_cond_vals:
                     same_cond = float(np.mean(same_cond_vals))
-                    diff_cond = float(np.mean(diff_cond_vals))
-                    if same_cond > diff_cond:
-                        conditional_better.append(f"{fname_i}|{fname_j}")
+                    if diff_cond_ab_vals:
+                        diff_cond_ab = float(np.mean(diff_cond_ab_vals))
+                        if same_cond > diff_cond_ab:
+                            conditional_better.append(
+                                f"{fname_i}|{fname_j} (key_order={key_a}->{key_b})"
+                            )
+                    if diff_cond_ba_vals:
+                        diff_cond_ba = float(np.mean(diff_cond_ba_vals))
+                        if same_cond > diff_cond_ba:
+                            conditional_better.append(
+                                f"{fname_i}|{fname_j} (key_order={key_b}->{key_a})"
+                            )
 
     return agreement_better, conditional_better
 
