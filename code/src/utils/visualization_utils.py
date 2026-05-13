@@ -164,6 +164,12 @@ def plot_progress_line_chart(
             color=colors[emotion],
             va="center",
             fontsize=14,
+            bbox={
+                "boxstyle": "round,pad=0.2",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.9,
+            },
         )
 
     ax.set_xticks(x_positions, x_labels)
