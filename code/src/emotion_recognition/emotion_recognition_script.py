@@ -45,16 +45,27 @@ if __package__ is None or __package__ == "":
         calculate_pair_consistency_tv,
         calculate_same_key_pair_consistency,
         calculate_same_key_pair_consistency_tv,
+        calculate_pair_baseline_relative_tv,
+        calculate_same_key_pair_baseline_relative_tv,
+        calculate_different_key_pair_baseline_relative_tv,
+        load_baseline_lookup_from_json,
         generate_metrics_report,
     )
     from emotion_inference import EmotionInferenceEngine
 else:
     from .ravdess_utils import collect_ravdess_videos, collect_keyed_ravdess_videos, emotion_to_one_hot
-    from .emotion_metrics import (
+    from emotion_metrics import (
         VideoEvaluationResult,
         calculate_different_key_pair_consistency,
+        calculate_different_key_pair_consistency_tv,
         calculate_pair_consistency,
+        calculate_pair_consistency_tv,
         calculate_same_key_pair_consistency,
+        calculate_same_key_pair_consistency_tv,
+        calculate_pair_baseline_relative_tv,
+        calculate_same_key_pair_baseline_relative_tv,
+        calculate_different_key_pair_baseline_relative_tv,
+        load_baseline_lookup_from_json,
         generate_metrics_report,
     )
     from .emotion_inference import EmotionInferenceEngine
@@ -92,6 +103,10 @@ def validate_inputs(args) -> bool:
             if not key_dir.exists() or not key_dir.is_dir():
                 logger.error(f"Missing keyed directory: {key_dir}")
                 return False
+        if args.baseline_results_json is not None:
+            if not Path(args.baseline_results_json).exists():
+                logger.error(f"Baseline results JSON not found: {args.baseline_results_json}")
+                return False
     Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
     return True
 
@@ -111,6 +126,14 @@ def main() -> int:
         "--filename-prefix",
         default="video_sample{n}_",
         help="Filename prefix template; use {n} for sample id digits",
+    )
+    parser.add_argument(
+        "--baseline-results-json",
+        default=None,
+        help="Optional path to a previously generated unmodified-baseline "
+            "evaluation JSON. When provided, baseline-relative TV deviation "
+            "metrics (difference-in-differences) are also computed and "
+            "reported alongside the existing pair-consistency metrics.",
     )
     args = parser.parse_args()
 
@@ -235,6 +258,34 @@ def main() -> int:
     else:
         overall_pair_consistency, overall_pair_pairs = calculate_pair_consistency(video_results)
         overall_pair_consistency_tv, _ = calculate_pair_consistency_tv(video_results)
+    
+    baseline_lookup = None
+    same_key_bl_rel_tv = None
+    same_key_bl_rel_pairs = 0
+    diff_key_bl_rel_tv = None
+    diff_key_bl_rel_pairs = 0
+    overall_bl_rel_tv = None
+    overall_bl_rel_pairs = 0
+
+    if args.baseline_results_json:
+        baseline_lookup = load_baseline_lookup_from_json(
+            Path(args.baseline_results_json),
+            args.filename_prefix,
+        )
+        logger.info("Loaded baseline lookup with %d clip entries", len(baseline_lookup))
+
+        if args.inferred_keyed_dir:
+            same_key_bl_rel_tv, same_key_bl_rel_pairs = (
+                calculate_same_key_pair_baseline_relative_tv(results_by_key, baseline_lookup)
+            )
+            diff_key_bl_rel_tv, diff_key_bl_rel_pairs = (
+                calculate_different_key_pair_baseline_relative_tv(video_results, baseline_lookup)
+            )
+        else:
+            overall_bl_rel_tv, overall_bl_rel_pairs = (
+                calculate_pair_baseline_relative_tv(video_results, baseline_lookup)
+            )
+
     report = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
@@ -277,12 +328,24 @@ def main() -> int:
             "same_key_average_tv": round(same_key_consistency_tv, 6),
             "different_key_average_tv": round(different_key_consistency_tv, 6),
         }
+        if baseline_lookup is not None:
+            report["overall_metrics"]["pair_consistency"].update({
+                "same_key_baseline_relative_tv": round(same_key_bl_rel_tv, 6),
+                "same_key_baseline_relative_pairs": same_key_bl_rel_pairs,
+                "different_key_baseline_relative_tv": round(diff_key_bl_rel_tv, 6),
+                "different_key_baseline_relative_pairs": diff_key_bl_rel_pairs,
+            })
     else:
         report["overall_metrics"]["pair_consistency"] = {
             "overall_average": round(overall_pair_consistency, 6),
             "overall_pairs": overall_pair_pairs,
             "overall_average_tv": round(overall_pair_consistency_tv, 6),
         }
+        if baseline_lookup is not None:
+            report["overall_metrics"]["pair_consistency"].update({
+                "overall_baseline_relative_tv": round(overall_bl_rel_tv, 6),
+                "overall_baseline_relative_pairs": overall_bl_rel_pairs,
+            })
 
     logger.info(
         "Metrics computed: accuracy=%.2f, brier=%.6f, uar=%.2f",
@@ -335,8 +398,22 @@ def main() -> int:
         logger.info("Pair Consistency (different-key): %.6f", different_key_consistency)
         logger.info("Pair Consistency TV (same-key): %.6f", same_key_consistency_tv)
         logger.info("Pair Consistency TV (different-key): %.6f", different_key_consistency_tv)
+        if baseline_lookup is not None:
+            logger.info(
+                "Baseline-relative TV (same-key): %.6f over %d pairs",
+                same_key_bl_rel_tv, same_key_bl_rel_pairs,
+            )
+            logger.info(
+                "Baseline-relative TV (different-key): %.6f over %d pairs",
+                diff_key_bl_rel_tv, diff_key_bl_rel_pairs,
+            )
     else:
         logger.info("Pair Consistency: %.6f", overall_pair_consistency)
+        if baseline_lookup is not None:
+            logger.info(
+                "Baseline-relative TV (overall): %.6f over %d pairs",
+                overall_bl_rel_tv, overall_bl_rel_pairs,
+            )
     return 0
 
 

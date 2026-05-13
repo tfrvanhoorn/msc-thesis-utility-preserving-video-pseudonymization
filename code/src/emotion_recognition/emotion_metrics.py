@@ -7,10 +7,22 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
+import json
+
 try:
-    from .ravdess_utils import RAVDESSMetadata, emotion_to_one_hot, EMOTION_TO_IDX
-except ImportError:  # Allow direct script execution without package context.
-    from ravdess_utils import RAVDESSMetadata, emotion_to_one_hot, EMOTION_TO_IDX
+    from .ravdess_utils import (
+        RAVDESSMetadata,
+        emotion_to_one_hot,
+        EMOTION_TO_IDX,
+        EMOTION_CLASSES,
+    )
+except ImportError:
+    from ravdess_utils import (
+        RAVDESSMetadata,
+        emotion_to_one_hot,
+        EMOTION_TO_IDX,
+        EMOTION_CLASSES,
+    )
 
 
 @dataclass
@@ -42,6 +54,156 @@ def total_variation_distance(probs_a: List[float], probs_b: List[float]) -> floa
     a = np.asarray(probs_a, dtype=np.float64)
     b = np.asarray(probs_b, dtype=np.float64)
     return float(0.5 * np.sum(np.abs(a - b)))
+
+# ----------------------------------------------------------------------
+# Baseline-relative TV deviation (difference-in-differences over pairs).
+#
+# For each pair of clips (i, j) belonging to the same (actor, emotion,
+# intensity) group, the shift vector under condition X is
+#     delta_X = p_X(j) - p_X(i)      in R^7, summing to zero.
+# The baseline-relative TV deviation is the TV-style L1 distance between
+# the pseudonymized shift and the baseline shift,
+#     dev(i, j) = 0.5 * sum_c |delta_pseudo,c - delta_baseline,c|.
+# A value of 0 means pseudonymization preserves the natural per-pair
+# shift exactly; larger values mean pseudonymization adds its own
+# per-pair shift on top of the baseline. Bounded in [0, 2] (rather than
+# [0, 1] like standard TVD), because delta vectors range over [-1, 1]^7
+# instead of the probability simplex.
+# ----------------------------------------------------------------------
+
+ClipIdentity = Tuple[str, str, str, str, str]
+
+
+def _clip_identity(result: VideoEvaluationResult) -> ClipIdentity:
+    """(actor, emotion_code, intensity, statement, repetition) — uniquely
+    identifies a RAVDESS clip across baseline and pseudonymized runs."""
+    meta = result.metadata
+    return (meta.actor, meta.emotion_code, meta.intensity, meta.statement, meta.repetition)
+
+
+def load_baseline_lookup_from_json(
+    json_path,
+    prefix_template: str = "video_sample{n}_",
+) -> Dict[ClipIdentity, List[float]]:
+    """Load a previously generated baseline report and return a mapping
+    from clip identity to the baseline's predicted probability vector
+    (ordered to match EMOTION_CLASSES).
+
+    Assumes the baseline report was produced by this same script with the
+    same filename prefix template. Entries that fail to parse are skipped.
+    """
+    try:
+        from .ravdess_utils import parse_ravdess_filename
+    except ImportError:
+        from ravdess_utils import parse_ravdess_filename
+
+    with open(json_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    lookup: Dict[ClipIdentity, List[float]] = {}
+    for entry in data.get("video_results", []):
+        filename = entry.get("filename")
+        if not filename:
+            continue
+        parsed = parse_ravdess_filename(filename, prefix_template)
+        if parsed is None:
+            continue
+        identity = (parsed.actor, parsed.emotion_code, parsed.intensity,
+                    parsed.statement, parsed.repetition)
+        prob_dict = entry.get("predicted_probabilities", {})
+        lookup[identity] = [float(prob_dict.get(name, 0.0)) for name in EMOTION_CLASSES]
+    return lookup
+
+
+def calculate_pair_baseline_relative_tv(
+    video_results: List[VideoEvaluationResult],
+    baseline_lookup: Dict[ClipIdentity, List[float]],
+) -> Tuple[float, int]:
+    """Baseline-relative TV deviation, averaged over same-(actor, emotion,
+    intensity) pairs. Pairs whose baseline counterparts are missing in
+    the lookup are skipped."""
+    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    for result in video_results:
+        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        groups.setdefault(group_key, []).append(result)
+
+    total_deviation = 0.0
+    pair_count = 0
+    for group_results in groups.values():
+        if len(group_results) < 2:
+            continue
+        for i in range(len(group_results)):
+            base_i = baseline_lookup.get(_clip_identity(group_results[i]))
+            if base_i is None:
+                continue
+            p_pi = np.asarray(group_results[i].predicted_probabilities, dtype=np.float64)
+            p_bi = np.asarray(base_i, dtype=np.float64)
+            for j in range(i + 1, len(group_results)):
+                base_j = baseline_lookup.get(_clip_identity(group_results[j]))
+                if base_j is None:
+                    continue
+                p_pj = np.asarray(group_results[j].predicted_probabilities, dtype=np.float64)
+                p_bj = np.asarray(base_j, dtype=np.float64)
+                total_deviation += float(0.5 * np.sum(np.abs((p_pj - p_pi) - (p_bj - p_bi))))
+                pair_count += 1
+
+    return (total_deviation / pair_count if pair_count else 0.0), pair_count
+
+
+def calculate_same_key_pair_baseline_relative_tv(
+    results_by_key: Dict[str, List[VideoEvaluationResult]],
+    baseline_lookup: Dict[ClipIdentity, List[float]],
+) -> Tuple[float, int]:
+    """Within-key version, averaged across keys (weighted by pair count)."""
+    total_deviation = 0.0
+    total_pairs = 0
+    for key_results in results_by_key.values():
+        avg_dev, pair_count = calculate_pair_baseline_relative_tv(key_results, baseline_lookup)
+        total_deviation += avg_dev * pair_count
+        total_pairs += pair_count
+    return (total_deviation / total_pairs if total_pairs else 0.0), total_pairs
+
+
+def calculate_different_key_pair_baseline_relative_tv(
+    video_results: List[VideoEvaluationResult],
+    baseline_lookup: Dict[ClipIdentity, List[float]],
+) -> Tuple[float, int]:
+    """Cross-key version. Pair selection rule matches
+    calculate_different_key_pair_consistency_tv (different key labels,
+    both non-None). Baseline counterparts are matched by clip identity,
+    independent of key, since the baseline has no keys."""
+    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    for result in video_results:
+        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        groups.setdefault(group_key, []).append(result)
+
+    total_deviation = 0.0
+    pair_count = 0
+    for group_results in groups.values():
+        if len(group_results) < 2:
+            continue
+        for i in range(len(group_results)):
+            key_i = group_results[i].key_label
+            if key_i is None:
+                continue
+            base_i = baseline_lookup.get(_clip_identity(group_results[i]))
+            if base_i is None:
+                continue
+            p_pi = np.asarray(group_results[i].predicted_probabilities, dtype=np.float64)
+            p_bi = np.asarray(base_i, dtype=np.float64)
+            for j in range(i + 1, len(group_results)):
+                key_j = group_results[j].key_label
+                if key_j is None or key_i == key_j:
+                    continue
+                base_j = baseline_lookup.get(_clip_identity(group_results[j]))
+                if base_j is None:
+                    continue
+                p_pj = np.asarray(group_results[j].predicted_probabilities, dtype=np.float64)
+                p_bj = np.asarray(base_j, dtype=np.float64)
+                total_deviation += float(0.5 * np.sum(np.abs((p_pj - p_pi) - (p_bj - p_bi))))
+                pair_count += 1
+
+    return (total_deviation / pair_count if pair_count else 0.0), pair_count
 
 
 def calculate_classification_accuracy(
