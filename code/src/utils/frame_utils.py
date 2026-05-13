@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from pathlib import Path
+import sys
+
+# Avoid shadowing the stdlib logging module with utils/logging.py when run as a script.
+_script_dir = Path(__file__).resolve().parent
+_removed_script_dir = False
+if str(_script_dir) in sys.path:
+    sys.path.remove(str(_script_dir))
+    _removed_script_dir = True
+import logging
+if _removed_script_dir:
+    sys.path.insert(0, str(_script_dir))
 
 import cv2
 
