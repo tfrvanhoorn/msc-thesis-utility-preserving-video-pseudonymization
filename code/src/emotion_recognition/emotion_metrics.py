@@ -7,21 +7,17 @@ from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 
-import json
-
 try:
     from .ravdess_utils import (
         RAVDESSMetadata,
         emotion_to_one_hot,
         EMOTION_TO_IDX,
-        EMOTION_CLASSES,
     )
 except ImportError:
     from ravdess_utils import (
         RAVDESSMetadata,
         emotion_to_one_hot,
         EMOTION_TO_IDX,
-        EMOTION_CLASSES,
     )
 
 
@@ -42,167 +38,10 @@ class MetricsReport:
     classification_accuracy: float
     brier_score: float
     unweighted_average_recall: float
-    pair_consistency: float
-    pair_consistency_pair_count: int
     per_actor_accuracy: Dict[str, float]
     per_emotion_accuracy: Dict[str, float]
     per_intensity_accuracy: Dict[str, float]
     video_results: List[VideoEvaluationResult]
-
-def total_variation_distance(probs_a: List[float], probs_b: List[float]) -> float:
-    """TV(P, Q) = 0.5 * sum_c |P(c) - Q(c)|. Bounded in [0, 1]."""
-    a = np.asarray(probs_a, dtype=np.float64)
-    b = np.asarray(probs_b, dtype=np.float64)
-    return float(0.5 * np.sum(np.abs(a - b)))
-
-# ----------------------------------------------------------------------
-# Baseline-relative TV deviation (difference-in-differences over pairs).
-#
-# For each pair of clips (i, j) belonging to the same (actor, emotion,
-# intensity) group, the shift vector under condition X is
-#     delta_X = p_X(j) - p_X(i)      in R^7, summing to zero.
-# The baseline-relative TV deviation is the TV-style L1 distance between
-# the pseudonymized shift and the baseline shift,
-#     dev(i, j) = 0.5 * sum_c |delta_pseudo,c - delta_baseline,c|.
-# A value of 0 means pseudonymization preserves the natural per-pair
-# shift exactly; larger values mean pseudonymization adds its own
-# per-pair shift on top of the baseline. Bounded in [0, 2] (rather than
-# [0, 1] like standard TVD), because delta vectors range over [-1, 1]^7
-# instead of the probability simplex.
-# ----------------------------------------------------------------------
-
-ClipIdentity = Tuple[str, str, str, str, str]
-
-
-def _clip_identity(result: VideoEvaluationResult) -> ClipIdentity:
-    """(actor, emotion_code, intensity, statement, repetition) — uniquely
-    identifies a RAVDESS clip across baseline and pseudonymized runs."""
-    meta = result.metadata
-    return (meta.actor, meta.emotion_code, meta.intensity, meta.statement, meta.repetition)
-
-
-def load_baseline_lookup_from_json(
-    json_path,
-    prefix_template: str = "video_sample{n}_",
-) -> Dict[ClipIdentity, List[float]]:
-    """Load a previously generated baseline report and return a mapping
-    from clip identity to the baseline's predicted probability vector
-    (ordered to match EMOTION_CLASSES).
-
-    Assumes the baseline report was produced by this same script with the
-    same filename prefix template. Entries that fail to parse are skipped.
-    """
-    try:
-        from .ravdess_utils import parse_ravdess_filename
-    except ImportError:
-        from ravdess_utils import parse_ravdess_filename
-
-    with open(json_path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-
-    lookup: Dict[ClipIdentity, List[float]] = {}
-    for entry in data.get("video_results", []):
-        filename = entry.get("filename")
-        if not filename:
-            continue
-        parsed = parse_ravdess_filename(filename, prefix_template)
-        if parsed is None:
-            continue
-        identity = (parsed.actor, parsed.emotion_code, parsed.intensity,
-                    parsed.statement, parsed.repetition)
-        prob_dict = entry.get("predicted_probabilities", {})
-        lookup[identity] = [float(prob_dict.get(name, 0.0)) for name in EMOTION_CLASSES]
-    return lookup
-
-
-def calculate_pair_baseline_relative_tv(
-    video_results: List[VideoEvaluationResult],
-    baseline_lookup: Dict[ClipIdentity, List[float]],
-) -> Tuple[float, int]:
-    """Baseline-relative TV deviation, averaged over same-actor pairs.
-    Pairs whose baseline counterparts are missing in the lookup are skipped."""
-    groups: Dict[str, List[VideoEvaluationResult]] = {}
-    for result in video_results:
-        group_key = result.metadata.actor
-        groups.setdefault(group_key, []).append(result)
-
-    total_deviation = 0.0
-    pair_count = 0
-    for group_results in groups.values():
-        if len(group_results) < 2:
-            continue
-        for i in range(len(group_results)):
-            base_i = baseline_lookup.get(_clip_identity(group_results[i]))
-            if base_i is None:
-                continue
-            p_pi = np.asarray(group_results[i].predicted_probabilities, dtype=np.float64)
-            p_bi = np.asarray(base_i, dtype=np.float64)
-            for j in range(i + 1, len(group_results)):
-                base_j = baseline_lookup.get(_clip_identity(group_results[j]))
-                if base_j is None:
-                    continue
-                p_pj = np.asarray(group_results[j].predicted_probabilities, dtype=np.float64)
-                p_bj = np.asarray(base_j, dtype=np.float64)
-                total_deviation += float(0.5 * np.sum(np.abs((p_pj - p_pi) - (p_bj - p_bi))))
-                pair_count += 1
-
-    return (total_deviation / pair_count if pair_count else 0.0), pair_count
-
-
-def calculate_same_key_pair_baseline_relative_tv(
-    results_by_key: Dict[str, List[VideoEvaluationResult]],
-    baseline_lookup: Dict[ClipIdentity, List[float]],
-) -> Tuple[float, int]:
-    """Within-key version, averaged across keys (weighted by pair count)."""
-    total_deviation = 0.0
-    total_pairs = 0
-    for key_results in results_by_key.values():
-        avg_dev, pair_count = calculate_pair_baseline_relative_tv(key_results, baseline_lookup)
-        total_deviation += avg_dev * pair_count
-        total_pairs += pair_count
-    return (total_deviation / total_pairs if total_pairs else 0.0), total_pairs
-
-
-def calculate_different_key_pair_baseline_relative_tv(
-    video_results: List[VideoEvaluationResult],
-    baseline_lookup: Dict[ClipIdentity, List[float]],
-) -> Tuple[float, int]:
-    """Cross-key version. Pair selection rule matches
-    calculate_different_key_pair_consistency_tv (different key labels,
-    both non-None). Baseline counterparts are matched by clip identity,
-    independent of key, since the baseline has no keys."""
-    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
-    for result in video_results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
-        groups.setdefault(group_key, []).append(result)
-
-    total_deviation = 0.0
-    pair_count = 0
-    for group_results in groups.values():
-        if len(group_results) < 2:
-            continue
-        for i in range(len(group_results)):
-            key_i = group_results[i].key_label
-            if key_i is None:
-                continue
-            base_i = baseline_lookup.get(_clip_identity(group_results[i]))
-            if base_i is None:
-                continue
-            p_pi = np.asarray(group_results[i].predicted_probabilities, dtype=np.float64)
-            p_bi = np.asarray(base_i, dtype=np.float64)
-            for j in range(i + 1, len(group_results)):
-                key_j = group_results[j].key_label
-                if key_j is None or key_i == key_j:
-                    continue
-                base_j = baseline_lookup.get(_clip_identity(group_results[j]))
-                if base_j is None:
-                    continue
-                p_pj = np.asarray(group_results[j].predicted_probabilities, dtype=np.float64)
-                p_bj = np.asarray(base_j, dtype=np.float64)
-                total_deviation += float(0.5 * np.sum(np.abs((p_pj - p_pi) - (p_bj - p_bi))))
-                pair_count += 1
-
-    return (total_deviation / pair_count if pair_count else 0.0), pair_count
 
 
 def calculate_classification_accuracy(
@@ -250,121 +89,91 @@ def calculate_unweighted_average_recall(
 
     return float(np.mean(per_class_recalls) * 100) if per_class_recalls else 0.0
 
-
-def calculate_pair_consistency(
+def _group_by_actor_emotion(
     video_results: List[VideoEvaluationResult],
-    by_group: Optional[List[str]] = None,
-) -> Tuple[float, int]:
-    results = [r for r in video_results if by_group is None or r.filepath in by_group]
-    groups: Dict[str, List[VideoEvaluationResult]] = {}
-    for result in results:
-        group_key = result.metadata.actor
-        groups.setdefault(group_key, []).append(result)
-
-    total_diff = 0.0
-    pair_count = 0
-    for group_results in groups.values():
-        if len(group_results) < 2:
-            continue
-        for i in range(len(group_results)):
-            prob_i = group_results[i].predicted_probabilities[EMOTION_TO_IDX[group_results[i].ground_truth_emotion]]
-            for j in range(i + 1, len(group_results)):
-                prob_j = group_results[j].predicted_probabilities[EMOTION_TO_IDX[group_results[j].ground_truth_emotion]]
-                total_diff += abs(prob_i - prob_j)
-                pair_count += 1
-
-    return (total_diff / pair_count if pair_count else 0.0), pair_count
-
-
-def calculate_same_key_pair_consistency(
-    results_by_key: Dict[str, List[VideoEvaluationResult]],
-) -> Tuple[float, int]:
-    total_diff = 0.0
-    total_pairs = 0
-    for key_results in results_by_key.values():
-        avg_diff, pair_count = calculate_pair_consistency(key_results)
-        total_diff += avg_diff * pair_count
-        total_pairs += pair_count
-    return (total_diff / total_pairs if total_pairs else 0.0), total_pairs
-
-
-def calculate_different_key_pair_consistency(
-    video_results: List[VideoEvaluationResult],
-) -> Tuple[float, int]:
-    groups: Dict[str, List[VideoEvaluationResult]] = {}
+) -> Dict[Tuple[str, str], List[VideoEvaluationResult]]:
+    groups: Dict[Tuple[str, str], List[VideoEvaluationResult]] = {}
     for result in video_results:
-        group_key = result.metadata.actor
+        group_key = (result.metadata.actor, result.ground_truth_emotion)
         groups.setdefault(group_key, []).append(result)
+    return groups
 
-    total_diff = 0.0
-    pair_count = 0
-    for group_results in groups.values():
-        if len(group_results) < 2:
-            continue
-        for i in range(len(group_results)):
-            key_i = group_results[i].key_label
-            if key_i is None:
+
+def _build_filename_lookup(
+    video_results: List[VideoEvaluationResult],
+) -> Dict[str, VideoEvaluationResult]:
+    return {result.metadata.filename: result for result in video_results}
+
+
+def calculate_absolute_confidence_shift_and_flip_rate(
+    results_by_key: Dict[str, List[VideoEvaluationResult]],
+    key_a: str,
+    key_b: str,
+) -> Tuple[float, float, int, List[str]]:
+    if key_a not in results_by_key or key_b not in results_by_key:
+        return 0.0, 0.0, 0, []
+
+    lookup_a = _build_filename_lookup(results_by_key[key_a])
+    lookup_b = _build_filename_lookup(results_by_key[key_b])
+    matched_filenames = sorted(set(lookup_a.keys()) & set(lookup_b.keys()))
+
+    total_shift = 0.0
+    flip_filenames: List[str] = []
+    for filename in matched_filenames:
+        result_a = lookup_a[filename]
+        result_b = lookup_b[filename]
+        emotion_idx = EMOTION_TO_IDX[result_a.ground_truth_emotion]
+        prob_a = float(result_a.predicted_probabilities[emotion_idx])
+        prob_b = float(result_b.predicted_probabilities[emotion_idx])
+        total_shift += abs(prob_a - prob_b)
+        if result_a.predicted_emotion != result_b.predicted_emotion:
+            flip_filenames.append(filename)
+
+    pair_count = len(matched_filenames)
+    avg_shift = total_shift / pair_count if pair_count else 0.0
+    flip_rate = len(flip_filenames) / pair_count if pair_count else 0.0
+    return avg_shift, flip_rate, pair_count, flip_filenames
+
+
+def calculate_same_key_pairwise_metrics(
+    results_by_key: Dict[str, List[VideoEvaluationResult]],
+) -> Tuple[float, int, float, int]:
+    total_agreement = 0
+    total_pairs = 0
+    conditional_numerator = 0
+    conditional_denominator = 0
+
+    for key_results in results_by_key.values():
+        groups = _group_by_actor_emotion(key_results)
+        for group_results in groups.values():
+            if len(group_results) < 2:
                 continue
-            prob_i = group_results[i].predicted_probabilities[EMOTION_TO_IDX[group_results[i].ground_truth_emotion]]
-            for j in range(i + 1, len(group_results)):
-                key_j = group_results[j].key_label
-                if key_j is None or key_i == key_j:
-                    continue
-                prob_j = group_results[j].predicted_probabilities[EMOTION_TO_IDX[group_results[j].ground_truth_emotion]]
-                total_diff += abs(prob_i - prob_j)
-                pair_count += 1
+            for i in range(len(group_results)):
+                for j in range(i + 1, len(group_results)):
+                    total_pairs += 1
+                    if group_results[i].predicted_emotion == group_results[j].predicted_emotion:
+                        total_agreement += 1
+                    if group_results[i].is_correct:
+                        conditional_denominator += 1
+                        if group_results[j].is_correct:
+                            conditional_numerator += 1
 
-    return (total_diff / pair_count if pair_count else 0.0), pair_count
+    agreement_rate = total_agreement / total_pairs if total_pairs else 0.0
+    conditional_rate = (
+        conditional_numerator / conditional_denominator if conditional_denominator else 0.0
+    )
+    return agreement_rate, total_pairs, conditional_rate, conditional_denominator
 
-def calculate_pair_consistency_tv(
+
+def calculate_different_key_pairwise_metrics(
     video_results: List[VideoEvaluationResult],
-    by_group: Optional[List[str]] = None,
-) -> Tuple[float, int]:
-    """Pair consistency using TV distance over the full predicted distribution."""
-    results = [r for r in video_results if by_group is None or r.filepath in by_group]
-    groups: Dict[str, List[VideoEvaluationResult]] = {}
-    for result in results:
-        group_key = result.metadata.actor
-        groups.setdefault(group_key, []).append(result)
-
-    total_diff = 0.0
-    pair_count = 0
-    for group_results in groups.values():
-        if len(group_results) < 2:
-            continue
-        for i in range(len(group_results)):
-            for j in range(i + 1, len(group_results)):
-                total_diff += total_variation_distance(
-                    group_results[i].predicted_probabilities,
-                    group_results[j].predicted_probabilities,
-                )
-                pair_count += 1
-
-    return (total_diff / pair_count if pair_count else 0.0), pair_count
-
-
-def calculate_same_key_pair_consistency_tv(
-    results_by_key: Dict[str, List[VideoEvaluationResult]],
-) -> Tuple[float, int]:
-    total_diff = 0.0
+) -> Tuple[float, int, float, int]:
+    total_agreement = 0
     total_pairs = 0
-    for key_results in results_by_key.values():
-        avg_diff, pair_count = calculate_pair_consistency_tv(key_results)
-        total_diff += avg_diff * pair_count
-        total_pairs += pair_count
-    return (total_diff / total_pairs if total_pairs else 0.0), total_pairs
+    conditional_numerator = 0
+    conditional_denominator = 0
 
-
-def calculate_different_key_pair_consistency_tv(
-    video_results: List[VideoEvaluationResult],
-) -> Tuple[float, int]:
-    groups: Dict[str, List[VideoEvaluationResult]] = {}
-    for result in video_results:
-        group_key = result.metadata.actor
-        groups.setdefault(group_key, []).append(result)
-
-    total_diff = 0.0
-    pair_count = 0
+    groups = _group_by_actor_emotion(video_results)
     for group_results in groups.values():
         if len(group_results) < 2:
             continue
@@ -376,13 +185,89 @@ def calculate_different_key_pair_consistency_tv(
                 key_j = group_results[j].key_label
                 if key_j is None or key_i == key_j:
                     continue
-                total_diff += total_variation_distance(
-                    group_results[i].predicted_probabilities,
-                    group_results[j].predicted_probabilities,
-                )
-                pair_count += 1
+                if group_results[i].metadata.filename == group_results[j].metadata.filename:
+                    continue
+                total_pairs += 1
+                if group_results[i].predicted_emotion == group_results[j].predicted_emotion:
+                    total_agreement += 1
+                if group_results[i].is_correct:
+                    conditional_denominator += 1
+                    if group_results[j].is_correct:
+                        conditional_numerator += 1
 
-    return (total_diff / pair_count if pair_count else 0.0), pair_count
+    agreement_rate = total_agreement / total_pairs if total_pairs else 0.0
+    conditional_rate = (
+        conditional_numerator / conditional_denominator if conditional_denominator else 0.0
+    )
+    return agreement_rate, total_pairs, conditional_rate, conditional_denominator
+
+
+def calculate_same_key_better_pairs(
+    results_by_key: Dict[str, List[VideoEvaluationResult]],
+    key_a: str,
+    key_b: str,
+) -> Tuple[List[str], List[str]]:
+    if key_a not in results_by_key or key_b not in results_by_key:
+        return [], []
+
+    lookup_a = _build_filename_lookup(results_by_key[key_a])
+    lookup_b = _build_filename_lookup(results_by_key[key_b])
+    common_filenames = sorted(set(lookup_a.keys()) & set(lookup_b.keys()))
+
+    filenames_by_group: Dict[Tuple[str, str], List[str]] = {}
+    for filename in common_filenames:
+        meta = lookup_a[filename].metadata
+        group_key = (meta.actor, meta.emotion_label)
+        filenames_by_group.setdefault(group_key, []).append(filename)
+
+    agreement_better: List[str] = []
+    conditional_better: List[str] = []
+
+    for filenames in filenames_by_group.values():
+        if len(filenames) < 2:
+            continue
+        filenames = sorted(filenames)
+        for i in range(len(filenames)):
+            for j in range(i + 1, len(filenames)):
+                fname_i = filenames[i]
+                fname_j = filenames[j]
+                res_a_i = lookup_a[fname_i]
+                res_a_j = lookup_a[fname_j]
+                res_b_i = lookup_b[fname_i]
+                res_b_j = lookup_b[fname_j]
+
+                same_agreement_vals = [
+                    1 if res_a_i.predicted_emotion == res_a_j.predicted_emotion else 0,
+                    1 if res_b_i.predicted_emotion == res_b_j.predicted_emotion else 0,
+                ]
+                diff_agreement_vals = [
+                    1 if res_a_i.predicted_emotion == res_b_j.predicted_emotion else 0,
+                    1 if res_b_i.predicted_emotion == res_a_j.predicted_emotion else 0,
+                ]
+                same_agreement = float(np.mean(same_agreement_vals))
+                diff_agreement = float(np.mean(diff_agreement_vals))
+                if same_agreement > diff_agreement:
+                    agreement_better.append(f"{fname_i}|{fname_j}")
+
+                same_cond_vals: List[int] = []
+                if res_a_i.is_correct:
+                    same_cond_vals.append(1 if res_a_j.is_correct else 0)
+                if res_b_i.is_correct:
+                    same_cond_vals.append(1 if res_b_j.is_correct else 0)
+
+                diff_cond_vals: List[int] = []
+                if res_a_i.is_correct:
+                    diff_cond_vals.append(1 if res_b_j.is_correct else 0)
+                if res_b_i.is_correct:
+                    diff_cond_vals.append(1 if res_a_j.is_correct else 0)
+
+                if same_cond_vals and diff_cond_vals:
+                    same_cond = float(np.mean(same_cond_vals))
+                    diff_cond = float(np.mean(diff_cond_vals))
+                    if same_cond > diff_cond:
+                        conditional_better.append(f"{fname_i}|{fname_j}")
+
+    return agreement_better, conditional_better
 
 def aggregate_by_actor(video_results: List[VideoEvaluationResult]) -> Dict[str, Dict]:
     by_actor = {}
@@ -436,7 +321,6 @@ def generate_metrics_report(
     overall_accuracy = calculate_classification_accuracy(video_results)["overall"]
     overall_brier_score = calculate_brier_score(video_results)
     overall_uar = calculate_unweighted_average_recall(video_results)
-    overall_pair_consistency, pair_count = calculate_pair_consistency(video_results)
 
     by_actor = aggregate_by_actor(video_results)
     by_emotion = aggregate_by_emotion(video_results)
@@ -446,8 +330,6 @@ def generate_metrics_report(
         classification_accuracy=overall_accuracy,
         brier_score=overall_brier_score,
         unweighted_average_recall=overall_uar,
-        pair_consistency=overall_pair_consistency,
-        pair_consistency_pair_count=pair_count,
         per_actor_accuracy={actor: data["accuracy"] for actor, data in by_actor.items()},
         per_emotion_accuracy={emotion: data["accuracy"] for emotion, data in by_emotion.items()},
         per_intensity_accuracy={intensity: data["accuracy"] for intensity, data in by_intensity.items()},

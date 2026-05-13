@@ -39,16 +39,10 @@ if __package__ is None or __package__ == "":
     from ravdess_utils import collect_ravdess_videos, collect_keyed_ravdess_videos, emotion_to_one_hot
     from emotion_metrics import (
         VideoEvaluationResult,
-        calculate_different_key_pair_consistency,
-        calculate_different_key_pair_consistency_tv,
-        calculate_pair_consistency,
-        calculate_pair_consistency_tv,
-        calculate_same_key_pair_consistency,
-        calculate_same_key_pair_consistency_tv,
-        calculate_pair_baseline_relative_tv,
-        calculate_same_key_pair_baseline_relative_tv,
-        calculate_different_key_pair_baseline_relative_tv,
-        load_baseline_lookup_from_json,
+        calculate_absolute_confidence_shift_and_flip_rate,
+        calculate_different_key_pairwise_metrics,
+        calculate_same_key_better_pairs,
+        calculate_same_key_pairwise_metrics,
         generate_metrics_report,
     )
     from emotion_inference import EmotionInferenceEngine
@@ -56,16 +50,10 @@ else:
     from .ravdess_utils import collect_ravdess_videos, collect_keyed_ravdess_videos, emotion_to_one_hot
     from emotion_metrics import (
         VideoEvaluationResult,
-        calculate_different_key_pair_consistency,
-        calculate_different_key_pair_consistency_tv,
-        calculate_pair_consistency,
-        calculate_pair_consistency_tv,
-        calculate_same_key_pair_consistency,
-        calculate_same_key_pair_consistency_tv,
-        calculate_pair_baseline_relative_tv,
-        calculate_same_key_pair_baseline_relative_tv,
-        calculate_different_key_pair_baseline_relative_tv,
-        load_baseline_lookup_from_json,
+        calculate_absolute_confidence_shift_and_flip_rate,
+        calculate_different_key_pairwise_metrics,
+        calculate_same_key_better_pairs,
+        calculate_same_key_pairwise_metrics,
         generate_metrics_report,
     )
     from .emotion_inference import EmotionInferenceEngine
@@ -92,20 +80,10 @@ def validate_inputs(args) -> bool:
         if args.num_keys is None or args.num_keys < 1:
             logger.error("--num-keys must be provided and >= 1 when --inferred-keyed-dir is set")
             return False
-        if args.detection_key is None:
-            logger.error("--detection-key must be provided when --inferred-keyed-dir is set")
-            return False
-        if args.detection_key < 1 or args.detection_key > args.num_keys:
-            logger.error("--detection-key must be between 1 and --num-keys")
-            return False
         for key_index in range(1, args.num_keys + 1):
             key_dir = input_dir / f"key{key_index}"
             if not key_dir.exists() or not key_dir.is_dir():
                 logger.error(f"Missing keyed directory: {key_dir}")
-                return False
-        if args.baseline_results_json is not None:
-            if not Path(args.baseline_results_json).exists():
-                logger.error(f"Baseline results JSON not found: {args.baseline_results_json}")
                 return False
     Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
     return True
@@ -119,21 +97,12 @@ def main() -> int:
     parser.add_argument("--output-json", required=True, help="Path to output JSON report")
     parser.add_argument("--inferred-keyed-dir", action="store_true", help="Treat input-dir as containing key subfolders")
     parser.add_argument("--num-keys", type=int, help="Number of key subfolders (key1..keyN)")
-    parser.add_argument("--detection-key", type=int, help="Key index (1..N) for per-clip metrics")
     parser.add_argument("--confidence-threshold", type=float, default=0.7, help="Face detection confidence threshold")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda", help="Inference device")
     parser.add_argument(
         "--filename-prefix",
         default="video_sample{n}_",
         help="Filename prefix template; use {n} for sample id digits",
-    )
-    parser.add_argument(
-        "--baseline-results-json",
-        default=None,
-        help="Optional path to a previously generated unmodified-baseline "
-            "evaluation JSON. When provided, baseline-relative TV deviation "
-            "metrics (difference-in-differences) are also computed and "
-            "reported alongside the existing pair-consistency metrics.",
     )
     args = parser.parse_args()
 
@@ -148,7 +117,6 @@ def main() -> int:
     logger.info("Inferred keyed dir: %s", args.inferred_keyed_dir)
     if args.inferred_keyed_dir:
         logger.info("Num keys: %s", args.num_keys)
-        logger.info("Detection key: %s", args.detection_key)
 
     if not validate_inputs(args):
         return 1
@@ -159,8 +127,6 @@ def main() -> int:
     keyed_metadata = {}
     failed_files = []
     all_video_entries = []
-    detection_key_label = None
-
     if args.inferred_keyed_dir:
         keyed_metadata, failed_files = collect_keyed_ravdess_videos(
             input_dir,
@@ -170,7 +136,6 @@ def main() -> int:
         for key_label, metadata_dict in keyed_metadata.items():
             for video_path, metadata in metadata_dict.items():
                 all_video_entries.append((video_path, metadata, key_label))
-        detection_key_label = f"key{args.detection_key}"
     else:
         metadata_dict, failed_files = collect_ravdess_videos(
             input_dir,
@@ -183,8 +148,6 @@ def main() -> int:
     logger.info("Collected %d total video entries", len(all_video_entries))
     if failed_files:
         logger.warning("Failed to parse %d files", len(failed_files))
-    if detection_key_label is not None:
-        logger.info("Detection key label: %s", detection_key_label)
 
     if not all_video_entries:
         logger.error("No valid RAVDESS videos found")
@@ -237,54 +200,52 @@ def main() -> int:
                 )
             )
 
+    metrics_report_combined = generate_metrics_report(video_results)
+    results_by_key = {}
     if args.inferred_keyed_dir:
-        detection_video_results = [
-            result for result in video_results if result.key_label == detection_key_label
-        ]
-    else:
-        detection_video_results = video_results
-
-    logger.info("Detection key results: %d videos", len(detection_video_results))
-
-    metrics_report = generate_metrics_report(detection_video_results)
-    if args.inferred_keyed_dir:
-        results_by_key = {}
         for key_label in keyed_metadata.keys():
             results_by_key[key_label] = [r for r in video_results if r.key_label == key_label]
-        same_key_consistency, same_key_pairs = calculate_same_key_pair_consistency(results_by_key)
-        different_key_consistency, different_key_pairs = calculate_different_key_pair_consistency(video_results)
-        same_key_consistency_tv, _ = calculate_same_key_pair_consistency_tv(results_by_key)
-        different_key_consistency_tv, _ = calculate_different_key_pair_consistency_tv(video_results)
-    else:
-        overall_pair_consistency, overall_pair_pairs = calculate_pair_consistency(video_results)
-        overall_pair_consistency_tv, _ = calculate_pair_consistency_tv(video_results)
-    
-    baseline_lookup = None
-    same_key_bl_rel_tv = None
-    same_key_bl_rel_pairs = 0
-    diff_key_bl_rel_tv = None
-    diff_key_bl_rel_pairs = 0
-    overall_bl_rel_tv = None
-    overall_bl_rel_pairs = 0
 
-    if args.baseline_results_json:
-        baseline_lookup = load_baseline_lookup_from_json(
-            Path(args.baseline_results_json),
-            args.filename_prefix,
+    per_key_uar_brier = {}
+    for key_label, key_results in results_by_key.items():
+        key_report = generate_metrics_report(key_results)
+        per_key_uar_brier[key_label] = {
+            "unweighted_average_recall_percent": round(key_report.unweighted_average_recall, 2),
+            "brier_score": round(key_report.brier_score, 6),
+        }
+
+    key_a = "key1"
+    key_b = "key2"
+    if args.inferred_keyed_dir and key_a in results_by_key and key_b in results_by_key:
+        absolute_confidence_shift, label_flip_rate, matched_pairs, flip_filenames = (
+            calculate_absolute_confidence_shift_and_flip_rate(results_by_key, key_a, key_b)
         )
-        logger.info("Loaded baseline lookup with %d clip entries", len(baseline_lookup))
-
-        if args.inferred_keyed_dir:
-            same_key_bl_rel_tv, same_key_bl_rel_pairs = (
-                calculate_same_key_pair_baseline_relative_tv(results_by_key, baseline_lookup)
-            )
-            diff_key_bl_rel_tv, diff_key_bl_rel_pairs = (
-                calculate_different_key_pair_baseline_relative_tv(video_results, baseline_lookup)
-            )
-        else:
-            overall_bl_rel_tv, overall_bl_rel_pairs = (
-                calculate_pair_baseline_relative_tv(video_results, baseline_lookup)
-            )
+        same_key_agreement, same_key_pairs, same_key_cond, same_key_cond_pairs = (
+            calculate_same_key_pairwise_metrics(results_by_key)
+        )
+        diff_key_agreement, diff_key_pairs, diff_key_cond, diff_key_cond_pairs = (
+            calculate_different_key_pairwise_metrics(video_results)
+        )
+        same_key_better_agreement, same_key_better_conditional = calculate_same_key_better_pairs(
+            results_by_key,
+            key_a,
+            key_b,
+        )
+    else:
+        absolute_confidence_shift = 0.0
+        label_flip_rate = 0.0
+        matched_pairs = 0
+        flip_filenames = []
+        same_key_agreement = 0.0
+        same_key_pairs = 0
+        same_key_cond = 0.0
+        same_key_cond_pairs = 0
+        diff_key_agreement = 0.0
+        diff_key_pairs = 0
+        diff_key_cond = 0.0
+        diff_key_cond_pairs = 0
+        same_key_better_agreement = []
+        same_key_better_conditional = []
 
     report = {
         "metadata": {
@@ -292,11 +253,9 @@ def main() -> int:
             "input_directory": str(input_dir),
             "total_videos_found": len(all_video_entries),
             "videos_processed": len(video_results),
-            "videos_processed_detection_key": len(detection_video_results),
             "videos_failed": len(failed_videos),
             "inferred_keyed_dir": args.inferred_keyed_dir,
             "num_keys": args.num_keys if args.inferred_keyed_dir else None,
-            "detection_key": detection_key_label,
             "model_checkpoints": {
                 "backbone": str(args.backbone_checkpoint),
                 "lstm": str(args.lstm_checkpoint),
@@ -307,65 +266,53 @@ def main() -> int:
             },
         },
         "overall_metrics": {
-            "classification_accuracy_percent": round(metrics_report.classification_accuracy, 2),
-            "brier_score": round(metrics_report.brier_score, 6),
-            "unweighted_average_recall_percent": round(metrics_report.unweighted_average_recall, 2),
-            "pair_consistency": {},
+            "uar_brier": {
+                "combined": {
+                    "unweighted_average_recall_percent": round(
+                        metrics_report_combined.unweighted_average_recall,
+                        2,
+                    ),
+                    "brier_score": round(metrics_report_combined.brier_score, 6),
+                },
+                "per_key": per_key_uar_brier,
+            },
+            "absolute_confidence_shift": {
+                "average": round(absolute_confidence_shift, 6),
+                "pair_count": matched_pairs,
+                "key_a": key_a if args.inferred_keyed_dir else None,
+                "key_b": key_b if args.inferred_keyed_dir else None,
+            },
+            "label_flip_rate": {
+                "rate": round(label_flip_rate, 6),
+                "pair_count": matched_pairs,
+                "key_a": key_a if args.inferred_keyed_dir else None,
+                "key_b": key_b if args.inferred_keyed_dir else None,
+            },
+            "pairwise_agreement_rate": {
+                "same_key": round(same_key_agreement, 6),
+                "same_key_pairs": same_key_pairs,
+                "different_key": round(diff_key_agreement, 6),
+                "different_key_pairs": diff_key_pairs,
+            },
+            "conditional_accuracy": {
+                "same_key": round(same_key_cond, 6),
+                "same_key_pairs": same_key_cond_pairs,
+                "different_key": round(diff_key_cond, 6),
+                "different_key_pairs": diff_key_cond_pairs,
+            },
+            "label_flip_filenames": flip_filenames,
+            "same_key_better_agreement_pairs": same_key_better_agreement,
+            "same_key_better_conditional_pairs": same_key_better_conditional,
         },
-        "per_actor_metrics": {},
-        "per_emotion_metrics": {},
-        "per_intensity_metrics": {},
         "video_results": [],
         "failed_videos": failed_videos,
     }
 
-    if args.inferred_keyed_dir:
-        report["overall_metrics"]["pair_consistency"] = {
-            "same_key_average": round(same_key_consistency, 6),
-            "same_key_pairs": same_key_pairs,
-            "different_key_average": round(different_key_consistency, 6),
-            "different_key_pairs": different_key_pairs,
-            "same_key_average_tv": round(same_key_consistency_tv, 6),
-            "different_key_average_tv": round(different_key_consistency_tv, 6),
-        }
-        if baseline_lookup is not None:
-            report["overall_metrics"]["pair_consistency"].update({
-                "same_key_baseline_relative_tv": round(same_key_bl_rel_tv, 6),
-                "same_key_baseline_relative_pairs": same_key_bl_rel_pairs,
-                "different_key_baseline_relative_tv": round(diff_key_bl_rel_tv, 6),
-                "different_key_baseline_relative_pairs": diff_key_bl_rel_pairs,
-            })
-    else:
-        report["overall_metrics"]["pair_consistency"] = {
-            "overall_average": round(overall_pair_consistency, 6),
-            "overall_pairs": overall_pair_pairs,
-            "overall_average_tv": round(overall_pair_consistency_tv, 6),
-        }
-        if baseline_lookup is not None:
-            report["overall_metrics"]["pair_consistency"].update({
-                "overall_baseline_relative_tv": round(overall_bl_rel_tv, 6),
-                "overall_baseline_relative_pairs": overall_bl_rel_pairs,
-            })
-
     logger.info(
-        "Metrics computed: accuracy=%.2f, brier=%.6f, uar=%.2f",
-        metrics_report.classification_accuracy,
-        metrics_report.brier_score,
-        metrics_report.unweighted_average_recall,
+        "Metrics computed: brier=%.6f, uar=%.2f",
+        metrics_report_combined.brier_score,
+        metrics_report_combined.unweighted_average_recall,
     )
-
-    for actor, acc in metrics_report.per_actor_accuracy.items():
-        report["per_actor_metrics"][actor] = {
-            "accuracy_percent": round(acc, 2),
-        }
-    for emotion, acc in metrics_report.per_emotion_accuracy.items():
-        report["per_emotion_metrics"][emotion] = {
-            "accuracy_percent": round(acc, 2),
-        }
-    for intensity, acc in metrics_report.per_intensity_accuracy.items():
-        report["per_intensity_metrics"][intensity] = {
-            "accuracy_percent": round(acc, 2),
-        }
 
     for result in video_results:
         report["video_results"].append(
@@ -391,29 +338,15 @@ def main() -> int:
         json.dump(report, handle, indent=2)
 
     logger.info("Report saved to %s", output_json)
-    logger.info("Classification Accuracy: %.2f%%", metrics_report.classification_accuracy)
-    logger.info("Brier Score: %.6f", metrics_report.brier_score)
-    if args.inferred_keyed_dir:
-        logger.info("Pair Consistency (same-key): %.6f", same_key_consistency)
-        logger.info("Pair Consistency (different-key): %.6f", different_key_consistency)
-        logger.info("Pair Consistency TV (same-key): %.6f", same_key_consistency_tv)
-        logger.info("Pair Consistency TV (different-key): %.6f", different_key_consistency_tv)
-        if baseline_lookup is not None:
-            logger.info(
-                "Baseline-relative TV (same-key): %.6f over %d pairs",
-                same_key_bl_rel_tv, same_key_bl_rel_pairs,
-            )
-            logger.info(
-                "Baseline-relative TV (different-key): %.6f over %d pairs",
-                diff_key_bl_rel_tv, diff_key_bl_rel_pairs,
-            )
-    else:
-        logger.info("Pair Consistency: %.6f", overall_pair_consistency)
-        if baseline_lookup is not None:
-            logger.info(
-                "Baseline-relative TV (overall): %.6f over %d pairs",
-                overall_bl_rel_tv, overall_bl_rel_pairs,
-            )
+    logger.info("Combined Brier Score: %.6f", metrics_report_combined.brier_score)
+    logger.info("Combined UAR: %.2f%%", metrics_report_combined.unweighted_average_recall)
+    if args.inferred_keyed_dir and key_a in results_by_key and key_b in results_by_key:
+        logger.info("Absolute confidence shift (%s vs %s): %.6f", key_a, key_b, absolute_confidence_shift)
+        logger.info("Label flip rate (%s vs %s): %.6f", key_a, key_b, label_flip_rate)
+        logger.info("Pairwise agreement (same-key): %.6f", same_key_agreement)
+        logger.info("Pairwise agreement (different-key): %.6f", diff_key_agreement)
+        logger.info("Conditional accuracy (same-key): %.6f", same_key_cond)
+        logger.info("Conditional accuracy (different-key): %.6f", diff_key_cond)
     return 0
 
 
