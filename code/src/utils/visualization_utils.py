@@ -144,7 +144,7 @@ def plot_progress_line_chart(
 
     colors = _build_color_map(emotions)
 
-    fig, ax = plt.subplots(figsize=(6.5, 5))
+    fig, ax = plt.subplots(figsize=(6.0, 4.4))
     x_positions = [0, 1]
     x_labels = ["Clip 1", "Clip 2"]
 
@@ -155,6 +155,8 @@ def plot_progress_line_chart(
             marker="o",
             label=emotion,
             color=colors[emotion],
+            linewidth=2.4,
+            markersize=9,
         )
         delta = v2 - v1
         ax.text(
@@ -163,7 +165,7 @@ def plot_progress_line_chart(
             f"{delta:+.3f}",
             color=colors[emotion],
             va="center",
-            fontsize=14,
+            fontsize=16,
             bbox={
                 "boxstyle": "round,pad=0.2",
                 "facecolor": "white",
@@ -172,12 +174,13 @@ def plot_progress_line_chart(
             },
         )
 
-    ax.set_xticks(x_positions, x_labels)
+    ax.set_xticks(x_positions, x_labels, fontsize=14)
     ax.set_xlim(-0.1, 1.15)
     ax.set_ylim(0.0, 1.0)
-    ax.set_ylabel("Confidence")
+    ax.set_ylabel("Confidence", fontsize=14)
+    ax.tick_params(axis="y", labelsize=13)
 
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 0.98), fontsize=12, frameon=True)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 0.98), fontsize=13, frameon=True)
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
 
     save_dir.mkdir(parents=True, exist_ok=True)
