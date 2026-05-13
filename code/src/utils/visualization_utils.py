@@ -5,9 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# When executed as a script, the utils folder is added to sys.path and can
+# shadow the stdlib logging module. Remove it before importing logging/matplotlib.
+if sys.path and Path(sys.path[0]).name == "utils":
+    sys.path.pop(0)
+
+import logging
 
 import matplotlib.pyplot as plt
 
