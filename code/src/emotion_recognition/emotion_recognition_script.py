@@ -205,6 +205,8 @@ def main() -> int:
     if args.inferred_keyed_dir:
         for key_label in keyed_metadata.keys():
             results_by_key[key_label] = [r for r in video_results if r.key_label == key_label]
+    else:
+        results_by_key = {"unkeyed": video_results}
 
     per_key_uar_brier = {}
     for key_label, key_results in results_by_key.items():
@@ -216,12 +218,19 @@ def main() -> int:
 
     key_a = "key1"
     key_b = "key2"
+    if results_by_key:
+        same_key_agreement, same_key_pairs, same_key_cond, same_key_cond_pairs = (
+            calculate_same_key_pairwise_metrics(results_by_key)
+        )
+    else:
+        same_key_agreement = 0.0
+        same_key_pairs = 0
+        same_key_cond = 0.0
+        same_key_cond_pairs = 0
+
     if args.inferred_keyed_dir and key_a in results_by_key and key_b in results_by_key:
         absolute_confidence_shift, label_flip_rate, matched_pairs, flip_filenames = (
             calculate_absolute_confidence_shift_and_flip_rate(results_by_key, key_a, key_b)
-        )
-        same_key_agreement, same_key_pairs, same_key_cond, same_key_cond_pairs = (
-            calculate_same_key_pairwise_metrics(results_by_key)
         )
         diff_key_agreement, diff_key_pairs, diff_key_cond, diff_key_cond_pairs = (
             calculate_different_key_pairwise_metrics(video_results)
@@ -236,10 +245,6 @@ def main() -> int:
         label_flip_rate = 0.0
         matched_pairs = 0
         flip_filenames = []
-        same_key_agreement = 0.0
-        same_key_pairs = 0
-        same_key_cond = 0.0
-        same_key_cond_pairs = 0
         diff_key_agreement = 0.0
         diff_key_pairs = 0
         diff_key_cond = 0.0
