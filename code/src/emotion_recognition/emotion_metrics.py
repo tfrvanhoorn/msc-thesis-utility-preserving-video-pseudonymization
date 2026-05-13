@@ -119,12 +119,11 @@ def calculate_pair_baseline_relative_tv(
     video_results: List[VideoEvaluationResult],
     baseline_lookup: Dict[ClipIdentity, List[float]],
 ) -> Tuple[float, int]:
-    """Baseline-relative TV deviation, averaged over same-(actor, emotion,
-    intensity) pairs. Pairs whose baseline counterparts are missing in
-    the lookup are skipped."""
-    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    """Baseline-relative TV deviation, averaged over same-actor pairs.
+    Pairs whose baseline counterparts are missing in the lookup are skipped."""
+    groups: Dict[str, List[VideoEvaluationResult]] = {}
     for result in video_results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        group_key = result.metadata.actor
         groups.setdefault(group_key, []).append(result)
 
     total_deviation = 0.0
@@ -257,9 +256,9 @@ def calculate_pair_consistency(
     by_group: Optional[List[str]] = None,
 ) -> Tuple[float, int]:
     results = [r for r in video_results if by_group is None or r.filepath in by_group]
-    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    groups: Dict[str, List[VideoEvaluationResult]] = {}
     for result in results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        group_key = result.metadata.actor
         groups.setdefault(group_key, []).append(result)
 
     total_diff = 0.0
@@ -292,9 +291,9 @@ def calculate_same_key_pair_consistency(
 def calculate_different_key_pair_consistency(
     video_results: List[VideoEvaluationResult],
 ) -> Tuple[float, int]:
-    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    groups: Dict[str, List[VideoEvaluationResult]] = {}
     for result in video_results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        group_key = result.metadata.actor
         groups.setdefault(group_key, []).append(result)
 
     total_diff = 0.0
@@ -323,9 +322,9 @@ def calculate_pair_consistency_tv(
 ) -> Tuple[float, int]:
     """Pair consistency using TV distance over the full predicted distribution."""
     results = [r for r in video_results if by_group is None or r.filepath in by_group]
-    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    groups: Dict[str, List[VideoEvaluationResult]] = {}
     for result in results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        group_key = result.metadata.actor
         groups.setdefault(group_key, []).append(result)
 
     total_diff = 0.0
@@ -359,9 +358,9 @@ def calculate_same_key_pair_consistency_tv(
 def calculate_different_key_pair_consistency_tv(
     video_results: List[VideoEvaluationResult],
 ) -> Tuple[float, int]:
-    groups: Dict[Tuple[str, str, str], List[VideoEvaluationResult]] = {}
+    groups: Dict[str, List[VideoEvaluationResult]] = {}
     for result in video_results:
-        group_key = (result.metadata.actor, result.ground_truth_emotion, result.metadata.intensity)
+        group_key = result.metadata.actor
         groups.setdefault(group_key, []).append(result)
 
     total_diff = 0.0
