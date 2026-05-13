@@ -146,7 +146,7 @@ def plot_progress_line_chart(
 
     fig, ax = plt.subplots(figsize=(9, 5))
     x_positions = [0, 1]
-    x_labels = [clip1_name, clip2_name]
+    x_labels = ["Clip 1", "Clip 2"]
 
     for emotion, v1, v2 in zip(emotions, clip1_values, clip2_values):
         ax.plot(
@@ -163,20 +163,15 @@ def plot_progress_line_chart(
             f"{delta:+.3f}",
             color=colors[emotion],
             va="center",
+            fontsize=12,
         )
 
     ax.set_xticks(x_positions, x_labels)
     ax.set_xlim(-0.1, 1.15)
     ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("Confidence")
-    ax.set_xlabel("Clip")
 
-    title_key_info = ""
-    if clip1_key is not None or clip2_key is not None:
-        title_key_info = f" (key1={clip1_key}, key2={clip2_key})"
-    ax.set_title(f"Emotion Confidence Progress{title_key_info}")
-
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    ax.legend(loc="upper left", fontsize=11, frameon=True)
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
 
     save_dir.mkdir(parents=True, exist_ok=True)
