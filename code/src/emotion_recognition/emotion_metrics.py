@@ -99,6 +99,15 @@ def _group_by_actor_emotion(
     return groups
 
 
+def _group_by_actor(
+    video_results: List[VideoEvaluationResult],
+) -> Dict[str, List[VideoEvaluationResult]]:
+    groups: Dict[str, List[VideoEvaluationResult]] = {}
+    for result in video_results:
+        groups.setdefault(result.metadata.actor, []).append(result)
+    return groups
+
+
 def _build_filename_lookup(
     video_results: List[VideoEvaluationResult],
 ) -> Dict[str, VideoEvaluationResult]:
@@ -174,6 +183,75 @@ def calculate_different_key_pairwise_metrics(
     conditional_denominator = 0
 
     groups = _group_by_actor_emotion(video_results)
+    for group_results in groups.values():
+        if len(group_results) < 2:
+            continue
+        for i in range(len(group_results)):
+            key_i = group_results[i].key_label
+            if key_i is None:
+                continue
+            for j in range(len(group_results)):
+                if i == j:
+                    continue
+                key_j = group_results[j].key_label
+                if key_j is None or key_i == key_j:
+                    continue
+                if group_results[i].metadata.filename == group_results[j].metadata.filename:
+                    continue
+                total_pairs += 1
+                if group_results[i].predicted_emotion == group_results[j].predicted_emotion:
+                    total_agreement += 1
+                if group_results[i].is_correct:
+                    conditional_denominator += 1
+                    if group_results[j].is_correct:
+                        conditional_numerator += 1
+
+    agreement_rate = total_agreement / total_pairs if total_pairs else 0.0
+    conditional_rate = (
+        conditional_numerator / conditional_denominator if conditional_denominator else 0.0
+    )
+    return agreement_rate, total_pairs, conditional_rate, conditional_denominator
+
+
+def calculate_same_key_pairwise_metrics_actor_only(
+    results_by_key: Dict[str, List[VideoEvaluationResult]],
+) -> Tuple[float, int, float, int]:
+    total_agreement = 0
+    total_pairs = 0
+    conditional_numerator = 0
+    conditional_denominator = 0
+
+    for key_results in results_by_key.values():
+        groups = _group_by_actor(key_results)
+        for group_results in groups.values():
+            if len(group_results) < 2:
+                continue
+            for i in range(len(group_results)):
+                for j in range(i + 1, len(group_results)):
+                    total_pairs += 1
+                    if group_results[i].predicted_emotion == group_results[j].predicted_emotion:
+                        total_agreement += 1
+                    if group_results[i].is_correct:
+                        conditional_denominator += 1
+                        if group_results[j].is_correct:
+                            conditional_numerator += 1
+
+    agreement_rate = total_agreement / total_pairs if total_pairs else 0.0
+    conditional_rate = (
+        conditional_numerator / conditional_denominator if conditional_denominator else 0.0
+    )
+    return agreement_rate, total_pairs, conditional_rate, conditional_denominator
+
+
+def calculate_different_key_pairwise_metrics_actor_only(
+    video_results: List[VideoEvaluationResult],
+) -> Tuple[float, int, float, int]:
+    total_agreement = 0
+    total_pairs = 0
+    conditional_numerator = 0
+    conditional_denominator = 0
+
+    groups = _group_by_actor(video_results)
     for group_results in groups.values():
         if len(group_results) < 2:
             continue

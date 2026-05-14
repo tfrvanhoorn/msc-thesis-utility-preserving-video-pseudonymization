@@ -41,8 +41,10 @@ if __package__ is None or __package__ == "":
         VideoEvaluationResult,
         calculate_absolute_confidence_shift_and_flip_rate,
         calculate_different_key_pairwise_metrics,
+        calculate_different_key_pairwise_metrics_actor_only,
         calculate_same_key_better_pairs,
         calculate_same_key_pairwise_metrics,
+        calculate_same_key_pairwise_metrics_actor_only,
         generate_metrics_report,
     )
     from emotion_inference import EmotionInferenceEngine
@@ -52,8 +54,10 @@ else:
         VideoEvaluationResult,
         calculate_absolute_confidence_shift_and_flip_rate,
         calculate_different_key_pairwise_metrics,
+        calculate_different_key_pairwise_metrics_actor_only,
         calculate_same_key_better_pairs,
         calculate_same_key_pairwise_metrics,
+        calculate_same_key_pairwise_metrics_actor_only,
         generate_metrics_report,
     )
     from .emotion_inference import EmotionInferenceEngine
@@ -222,11 +226,18 @@ def main() -> int:
         same_key_agreement, same_key_pairs, same_key_cond, same_key_cond_pairs = (
             calculate_same_key_pairwise_metrics(results_by_key)
         )
+        actor_only_same_key_agreement, actor_only_same_key_pairs, actor_only_same_key_cond, actor_only_same_key_cond_pairs = (
+            calculate_same_key_pairwise_metrics_actor_only(results_by_key)
+        )
     else:
         same_key_agreement = 0.0
         same_key_pairs = 0
         same_key_cond = 0.0
         same_key_cond_pairs = 0
+        actor_only_same_key_agreement = 0.0
+        actor_only_same_key_pairs = 0
+        actor_only_same_key_cond = 0.0
+        actor_only_same_key_cond_pairs = 0
 
     if args.inferred_keyed_dir and key_a in results_by_key and key_b in results_by_key:
         absolute_confidence_shift, label_flip_rate, matched_pairs, flip_filenames = (
@@ -234,6 +245,9 @@ def main() -> int:
         )
         diff_key_agreement, diff_key_pairs, diff_key_cond, diff_key_cond_pairs = (
             calculate_different_key_pairwise_metrics(video_results)
+        )
+        actor_only_diff_key_agreement, actor_only_diff_key_pairs, actor_only_diff_key_cond, actor_only_diff_key_cond_pairs = (
+            calculate_different_key_pairwise_metrics_actor_only(video_results)
         )
         same_key_better_agreement, same_key_better_conditional = calculate_same_key_better_pairs(
             results_by_key,
@@ -249,6 +263,10 @@ def main() -> int:
         diff_key_pairs = 0
         diff_key_cond = 0.0
         diff_key_cond_pairs = 0
+        actor_only_diff_key_agreement = 0.0
+        actor_only_diff_key_pairs = 0
+        actor_only_diff_key_cond = 0.0
+        actor_only_diff_key_cond_pairs = 0
         same_key_better_agreement = []
         same_key_better_conditional = []
 
@@ -304,6 +322,10 @@ def main() -> int:
                 "same_key_pairs": same_key_cond_pairs,
                 "different_key": round(diff_key_cond, 6),
                 "different_key_pairs": diff_key_cond_pairs,
+                "actor_only_same_key": round(actor_only_same_key_cond, 6),
+                "actor_only_same_key_pairs": actor_only_same_key_cond_pairs,
+                "actor_only_different_key": round(actor_only_diff_key_cond, 6),
+                "actor_only_different_key_pairs": actor_only_diff_key_cond_pairs,
             },
             "label_flip_filenames": flip_filenames,
             "same_key_better_agreement_pairs": same_key_better_agreement,
