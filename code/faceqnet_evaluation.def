@@ -1,0 +1,62 @@
+Bootstrap: docker
+From: python:3.10-slim-bookworm
+
+%files
+    score_faceqnet.py /opt/code/score_faceqnet.py
+
+%post
+    set -eux
+
+    # Minimal system libs for opencv-headless + downloads
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+    # Python deps — minimum stack to run FaceQnet end-to-end
+    pip install --no-cache-dir --upgrade pip
+    pip install --no-cache-dir \
+        "tensorflow-cpu==2.15.1" \
+        "numpy>=1.23,<2.0" \
+        "opencv-python-headless==4.10.0.84" \
+        "mtcnn==0.1.1" \
+        "scipy>=1.10" \
+        "tqdm"
+
+    # Bake the pretrained model into the image so runtime is offline-capable
+    mkdir -p /opt/models
+    curl -fL --retry 3 -o /opt/models/FaceQnet_v1.h5 \
+        https://github.com/uam-biometrics/FaceQnet/releases/download/v1.0/FaceQnet_v1.h5
+
+    # Sanity check: model file is non-empty
+    test -s /opt/models/FaceQnet_v1.h5
+
+%environment
+    export TF_CPP_MIN_LOG_LEVEL=3
+    export PYTHONUNBUFFERED=1
+    export FACEQNET_MODEL=/opt/models/FaceQnet_v1.h5
+
+%runscript
+    exec python /opt/code/score_faceqnet.py "$@"
+
+%labels
+    Purpose FaceQnet face realism evaluation for pseudonymization pipelines
+    Python  3.10
+    TF      2.15.1 (CPU)
+
+%help
+    FaceQnet realism/quality evaluation container.
+
+    Build:
+        apptainer build faceqnet.sif faceqnet.def
+
+    Score one folder:
+        apptainer run --bind /data:/data faceqnet.sif \
+            --folder /data/voxceleb/pipeline_A --recursive \
+            --out /data/results/A.csv
+
+    Compare two pipelines (paired Wilcoxon on matching filenames):
+        apptainer run --bind /data:/data faceqnet.sif \
+            --compare /data/voxceleb/pipeline_A /data/voxceleb/pipeline_B \
+            --recursive --out /data/results/A_vs_B.csv
