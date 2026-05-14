@@ -275,7 +275,6 @@ class MetricsAccumulator:
         landmark_distance = self.landmark_distance_sum / float(self.landmark_pairs_valid) if self.landmark_pairs_valid else None
         lpips_distance = self.lpips_distance_sum / float(self.lpips_pairs_valid) if self.lpips_pairs_valid else None
         ssim_similarity = self.ssim_similarity_sum / float(self.ssim_pairs_valid) if self.ssim_pairs_valid else None
-
         anonymization_total_count = int(self.anonymization_total) if self.anonymization_enabled else 0
         diversity_total_count = int(self.diversity_total) if self.diversity_enabled else 0
 

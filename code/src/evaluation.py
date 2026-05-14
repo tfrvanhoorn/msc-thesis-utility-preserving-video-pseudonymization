@@ -232,7 +232,6 @@ def _build_chunk_score_snapshot(metrics: MetricsAccumulator, enabled: set[str]) 
         if metrics.ssim_pairs_valid
         else None
     )
-
     return {
         "detection_rate": detection_rate if "detection" in enabled else None,
         "detection_confidence": detection_confidence if "detection" in enabled else None,
@@ -1202,7 +1201,6 @@ def main() -> None:
         valid_pairs=summary["perceptual_utility"]["counts"]["ssim_valid_pairs"],
         invalid_pairs=summary["perceptual_utility"]["counts"]["ssim_invalid_pairs"],
     )
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report_path = args.output_dir / "folder_eval_report.json"
     serialized_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}

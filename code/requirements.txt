@@ -48,8 +48,3 @@ peft==0.10.0          # Pinned: Compatible with huggingface-hub==0.22.2
 # torch==2.4.1+cu118
 # torchvision==0.19.1+cu118
 # torchaudio==2.4.1+cu118
-
-# --- FaceQnet (Quality Assessment) Requirements ---
-tensorflow-cpu==2.13.1   # Last TF version supporting Python 3.8; CPU avoids CUDA conflict with onnxruntime-gpu 1.14
-# Keras 2.13.1 ships bundled with TF 2.13 — no separate install needed
-requests>=2.31           # For the model download helper (likely already present transitively)
