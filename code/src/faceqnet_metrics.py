@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -32,14 +33,12 @@ class FaceQnetEvaluator:
         self,
         *,
         model_path: Path,
-        device: torch.device | str,
+        device: object | None = None,
         crop_margin: float = 0.1,
         min_face_confidence: float = 0.9,
     ) -> None:
         if load_model is None:
             raise ImportError("FaceQnet metric requested but tensorflow is not installed")
-        if MTCNN is None:
-            raise ImportError("FaceQnet metric requested but mtcnn is not installed")
         if cv2 is None:
             raise ImportError("FaceQnet metric requested but opencv-python-headless is not installed")
 
@@ -48,8 +47,12 @@ class FaceQnetEvaluator:
             raise FileNotFoundError(f"FaceQnet model not found at: {model_path}")
 
         self.model = load_model(str(model_path), compile=False)
-        self.device = str(device)
-        self.detector = MTCNN()
+        self.device = str(device) if device is not None else None
+        if MTCNN is None:
+            logging.warning("FaceQnet MTCNN detector unavailable; scoring full frames")
+            self.detector = None
+        else:
+            self.detector = MTCNN()
         self.crop_margin = float(crop_margin)
         self.min_face_confidence = float(min_face_confidence)
 
@@ -59,12 +62,15 @@ class FaceQnetEvaluator:
 
         image = self._to_uint8_rgb(frame)
         bbox = self._detect_best_face(image)
+        if bbox is None and self.detector is not None:
+            return None
         if bbox is None:
-            return None
-        x1, y1, x2, y2 = bbox
-        crop = image[y1:y2, x1:x2]
-        if crop.size == 0:
-            return None
+            crop = image
+        else:
+            x1, y1, x2, y2 = bbox
+            crop = image[y1:y2, x1:x2]
+            if crop.size == 0:
+                return None
 
         resized = cv2.resize(crop, self.INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
         input_batch = resized.astype(np.float32)[np.newaxis, ...]
@@ -72,6 +78,8 @@ class FaceQnetEvaluator:
         return float(np.clip(raw, 0.0, 1.0))
 
     def _detect_best_face(self, image_rgb: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        if self.detector is None:
+            return None
         faces = self.detector.detect_faces(image_rgb)
         if not faces:
             return None
