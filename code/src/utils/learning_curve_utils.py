@@ -4,18 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
-import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
 # When executed as a script, the utils folder may be added to sys.path and can
-# shadow the stdlib logging module. Remove any such entries before imports.
+# shadow the stdlib logging module. Remove the script directory before imports.
+_utils_dir = Path(__file__).resolve().parent
 sys.path = [
-    entry for entry in sys.path if Path(entry).name != "utils"
+    entry
+    for entry in sys.path
+    if Path(entry).resolve() != _utils_dir
 ]
+
+if "logging" in sys.modules and not hasattr(sys.modules["logging"], "getLogger"):
+    del sys.modules["logging"]
+
+logging = importlib.import_module("logging")
 
 import matplotlib.pyplot as plt
 
