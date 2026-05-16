@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
-# When executed as a script, the utils folder is added to sys.path and can
-# shadow the stdlib logging module. Remove it before importing logging/matplotlib.
-if sys.path and Path(sys.path[0]).name == "utils":
-    sys.path.pop(0)
+# When executed as a script, the utils folder may be added to sys.path and can
+# shadow the stdlib logging module. Remove any such entries before imports.
+sys.path = [
+    entry for entry in sys.path if Path(entry).name != "utils"
+]
 
 import matplotlib.pyplot as plt
 
