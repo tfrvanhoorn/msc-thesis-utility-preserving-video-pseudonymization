@@ -39,18 +39,34 @@ class LossSeries:
     values: List[float]
 
 
+@dataclass(frozen=True)
+class RunLossData:
+    label: str
+    epochs: List[int]
+    components: dict[str, List[float]]
+    weighted_components: dict[str, List[float]]
+    w_reg: List[float]
+    weighted_w_reg: List[float]
+    sum_components: List[float]
+    weighted_sum_components: List[float]
+
+
 def _load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
-def _collect_loss_series(input_dir: Path, label: str) -> Tuple[LossSeries, LossSeries]:
+def _collect_run_loss_data(input_dir: Path, label: str) -> RunLossData:
     json_paths = sorted(input_dir.glob(JSON_GLOB))
     if not json_paths:
         raise FileNotFoundError(f"No JSON files matching {JSON_GLOB} in {input_dir}")
 
+    components_by_epoch: dict[int, dict[str, float]] = {}
+    weighted_by_epoch: dict[int, dict[str, float]] = {}
     w_reg_by_epoch: dict[int, float] = {}
+    weighted_w_reg_by_epoch: dict[int, float] = {}
     sum_by_epoch: dict[int, float] = {}
+    weighted_sum_by_epoch: dict[int, float] = {}
 
     for json_path in json_paths:
         payload = _load_json(json_path)
@@ -69,31 +85,70 @@ def _collect_loss_series(input_dir: Path, label: str) -> Tuple[LossSeries, LossS
             logger.warning("Skipping %s: missing val_loss_components", json_path)
             continue
 
+        config = payload.get("config")
+        if not isinstance(config, dict):
+            config = {}
+
         try:
+            ano = float(val_components["ano"])
+            syn = float(val_components["syn"])
+            div = float(val_components["div"])
+            dif = float(val_components["dif"])
             w_reg = float(val_components["w_reg"])
-            sum_value = (
-                float(val_components["ano"])
-                + float(val_components["syn"])
-                + float(val_components["div"])
-                + float(val_components["dif"])
-            )
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning("Skipping %s: invalid loss components (%s)", json_path, exc)
             continue
 
+        try:
+            lambda_ano = float(config.get("lambda_ano", 1.0))
+            lambda_syn = float(config.get("lambda_syn", 1.0))
+            lambda_div = float(config.get("lambda_div", 1.0))
+            lambda_dif = float(config.get("lambda_dif", 1.0))
+            lambda_w_reg = float(config.get("lambda_w_reg", 1.0))
+        except (TypeError, ValueError) as exc:
+            logger.warning("Skipping %s: invalid lambda config (%s)", json_path, exc)
+            continue
+
+        components_by_epoch[epoch_int] = {
+            "ano": ano,
+            "syn": syn,
+            "div": div,
+            "dif": dif,
+        }
+        weighted_by_epoch[epoch_int] = {
+            "ano": ano * lambda_ano,
+            "syn": syn * lambda_syn,
+            "div": div * lambda_div,
+            "dif": dif * lambda_dif,
+        }
         w_reg_by_epoch[epoch_int] = w_reg
-        sum_by_epoch[epoch_int] = sum_value
+        weighted_w_reg_by_epoch[epoch_int] = w_reg * lambda_w_reg
+        sum_by_epoch[epoch_int] = ano + syn + div + dif
+        weighted_sum_by_epoch[epoch_int] = (
+            ano * lambda_ano + syn * lambda_syn + div * lambda_div + dif * lambda_dif
+        )
 
     if not w_reg_by_epoch:
         raise ValueError(f"No valid validation loss data found in {input_dir}")
 
     epochs_sorted = sorted(w_reg_by_epoch.keys())
-    w_reg_values = [w_reg_by_epoch[epoch] for epoch in epochs_sorted]
-    sum_values = [sum_by_epoch[epoch] for epoch in epochs_sorted]
+    components: dict[str, List[float]] = {"ano": [], "syn": [], "div": [], "dif": []}
+    weighted_components: dict[str, List[float]] = {"ano": [], "syn": [], "div": [], "dif": []}
 
-    return (
-        LossSeries(label=label, epochs=epochs_sorted, values=w_reg_values),
-        LossSeries(label=label, epochs=epochs_sorted, values=sum_values),
+    for epoch in epochs_sorted:
+        for key in components:
+            components[key].append(components_by_epoch[epoch][key])
+            weighted_components[key].append(weighted_by_epoch[epoch][key])
+
+    return RunLossData(
+        label=label,
+        epochs=epochs_sorted,
+        components=components,
+        weighted_components=weighted_components,
+        w_reg=[w_reg_by_epoch[epoch] for epoch in epochs_sorted],
+        weighted_w_reg=[weighted_w_reg_by_epoch[epoch] for epoch in epochs_sorted],
+        sum_components=[sum_by_epoch[epoch] for epoch in epochs_sorted],
+        weighted_sum_components=[weighted_sum_by_epoch[epoch] for epoch in epochs_sorted],
     )
 
 
@@ -108,6 +163,7 @@ def _plot_series(
     y_label: str,
     save_path: Path,
     output_format: str,
+    y_min_zero: bool,
 ) -> None:
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
     palette = plt.get_cmap("tab10")
@@ -129,8 +185,49 @@ def _plot_series(
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     ax.legend(loc="best", frameon=True)
 
-    all_values = [value for series in series_list for value in series.values]
-    _set_loss_axis(ax, all_values)
+    if y_min_zero:
+        all_values = [value for series in series_list for value in series.values]
+        _set_loss_axis(ax, all_values)
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path.with_suffix(f".{output_format}"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_component_series(
+    runs: List[RunLossData],
+    components: List[str],
+    y_label: str,
+    save_path: Path,
+    output_format: str,
+    use_weighted: bool,
+) -> None:
+    fig, ax = plt.subplots(figsize=(7.6, 4.8))
+    palette = plt.get_cmap("tab10")
+
+    line_styles = ["-", "--"]
+
+    for run_idx, run in enumerate(runs):
+        style = line_styles[0] if run_idx == 0 else line_styles[1]
+        data = run.weighted_components if use_weighted else run.components
+        for comp_idx, comp in enumerate(components):
+            color = palette(comp_idx % 10)
+            ax.plot(
+                run.epochs,
+                data[comp],
+                marker="o",
+                linewidth=2.0,
+                markersize=5,
+                label=f"{run.label} | {comp}",
+                color=color,
+                linestyle=style,
+            )
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(y_label)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.legend(loc="best", frameon=True, ncol=2)
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
@@ -176,31 +273,81 @@ def main() -> None:
     if len(input_dirs) != len(labels):
         raise ValueError("--input_dir and --label must be provided the same number of times")
 
-    w_reg_series_list: List[LossSeries] = []
-    sum_series_list: List[LossSeries] = []
+    runs: List[RunLossData] = []
 
     for input_dir, label in zip(input_dirs, labels):
         if not input_dir.exists():
             raise FileNotFoundError(f"Input directory not found: {input_dir}")
-        w_reg_series, sum_series = _collect_loss_series(input_dir, label)
-        w_reg_series_list.append(w_reg_series)
-        sum_series_list.append(sum_series)
+        runs.append(_collect_run_loss_data(input_dir, label))
 
     save_dir = Path(args.save_dir)
     w_reg_path = save_dir / "loss_curve_w_reg"
+    w_reg_weighted_path = save_dir / "loss_curve_w_reg_weighted"
     sum_path = save_dir / "loss_curve_sum_ano_syn_div_dif"
+    sum_weighted_path = save_dir / "loss_curve_sum_ano_syn_div_dif_weighted"
+    component_path = save_dir / "loss_curve_components"
+    component_weighted_path = save_dir / "loss_curve_components_weighted"
+
+    w_reg_series_list = [
+        LossSeries(label=run.label, epochs=run.epochs, values=run.w_reg) for run in runs
+    ]
+    w_reg_weighted_series_list = [
+        LossSeries(label=run.label, epochs=run.epochs, values=run.weighted_w_reg)
+        for run in runs
+    ]
+    sum_series_list = [
+        LossSeries(label=run.label, epochs=run.epochs, values=run.sum_components)
+        for run in runs
+    ]
+    sum_weighted_series_list = [
+        LossSeries(label=run.label, epochs=run.epochs, values=run.weighted_sum_components)
+        for run in runs
+    ]
 
     _plot_series(
         w_reg_series_list,
         y_label="Validation W-Reg Loss",
         save_path=w_reg_path,
         output_format=args.output_format,
+        y_min_zero=True,
+    )
+    _plot_series(
+        w_reg_weighted_series_list,
+        y_label="Validation Weighted W-Reg Loss",
+        save_path=w_reg_weighted_path,
+        output_format=args.output_format,
+        y_min_zero=True,
     )
     _plot_series(
         sum_series_list,
         y_label="Validation Anon+Syn+Div+Dif Loss",
         save_path=sum_path,
         output_format=args.output_format,
+        y_min_zero=False,
+    )
+    _plot_series(
+        sum_weighted_series_list,
+        y_label="Validation Weighted Anon+Syn+Div+Dif Loss",
+        save_path=sum_weighted_path,
+        output_format=args.output_format,
+        y_min_zero=False,
+    )
+
+    _plot_component_series(
+        runs,
+        components=["ano", "syn", "div", "dif"],
+        y_label="Validation Component Loss",
+        save_path=component_path,
+        output_format=args.output_format,
+        use_weighted=False,
+    )
+    _plot_component_series(
+        runs,
+        components=["ano", "syn", "div", "dif"],
+        y_label="Validation Weighted Component Loss",
+        save_path=component_weighted_path,
+        output_format=args.output_format,
+        use_weighted=True,
     )
 
     logger.info("Saved plots to %s", save_dir)
