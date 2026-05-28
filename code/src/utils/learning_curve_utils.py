@@ -205,6 +205,7 @@ def _plot_component_series(
     save_path: Path,
     output_format: str,
     use_weighted: bool,
+    title: str | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(7.6, 4.8))
     palette = plt.get_cmap("tab10")
@@ -229,6 +230,8 @@ def _plot_component_series(
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel(y_label)
+    if title:
+        ax.set_title(title)
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     ax.legend(loc="best", frameon=True, ncol=2)
 
@@ -321,6 +324,7 @@ def main() -> None:
         save_path=w_reg_weighted_path,
         output_format=args.output_format,
         y_min_zero=True,
+        title="Validation Weighted Regularization Loss",
     )
     _plot_series(
         sum_series_list,
@@ -328,6 +332,7 @@ def main() -> None:
         save_path=sum_path,
         output_format=args.output_format,
         y_min_zero=False,
+        title="Validation Combined Identity Loss",
     )
     _plot_series(
         sum_weighted_series_list,
@@ -345,6 +350,7 @@ def main() -> None:
         save_path=component_path,
         output_format=args.output_format,
         use_weighted=False,
+        title="Validation Component Loss",
     )
     _plot_component_series(
         runs,
@@ -353,6 +359,7 @@ def main() -> None:
         save_path=component_weighted_path,
         output_format=args.output_format,
         use_weighted=True,
+        title="Validation Weighted Component Loss",
     )
 
     logger.info("Saved plots to %s", save_dir)
