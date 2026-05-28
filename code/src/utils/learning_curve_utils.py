@@ -164,6 +164,7 @@ def _plot_series(
     save_path: Path,
     output_format: str,
     y_min_zero: bool,
+    title: str | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
     palette = plt.get_cmap("tab10")
@@ -182,6 +183,8 @@ def _plot_series(
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel(y_label)
+    if title:
+        ax.set_title(title)
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     ax.legend(loc="best", frameon=True)
 
@@ -310,6 +313,7 @@ def main() -> None:
         save_path=w_reg_path,
         output_format=args.output_format,
         y_min_zero=True,
+        title="Validation Regularization Loss",
     )
     _plot_series(
         w_reg_weighted_series_list,
@@ -331,6 +335,7 @@ def main() -> None:
         save_path=sum_weighted_path,
         output_format=args.output_format,
         y_min_zero=False,
+        title="Validation Combined Identity Loss",
     )
 
     _plot_component_series(
