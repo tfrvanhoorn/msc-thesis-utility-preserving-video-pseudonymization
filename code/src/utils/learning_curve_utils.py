@@ -212,6 +212,13 @@ def _plot_component_series(
 
     line_styles = ["-", "--"]
 
+    display_names = {
+        "ano": "ano",
+        "syn": "Con",
+        "div": "div",
+        "dif": "dif",
+    }
+
     for run_idx, run in enumerate(runs):
         style = line_styles[0] if run_idx == 0 else line_styles[1]
         data = run.weighted_components if use_weighted else run.components
@@ -223,7 +230,7 @@ def _plot_component_series(
                 marker="o",
                 linewidth=2.0,
                 markersize=5,
-                label=f"{run.label} | {comp}",
+                label=f"{run.label} | {display_names.get(comp, comp)}",
                 color=color,
                 linestyle=style,
             )
@@ -316,7 +323,7 @@ def main() -> None:
         save_path=w_reg_path,
         output_format=args.output_format,
         y_min_zero=True,
-        title="Validation Regularization Loss",
+        title="Learning curve for Validation Regularization Loss over 10 epochs",
     )
     _plot_series(
         w_reg_weighted_series_list,
@@ -324,23 +331,23 @@ def main() -> None:
         save_path=w_reg_weighted_path,
         output_format=args.output_format,
         y_min_zero=True,
-        title="Validation Weighted Regularization Loss",
+        title="Learning curve for Validation Weighted Regularization Loss over 10 epochs",
     )
     _plot_series(
         sum_series_list,
-        y_label="Validation Anon+Syn+Div+Dif Loss",
+        y_label="Validation Anon+Con+Div+Dif Loss",
         save_path=sum_path,
         output_format=args.output_format,
         y_min_zero=False,
-        title="Validation Combined Identity Loss",
+        title="Learning curve for Validation Combined Identity Loss over 10 epochs",
     )
     _plot_series(
         sum_weighted_series_list,
-        y_label="Validation Weighted Anon+Syn+Div+Dif Loss",
+        y_label="Validation Weighted Anon+Con+Div+Dif Loss",
         save_path=sum_weighted_path,
         output_format=args.output_format,
         y_min_zero=False,
-        title="Validation Combined Identity Loss",
+        title="Learning curve for Validation Weighted Combined Identity Loss over 10 epochs",
     )
 
     _plot_component_series(
@@ -350,7 +357,7 @@ def main() -> None:
         save_path=component_path,
         output_format=args.output_format,
         use_weighted=False,
-        title="Validation Component Loss",
+        title="Learning curve for Validation Component Loss over 10 epochs",
     )
     _plot_component_series(
         runs,
@@ -359,7 +366,7 @@ def main() -> None:
         save_path=component_weighted_path,
         output_format=args.output_format,
         use_weighted=True,
-        title="Validation Weighted Component Loss",
+        title="Learning curve for Validation Weighted Component Loss over 10 epochs",
     )
 
     logger.info("Saved plots to %s", save_dir)
