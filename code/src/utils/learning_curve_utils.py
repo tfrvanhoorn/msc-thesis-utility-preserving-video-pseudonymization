@@ -319,54 +319,54 @@ def main() -> None:
 
     _plot_series(
         w_reg_series_list,
-        y_label="Validation W-Reg Loss",
+        y_label="regularization loss",
         save_path=w_reg_path,
         output_format=args.output_format,
         y_min_zero=True,
-        title="Learning curve for Validation Regularization Loss over 10 epochs",
+        title="learning curve for regularization loss over 10 epochs",
     )
     _plot_series(
         w_reg_weighted_series_list,
-        y_label="Validation Weighted W-Reg Loss",
+        y_label="weighted regularization loss",
         save_path=w_reg_weighted_path,
         output_format=args.output_format,
         y_min_zero=True,
-        title="Learning curve for Validation Weighted Regularization Loss over 10 epochs",
+        title="learning curve for weighted regularization loss over 10 epochs",
     )
     _plot_series(
         sum_series_list,
-        y_label="Validation Anon+Con+Div+Dif Loss",
+        y_label="combined identity loss",
         save_path=sum_path,
         output_format=args.output_format,
         y_min_zero=False,
-        title="Learning curve for Validation Combined Identity Loss over 10 epochs",
+        title="learning curve for combined identity loss over 10 epochs",
     )
     _plot_series(
         sum_weighted_series_list,
-        y_label="Validation Weighted Anon+Con+Div+Dif Loss",
+        y_label="weighted combined identity loss",
         save_path=sum_weighted_path,
         output_format=args.output_format,
         y_min_zero=False,
-        title="Learning curve for Validation Weighted Combined Identity Loss over 10 epochs",
+        title="learning curve for weighted combined identity loss over 10 epochs",
     )
 
     _plot_component_series(
         runs,
         components=["ano", "syn", "div", "dif"],
-        y_label="Validation Component Loss",
+        y_label="component loss",
         save_path=component_path,
         output_format=args.output_format,
         use_weighted=False,
-        title="Learning curve for Validation Component Loss over 10 epochs",
+        title="learning curve for component loss over 10 epochs",
     )
     _plot_component_series(
         runs,
         components=["ano", "syn", "div", "dif"],
-        y_label="Validation Weighted Component Loss",
+        y_label="weighted component loss",
         save_path=component_weighted_path,
         output_format=args.output_format,
         use_weighted=True,
-        title="Learning curve for Validation Weighted Component Loss over 10 epochs",
+        title="learning curve for weighted component loss over 10 epochs",
     )
 
     logger.info("Saved plots to %s", save_dir)
