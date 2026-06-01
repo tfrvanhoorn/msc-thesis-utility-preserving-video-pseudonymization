@@ -8,7 +8,7 @@ In the thesis experiments, SKPG-BB and SKPG-Reenact use the same trained pipelin
 
 The `thesis/` folder is kept for reference only. The actual writing assets were maintained locally and in Google Drive. The `notes/` folder was only lightly used, since most notes lived in external apps or on paper.
 
-This repository contains the full engineering workflow for utility-preserving face anonymization in video:
+This repository contains the full engineering workflow for utility-preserving face pseudonymization in video:
 
 1. Prepare datasets into a canonical naming contract.
 2. Train the KFAAR projector model.
