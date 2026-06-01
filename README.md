@@ -1,5 +1,13 @@
 # MSc Thesis: Utility-Preserving Video Anonymization
 
+This repository accompanies the master's thesis "Preserving Video Utility via Consistent Subject- and Key derived Pseudonyms combined with Face Swapping" and documents the engineering workflow for the proposed SKPG-Swap framework.
+
+SKPG (Subject- and Key-derived Pseudonym Generator) is the trainable component. In this codebase it is primarily implemented as the KFAAR projector, so some pipeline naming predates the final thesis name.
+
+In the thesis experiments, SKPG-BB and SKPG-Reenact use the same trained pipeline with different inference rendering modes: `crop_bbox` and `faceadapter_reenactment`. The proposed SKPG-Swap method uses `faceadapter_swap`.
+
+The `thesis/` folder is kept for reference only. The actual writing assets were maintained locally and in Google Drive. The `notes/` folder was only lightly used, since most notes lived in external apps or on paper.
+
 This repository contains the full engineering workflow for utility-preserving face anonymization in video:
 
 1. Prepare datasets into a canonical naming contract.
@@ -17,14 +25,13 @@ This repository contains the full engineering workflow for utility-preserving fa
 ## Containers (Apptainer)
 
 All experiments in this project were run inside Apptainer containers built from the definition files in `code/`.
-Use CUDA 11.8 for training, inference, evaluation, and action recognition. Use the dedicated emotion container for emotion recognition. A CPU-only FaceQnet container is also provided.
+Use CUDA 11.8 for training, inference, evaluation, and action recognition. Use the dedicated emotion container for emotion recognition.
 
 ### Build Containers
 
 ```bash
 apptainer build cuda11.8.sif ./code/cuda11.8.def
 apptainer build emotion_recognition.sif ./code/emotion_recognition.def
-apptainer build faceqnet_evaluation.sif ./code/faceqnet_evaluation.def
 ```
 
 ### Run Containers (GPU)
@@ -34,17 +41,10 @@ apptainer exec --nv cuda11.8.sif python --version
 apptainer exec --nv emotion_recognition.sif python --version
 ```
 
-### Run Containers (CPU)
-
-```bash
-apptainer exec faceqnet_evaluation.sif python --version
-```
-
 ### Which Container To Use
 
 - Training, inference, evaluation, action recognition: `cuda11.8.sif`
 - Emotion recognition: `emotion_recognition.sif`
-- Optional FaceQnet-only evaluation: `faceqnet_evaluation.sif`
 
 ## Dataset Preparation (Canonical Naming Contract)
 
@@ -354,9 +354,9 @@ apptainer exec --nv emotion_recognition.sif python ./code/src/emotion_recognitio
 
 - JSON report with per-video predictions, key-wise summaries, confidence shifts, and agreement metrics.
 
-## TODO: Pretrained Models
+## Pretrained Models
 
-- TODO: Add download links for StyleGAN2 checkpoints, projector checkpoints, and emotion recognition backbone/LSTM weights.
+Pretrained StyleGAN2 checkpoints, projector checkpoints, and emotion recognition backbone/LSTM weights are not bundled with this repository. Provide your own paths when running training, inference, or emotion recognition.
 
 ## End-To-End Quick Flow
 
