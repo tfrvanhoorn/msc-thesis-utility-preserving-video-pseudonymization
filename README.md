@@ -1,4 +1,4 @@
-# MSc Thesis: Utility-Preserving Video Anonymization
+# MSc Thesis: Utility-Preserving Video Pseudonymization
 
 This repository accompanies the master's thesis "Preserving Video Utility via Consistent Subject- and Key derived Pseudonyms combined with Face Swapping" and documents the engineering workflow for the proposed SKPG-Swap framework.
 
