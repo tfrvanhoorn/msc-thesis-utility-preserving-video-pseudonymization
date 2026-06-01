@@ -1,6 +1,6 @@
-# MSc Thesis: Utility-Preserving Video Anonymization
+# MSc Thesis: Utility-Preserving Video Pseudonymization
 
-This repository contains the full engineering workflow for utility-preserving face anonymization in video:
+This repository contains the full engineering workflow for utility-preserving face pseudonymization in video:
 
 1. Prepare datasets into a canonical naming contract.
 2. Train the KFAAR projector model.
