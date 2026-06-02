@@ -26,7 +26,7 @@ from losses import cosine_loss
 logger = logging.getLogger(__name__)
 
 @dataclass
-class KfaarResult:
+class SKPGResult:
     detections: Sequence[Detection]
     aligned_faces: Sequence[torch.Tensor]
     real_embeddings: torch.Tensor
@@ -44,7 +44,7 @@ class InferenceBatchResult:
     output_frames: list[torch.Tensor]
     stats: dict[str, int]
 
-class KfaarPipeline:
+class SKPGPipeline:
     def __init__(
         self,
         detector: FaceDetector,
@@ -123,7 +123,7 @@ class KfaarPipeline:
         use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
         return_frame_pairs: bool = False,
-    ) -> KfaarResult:
+    ) -> SKPGResult:
         device = self.device
         frames_t = self._to_sequence_tensor(frames, device=device)
         seq_len = frames_t.shape[0]
@@ -301,7 +301,7 @@ class KfaarPipeline:
         gen_mask_t = torch.tensor(gen_mask, device=device, dtype=torch.bool)
         valid_mask = input_mask_t & gen_mask_t
 
-        return KfaarResult(
+        return SKPGResult(
             detections=[], 
             aligned_faces=[aligned_faces[center_idx]],
             real_embeddings=real_emb[center_idx : center_idx + 1].detach(),
@@ -326,7 +326,7 @@ class KfaarPipeline:
         use_face_postprocessor: bool = False,
         swap_for_visuals_only: bool = True,
         return_frame_pairs: bool = False,
-    ) -> KfaarResult:
+    ) -> SKPGResult:
         with torch.no_grad():
             return self.forward(
                 frames,

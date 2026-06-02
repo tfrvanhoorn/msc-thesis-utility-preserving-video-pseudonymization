@@ -35,7 +35,7 @@ from config import (  # noqa: E402
     ProjectorConfig,
     SeedConfig,
 )
-from pipeline.factory import build_kfaar_pipeline  # noqa: E402
+from pipeline.factory import build_skpg_pipeline  # noqa: E402
 from components import (  # noqa: E402
     load_stylegan2,
     load_projector_state_dict,
@@ -227,7 +227,7 @@ def _build_output_path(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run KFAAR inference on prepared videos and export inferred MP4 videos")
+    parser = argparse.ArgumentParser(description="Run SKPG inference on prepared videos and export inferred MP4 videos")
 
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to a trained projector checkpoint (.pt)")
 
@@ -510,7 +510,7 @@ def main() -> None:
 
     logging.info("Loading StyleGAN2 from %s...", args.stylegan_ckpt)
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
-    pipeline = build_kfaar_pipeline(
+    pipeline = build_skpg_pipeline(
         cfg,
         stylegan=stylegan,
         device=device,

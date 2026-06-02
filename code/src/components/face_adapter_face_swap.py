@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class FaceAdapterFaceSwap(FaceAdapterRuntime):
-    """FaceAdapter-backed face swapper for aligned KFAAR face crops.
+    """FaceAdapter-backed face swapper for aligned SKPG face crops.
 
     Inputs are aligned face tensors in CHW format and range [-1, 1] or [0, 1].
     Output is a swapped aligned target tensor in [0, 1] or None on failure.

@@ -25,7 +25,7 @@ if str(SRC_ROOT) not in sys.path:
 if str(EXTERNAL_LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(EXTERNAL_LIB_ROOT))
 
-from trainer import KfaarTrainer
+from trainer import SKPGTrainer
 from config import (
     DataConfig,
     DetectorConfig,
@@ -34,7 +34,7 @@ from config import (
     ProjectorConfig,
     SeedConfig,
 )
-from pipeline.factory import build_kfaar_pipeline
+from pipeline.factory import build_skpg_pipeline
 from components import (
     load_stylegan2,
     load_projector_state_dict,
@@ -47,7 +47,7 @@ from data.prepared import DEFAULT_PREPARED_REGEX, collect_prepared_images, compi
 from utils.logging import configure_logging
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train the KFAAR Projector for Face Pseudonymization")
+    parser = argparse.ArgumentParser(description="Train the SKPG Projector for Face Pseudonymization")
 
     # Path Arguments
     parser.add_argument("--input_dir", type=Path, default=PROJECT_ROOT / "data" / "prepared_celeba", help="Path to prepared input images root")
@@ -61,7 +61,7 @@ def parse_args():
     parser.add_argument("--key_dim", type=int, default=128, help="Dimension of the pseudonymization key")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for the projector")
     
-    # Loss Weights (The KFAAR Lambda parameters)
+    # Loss Weights (The SKPG lambda parameters)
     parser.add_argument("--lambda_ano", type=float, default=0.4, help="Weight for Anonymity loss")
     parser.add_argument("--lambda_syn", type=float, default=1.0, help="Weight for Synchronism loss")
     parser.add_argument("--lambda_div", type=float, default=1.0, help="Weight for Diversity loss")
@@ -304,7 +304,7 @@ def main():
     # 3. Initialize Pipeline Components
     logging.info(f"Loading StyleGAN2 from {args.stylegan_ckpt}...")
     stylegan = load_stylegan2(ckpt_path=args.stylegan_ckpt, device=device)
-    pipeline = build_kfaar_pipeline(
+    pipeline = build_skpg_pipeline(
         cfg,
         stylegan=stylegan,
         device=device,
@@ -327,7 +327,7 @@ def main():
     # 4. Initialize and Run Trainer
     use_postprocessor_flag = face_postprocessor is not None
 
-    trainer = KfaarTrainer(
+    trainer = SKPGTrainer(
         pipeline=pipeline,
         train_loader=train_loader,
         val_loader=val_loader,

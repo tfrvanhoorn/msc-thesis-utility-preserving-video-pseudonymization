@@ -13,16 +13,16 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from pipeline import KfaarPipeline
+from pipeline import SKPGPipeline
 from utils.keys import sample_binary_key
 
 
-class KfaarTrainer:
-    """Lightweight trainer for the KFAAR pipeline projector."""
+class SKPGTrainer:
+    """Lightweight trainer for the SKPG pipeline projector."""
 
     def __init__(
         self,
-        pipeline: KfaarPipeline,
+        pipeline: SKPGPipeline,
         train_loader: DataLoader,
         val_loader: DataLoader | None = None,
         *,
@@ -117,7 +117,7 @@ class KfaarTrainer:
             )
 
     def train(self) -> None:
-        logging.info("Starting KFAAR training for %s epochs", self.epochs)
+        logging.info("Starting SKPG training for %s epochs", self.epochs)
 
         for epoch in range(self.start_epoch, self.epochs):
             self.pipeline.projector.train()
@@ -213,7 +213,7 @@ class KfaarTrainer:
 
     def save_checkpoint(self, epoch: int, loss: float, val_metrics: dict[str, float] | None = None) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        base = f"{timestamp}_kfaar_projector_epoch_{epoch + 1}"
+        base = f"{timestamp}_skpg_projector_epoch_{epoch + 1}"
         path = self.checkpoint_dir / f"{base}.pt"
         torch.save(
             {
@@ -374,7 +374,7 @@ class KfaarTrainer:
             if len(batch) >= 3:
                 seq_lens = batch[2]
         else:
-            raise TypeError("Unsupported batch format for KfaarTrainer")
+            raise TypeError("Unsupported batch format for SKPGTrainer")
 
         if labels is None:
             raise ValueError("Batch is missing labels for training")

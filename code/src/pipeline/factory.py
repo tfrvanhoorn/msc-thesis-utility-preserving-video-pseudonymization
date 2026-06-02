@@ -10,17 +10,17 @@ from components import (
 )
 from components.alignment import MTCNNAligner
 from config import PipelineConfig
-from .kfaar_pipeline import KfaarPipeline
+from .skpg_pipeline import SKPGPipeline
 from components import StyleGAN2Generator
 
 
-def build_kfaar_pipeline(
+def build_skpg_pipeline(
     config: PipelineConfig,
     stylegan: StyleGAN2Generator | None = None,
     device: str | torch.device | None = None,
     truncation_psi: float = 0.5,
     face_postprocessor: object | None = None,
-) -> KfaarPipeline:
+) -> SKPGPipeline:
     target_device = _resolve_device(config, device)
 
     detector = MTCNNDetector(
@@ -55,7 +55,7 @@ def build_kfaar_pipeline(
             stylegan.mapping = stylegan._G.mapping
             stylegan.synthesis = stylegan._G.synthesis
 
-    return KfaarPipeline(
+    return SKPGPipeline(
         detector=detector,
         aligner=aligner,
         embedder=embedder,

@@ -29,7 +29,10 @@ import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
-JSON_GLOB = "*_kfaar_projector_epoch_*.json"
+JSON_GLOBS = (
+    "*_skpg_projector_epoch_*.json",
+    "*_kfaar_projector_epoch_*.json",
+)
 
 
 @dataclass(frozen=True)
@@ -57,9 +60,10 @@ def _load_json(path: Path) -> dict:
 
 
 def _collect_run_loss_data(input_dir: Path, label: str) -> RunLossData:
-    json_paths = sorted(input_dir.glob(JSON_GLOB))
+    json_paths = sorted({path for pattern in JSON_GLOBS for path in input_dir.glob(pattern)})
     if not json_paths:
-        raise FileNotFoundError(f"No JSON files matching {JSON_GLOB} in {input_dir}")
+        patterns = ", ".join(JSON_GLOBS)
+        raise FileNotFoundError(f"No JSON files matching {patterns} in {input_dir}")
 
     components_by_epoch: dict[int, dict[str, float]] = {}
     weighted_by_epoch: dict[int, dict[str, float]] = {}

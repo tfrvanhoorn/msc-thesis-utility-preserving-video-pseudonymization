@@ -2,7 +2,7 @@
 
 This repository accompanies the master's thesis "Preserving Video Utility via Consistent Subject- and Key derived Pseudonyms combined with Face Swapping" and documents the engineering workflow for the proposed SKPG-Swap framework.
 
-SKPG (Subject- and Key-derived Pseudonym Generator) is the trainable component. In this codebase it is primarily implemented as the KFAAR projector, so some pipeline naming predates the final thesis name.
+SKPG (Subject- and Key-derived Pseudonym Generator) is the trainable component. In this codebase it is primarily implemented as the SKPG projector.
 
 In the thesis experiments, SKPG-BB and SKPG-Reenact use the same trained pipeline with different inference rendering modes: `crop_bbox` and `faceadapter_reenactment`. The proposed SKPG-Swap method uses `faceadapter_swap`.
 
@@ -11,7 +11,7 @@ The `thesis/` folder is kept for reference only. The actual writing assets were 
 This repository contains the full engineering workflow for utility-preserving face pseudonymization in video:
 
 1. Prepare datasets into a canonical naming contract.
-2. Train the KFAAR projector model.
+2. Train the SKPG projector model.
 3. Run inference to generate anonymized videos (optionally with postprocessing for visuals).
 4. Evaluate anonymization, synchronism, diversity, differentiation, detection, and perceptual utility.
 5. Run downstream utility checks: action recognition and emotion recognition.
@@ -139,7 +139,7 @@ apptainer exec --nv cuda11.8.sif python ./code/src/dataset_utils.py \
 	--max_videos_per_id 50
 ```
 
-## Training (KFAAR Projector)
+## Training (SKPG Projector)
 
 Entry point: `code/src/training.py`
 

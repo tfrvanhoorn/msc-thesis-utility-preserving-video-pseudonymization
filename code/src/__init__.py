@@ -1,4 +1,4 @@
-from .pipeline import KfaarPipeline, KfaarResult, build_kfaar_pipeline
+from .pipeline import SKPGPipeline, SKPGResult, build_skpg_pipeline
 from .components import (
     ArcFaceEmbedder,
     FaceAligner,
@@ -27,13 +27,13 @@ from .config import (
     FeatureSelectorConfig,
     SeedConfig,
 )
-from .trainer import KfaarTrainer
+from .trainer import SKPGTrainer
 from .data import ImageSample, build_dataset, iter_samples, load_image
 
 __all__ = [
-    "KfaarPipeline",
-    "KfaarResult",
-    "build_kfaar_pipeline",
+    "SKPGPipeline",
+    "SKPGResult",
+    "build_skpg_pipeline",
     "FaceAligner",
     "MTCNNAligner",
     "FaceDetector",
@@ -56,7 +56,7 @@ __all__ = [
     "PipelineConfig",
     "FeatureSelectorConfig",
     "SeedConfig",
-    "KfaarTrainer",
+    "SKPGTrainer",
     "ImageSample",
     "build_dataset",
     "iter_samples",

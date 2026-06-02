@@ -13,7 +13,7 @@ class SimSwapFaceSwapper:
     """Lightweight wrapper to run SimSwap for single-image swapping.
 
     This version bypasses SimSwap's native InsightFace detector and assumes the 
-    inputs (source and target) are already aligned by the KFAAR pipeline. 
+    inputs (source and target) are already aligned by the SKPG pipeline. 
     It dynamically pads non-square inputs to preserve aspect ratios.
     """
 
@@ -26,7 +26,7 @@ class SimSwapFaceSwapper:
         arcface_ckpt: Path,
         crop_size: int = 512,
         device: torch.device | str = "cuda:0",
-        **kwargs  # Catches legacy KFAAR args
+        **kwargs  # Catches legacy SKPG args
     ) -> None:
         if not torch.cuda.is_available():
             raise RuntimeError("SimSwap requires CUDA but torch.cuda.is_available() is False")
